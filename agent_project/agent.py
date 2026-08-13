@@ -1899,11 +1899,13 @@ class OpenMythosAgent:
         if stream_callback:
             # fast path 的 content 先缓冲、清洗后再平滑重放:
             # 模型常把 <thinking> 或答案片段混进 content/reasoning, 直接实时透出会产生
-            # "的，你好"/尾部回声等多余内容。这里只实时透出 reasoning/工具事件,
-            # content 由清洗后的最终答案统一平滑输出。
+            # "的，你好"/尾部回声等多余内容。
+            # 这里只透出工具/状态事件; reasoning(思考过程)默认不实时显示,
+            # 仅在交互式深度思考(非简单问答)时透出, 保证简洁输出。
             def _buffer_user_cb(kind, text):
-                if kind != 'content':
+                if kind in ('tool_call', 'tool_result', 'status', 'error'):
                     stream_callback(kind, text)
+                # 'reasoning' 与 'content' 都不实时透出, 由最终清洗后的答案统一重放
 
             router = self._create_stream_router(_buffer_user_cb, reasoning_parts, content_parts)
             internal_callback = router.on_token
