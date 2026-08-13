@@ -487,9 +487,21 @@ class ReasoningEngine:
             "synthesize", "design", "optimize", "implement", "deploy",
             "research", "investigate", "critique", "evaluate",
         ]
+        # 中文复杂任务关键词
+        cn_complex_keywords = [
+            "分析", "剖析", "解析", "比较", "对比", "评估", "评价",
+            "设计", "实现", "开发", "优化", "重构", "调试", "修复",
+            "研究", "调研", "综合", "总结", "推导", "计算", "规划",
+            "构建", "编写", "测试", "部署", "撰写", "归纳",
+        ]
         task_lower = task.lower()
         matches = sum(1 for kw in complex_keywords if kw in task_lower)
+        cn_matches = sum(1 for kw in cn_complex_keywords if kw in task)
+        # 中文长句(>40字)也视为复杂
+        if len(task) > 40:
+            complexity += 0.15
         complexity += min(matches * 0.1, 0.4)
-        if any(word in task_lower for word in ["search", "find", "lookup", "file", "api", "web"]):
+        complexity += min(cn_matches * 0.1, 0.4)
+        if any(word in task_lower for word in ["search", "find", "lookup", "file", "api", "web", "项目", "文件夹", "代码", "数据库", "文件"]):
             complexity += 0.2
         return min(complexity, 1.0)
