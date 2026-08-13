@@ -192,3 +192,43 @@ def test_unified_tool_parser_all_formats():
         assert len(r) == 1, f"{name}: 应解析出 1 个, 实际 {r}"
         assert r[0].tool_name == tool, f"{name}: 工具名错误 {r[0].tool_name}"
         assert r[0].arguments.get("command") == arg_val, f"{name}: 参数错误 {r[0].arguments}"
+
+
+def test_tool_parser_handles_chinese_quotes_in_json():
+    """content 里含中文引号/markdown反引号时, TOOL 调用应能正确解析并写入."""
+    from agent_project.policies import ToolCallParser
+    from agent_project.tools import TOOLS_REGISTRY
+
+    # 中文引号 + markdown 反引号混合
+    out = (
+        '[TOOL:file_ops] {"action": "write", "path": "lv/test.md", '
+        '"content": "希望 AI 能“记住自己”的用户\\n使用 `hermes` 命令"} [/TOOL]'
+    )
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个, 实际 {calls}"
+    assert calls[0][0] == "file_ops"
+    args = calls[0][1]
+    assert args.get("action") == "write"
+    assert "记住自己" in args.get("content", ""), "中文引号应保留在 content 里"
+    assert "`hermes`" in args.get("content", ""), "markdown 反引号应保留"
+
+    # 反引号包 JSON 键
+    out2 = '[TOOL:file_ops] {`action`: `write`, `path`: `lv/x.md`, `content`: `test`} [/TOOL]'
+    calls2 = ToolCallParser.parse_all(out2)
+    assert len(calls2) == 1 and calls2[0][1].get("action") == "write"
+
+    # 完整长内容(类似真实场景)能真正写入
+    import tempfile, os
+    out3 = (
+        '[TOOL:file_ops] {"action": "write", "path": "P", '
+        '"content": "Hermes Agent 使用说明\\n\\n**核心特点:**\\n- 持久记忆“记住自己”\\n- 使用 `hermes` 命令\\n"} [/TOOL]'
+    )
+    calls3 = ToolCallParser.parse_all(out3)
+    assert calls3, f"长内容应能解析: {calls3}"
+    tool = TOOLS_REGISTRY.get("file_ops")
+    td = tempfile.mkdtemp()
+    args3 = dict(calls3[0][1])
+    args3["path"] = os.path.join(td, "hermes.md")
+    r = tool.execute(**args3)
+    assert r.success, f"应能实际写入: {r.error}"
+    assert os.path.exists(args3["path"])
