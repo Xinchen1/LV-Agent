@@ -1835,8 +1835,12 @@ class OpenMythosAgent:
         # involving search results, code, or multi-sentence answers needs more room.
         fast_max_tokens = 512
         task_lower = task.lower()
+        # 记忆召回类问题(昨天/上次/之前聊了什么)需要列出多个话题, 需要更多空间
+        _memory_recall = bool(re.search(r'(昨天|上次|之前|刚才|还记得|我们聊|话题|对话历史)', task))
         if any(k in task_lower for k in ['搜索', '搜', '查找', '查', 'report', '报告', '总结', '分析', '写', '代码', 'code']):
             fast_max_tokens = 4096
+        elif _memory_recall:
+            fast_max_tokens = 2048
         elif len(task) > 40 or '?' in task or '？' in task:
             fast_max_tokens = 2048
 
