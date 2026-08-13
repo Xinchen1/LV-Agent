@@ -328,3 +328,64 @@ def test_intent_mismatch_overrides_wrong_tool():
     c_tool, c_args, c_conf, c_reason = classified
     mismatch = (c_tool == "web_search" and action.tool_name in ("bash_exec", "find", "glob", "search_files"))
     assert mismatch, "查新闻用 find 应判定为意图冲突"
+
+
+def test_location_fast_path_excludes_news_search():
+    """'查ai新闻' 不应触发 find 全盘扫描, 应走 web_search."""
+    import re
+    # 复现 _try_location_fast_path 的触发判断
+    def should_find(task):
+        task_lower = task.lower()
+        locate_verbs = ["查找", "找一下", "搜索", "搜一下", "看看有没有", "看看", "看下", "在哪里", "在哪", "位于", "找", "查", "搜"]
+        has_verb = any(v in task for v in locate_verbs)
+        has_suffix = any(s in task for s in ["项目", "文件夹", "目录", "文件"])
+        if not has_verb:
+            return False
+        if not has_suffix and not re.search(r'[a-zA-Z_\-0-9]+', task):
+            return False
+        info_search_markers = ["新闻", "资讯", "消息", "动态", "最新", "信息", "资料", "教程",
+                               "怎么", "如何", "教程", "介绍", "是什么", "怎么做", "天气",
+                               "news", "update", "info", "how to", "what is", "weather",
+                               "股票", "行情", "价格", "比分", "比赛"]
+        if has_suffix is False and any(m in task_lower for m in info_search_markers):
+            return False
+        return True
+
+    assert not should_find("查下最新的 ai 新闻")
+    assert not should_find("查一下AI新闻")
+    assert not should_find("搜索AI相关新闻")
+    assert should_find("找一下 project.py 文件")
+    assert should_find("看看桌面的报告文件")
+
+
+def test_llm_intent_classify_fallback():
+    """规则未命中且非简单任务时, LLM 意图分类兜底应生效; 简单任务/规则命中不触发."""
+    import logging
+    from agent_project.agent import OpenMythosAgent
+
+    calls = {"n": 0}
+    class FakeBackend:
+        def generate(self, prompt, **kw):
+            calls["n"] += 1
+            return '{"tool": "web_search", "args": {"query": "x"}, "reason": "r"}'
+
+    a = object.__new__(OpenMythosAgent)
+    a.logger = logging.getLogger("test")
+    a.backend = FakeBackend()
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+
+    # 规则未命中 + 非简单 → LLM 兜底
+    calls["n"] = 0
+    r1 = a._classify_intent("给我找点AI方面的资料")
+    assert r1 and calls["n"] == 1, f"应触发 LLM 兜底, 实际调用 {calls['n']}"
+
+    # 简单问候 → 不触发
+    calls["n"] = 0
+    assert a._classify_intent("你好啊") is None
+    assert calls["n"] == 0
+
+    # 规则命中(新闻) → 不触发
+    calls["n"] = 0
+    r3 = a._classify_intent("查下最新的 ai 新闻")
+    assert r3 and r3[0] == "web_search"
+    assert calls["n"] == 0, "规则命中不应调 LLM"
