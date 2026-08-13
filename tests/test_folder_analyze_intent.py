@@ -112,3 +112,46 @@ def test_read_folder_markdown_is_instance_method():
         assert out == "" or isinstance(out, str)
     except TypeError as e:
         assert False, f"实例调用 _read_folder_markdown 报错: {e}"
+
+
+def test_tool_call_parser_json_string_action():
+    """policies.ToolCallParser 应支持 action 字符串 + 同级 args 的 JSON 格式."""
+    from agent_project.policies import ToolCallParser
+
+    # 用户实际场景: {thoughts, action: "bash_exec", args: {...}}
+    out = (
+        '{\n  "thoughts": "create folder",\n'
+        '  "action": "bash_exec",\n'
+        '  "args": {"command": "mkdir snake_game"}\n}'
+    )
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个工具调用, 实际 {calls}"
+    assert calls[0][0] == "bash_exec"
+    assert calls[0][1].get("command") == "mkdir snake_game"
+
+    # reasoning + action + arguments 变体
+    out2 = (
+        '{\n  "reasoning": "list dir",\n'
+        '  "action": "file_ops",\n'
+        '  "arguments": {"action": "list", "path": "."}\n}'
+    )
+    calls2 = ToolCallParser.parse_all(out2)
+    assert len(calls2) == 1
+    assert calls2[0][0] == "file_ops"
+    assert calls2[0][1]["path"] == "."
+
+
+def test_tool_call_parser_json_tool_calls_array():
+    """policies.ToolCallParser 应支持 tool_calls 数组内 action 字符串格式."""
+    from agent_project.policies import ToolCallParser
+
+    out = (
+        '{\n  "thoughts": "locate",\n'
+        '  "tool_calls": [\n'
+        '    {"action": "bash_exec", "args": {"command": "ls"}}\n'
+        "  ]\n}"
+    )
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个工具调用, 实际 {calls}"
+    assert calls[0][0] == "bash_exec"
+    assert calls[0][1].get("command") == "ls"
