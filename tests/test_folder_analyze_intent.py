@@ -255,3 +255,34 @@ def test_tool_parser_list_prefixed_unclosed():
 
     # 行首无前缀仍正常
     assert len(ToolCallParser.parse_all('[TOOL:web_search] {"query": "hermes"}')) == 1
+
+
+def test_tool_parser_full_matrix_case_insensitive():
+    """解析器应覆盖全部格式 + 大小写不敏感, 工具调用绝不漏解析."""
+    from agent_project.policies import ToolCallParser
+
+    cases = {
+        "TOOL闭合标准": '[TOOL:bash_exec] {"command": "ls"} [/TOOL]',
+        "TOOL闭合中文引号": '[TOOL:file_ops] {"action": "write", "path": "a.md", "content": "记住“自己”"} [/TOOL]',
+        "TOOL闭合大小写": '[TOOL:File_Ops] {"action": "list", "path": "."} [/TOOL]',
+        "TOOL未闭合列表前缀": '- [TOOL:web_search] {"query": "hermes"}',
+        "TOOL未闭合数字": '1. [TOOL:bash_exec] {"command": "ls"}',
+        "TOOL未闭合带think": '<think>x</think>\n[TOOL:bash_exec] {"command": "ls"}',
+        "JSON action字符串": '{"action": "bash_exec", "args": {"command": "ls"}}',
+        "JSON tool_calls数组": '{"tool_calls": [{"action": "bash_exec", "args": {"command": "ls"}}]}',
+        "JSON 大写": '{"action": "BASH_EXEC", "args": {"command": "ls"}}',
+        "JSON 带think": '<think>t</think> {"action": "bash_exec", "args": {"command": "ls"}}',
+        "函数 单字符串": 'bash_exec("ls -la")',
+        "函数 key=value": 'file_ops(action="list", path=".")',
+        "函数 大写": 'BASH_EXEC("ls")',
+        "函数 带think": '<think>t</think>\nfile_ops(action="list", path=".")',
+        "XML": '<tool_call><function=bash_exec><parameter=command>ls</parameter></function></tool_call>',
+        "XML 大写": '<tool_call><function=BASH_EXEC><parameter=command>ls</parameter></function></tool_call>',
+        "XML 带think": '<think>t</think>\n<tool_call><function=bash_exec><parameter=command>ls</parameter></function></tool_call>',
+        "OpenCode": '<|message_model|>bash_exec<|content_invoke_tool_json|>{"args":{"command":"ls"}}<|end_message|>',
+        "OpenCode 大写": '<|message_model|>BASH_EXEC<|content_invoke_tool_json|>{"args":{"command":"ls"}}<|end_message|>',
+        "混合多工具": '<think>计划</think>\n- [TOOL:web_search] {"query": "hermes"}\n- [TOOL:bash_exec] {"command": "ls lv"}',
+    }
+    for name, out in cases.items():
+        r = ToolCallParser.parse_all(out)
+        assert r, f"{name}: 工具调用被漏解析! 输出={out[:80]}"
