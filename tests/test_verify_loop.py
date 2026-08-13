@@ -159,3 +159,30 @@ def test_task_complexity_estimation_chinese():
     # 中文重构关键词
     c = ReasoningEngine._estimate_task_complexity("帮我重构一下这个项目的代码,优化性能并编写单元测试")
     assert c > 0.3, f"中文重构任务应有较高复杂度: {c}"
+
+
+def test_file_modify_intent_routes_to_main_loop():
+    """'给XX加功能'等修改意图应走主循环(simple=False)并识别为 file_ops 操作."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+
+    # 修改意图 → 不走 fast path
+    for t in [
+        "给贪吃蛇加一个变速功能",
+        "给贪食蛇加入变速功能",
+        "修改一下 snake_game.py",
+        "在游戏里加音效",
+    ]:
+        assert not a._is_simple_query(t), f"{t!r} 不应走 fast path"
+        cls = a._classify_intent(t)
+        assert cls is not None, f"{t!r} 应被意图分类"
+        assert cls[0] == "file_ops", f"{t!r} 应识别为 file_ops, 实际 {cls[0]}"
+
+    # 带文件名 → 应 read 目标文件
+    cls = a._classify_intent("修改一下 snake_game.py")
+    assert cls[1].get("path") == "snake_game.py"
+    assert cls[1].get("action") == "read"
+
+    # 问候仍走 fast path
+    assert a._is_simple_query("你好")

@@ -855,9 +855,20 @@ class OpenMythosAgent:
         task = task.strip()
         task_lower = task.lower()
 
-        # 1) 空输入直接 fast
+        # 0) 空输入直接 fast
         if not task:
             return True
+
+        # 0.5) 修改/优化文件意图 → deep (需走主循环执行 read→apply_diff→verify)
+        # "给XX加功能""修改XX文件""在XX里加YY" 等必须真正改动文件, 不能 fast 单次回答
+        _mod_verbs = ("加", "加上", "加入", "添加", "增加", "修改", "改", "更新", "优化",
+                      "完善", "改进", "增强", "重构", "修复", "调整", "删除", "去除",
+                      "add", "modify", "update", "improve", "optimize", "refactor", "fix")
+        if any(v in task for v in _mod_verbs) and any(
+            k in task for k in ("功能", "特性", "文件", "代码", "程序", "脚本", "游戏", "项目", "音效",
+                                ".py", ".js", ".ts", ".md", ".txt", "snake", "贪吃", "贪食")
+        ):
+            return False
 
         # 2) 纯问候/礼貌/确认 → 先于关键词检查匹配,避免被误判为需要工具
         simple_patterns = [
@@ -991,6 +1002,27 @@ class OpenMythosAgent:
             return ("bash_exec", {}, 0.85, "detected shell-command intent")
         if any(k in tl for k in ("找到", "查找文件", "找一下", "文件在哪里", "定位", "where is", "which file", "find the", "找找")):
             return ("glob", {}, 0.8, "detected file-find intent")
+
+        # -0.3) 修改/优化现有文件意图 → 先 read 目标文件(让模型看到内容后真正修改)
+        # 如"给贪吃蛇加变速""修改 snake_game.py""在游戏里加音效"
+        mod_verbs = ("加", "加上", "加入", "添加", "增加", "修改", "改", "更新", "优化", "完善", "改进", "增强",
+                     "重构", "修复", "调整", "删除", "去除", "add", "modify", "update", "improve", "optimize",
+                     "enhance", "refactor", "fix", "change", "edit")
+        has_mod_verb = any(v in task for v in mod_verbs)
+        # 目标文件: 提取 .py/.js/.md 等文件名, 或"给XX"/"在XX里" 的 XX
+        target = None
+        m = re.search(r'([\w\u4e00-\u9fff\-\.\/]{1,80}\.(?:py|js|ts|md|txt|json|yaml|yml|sh|html|css|c|cpp|rs|go|java))', task)
+        if m:
+            target = m.group(1)
+        if target is None:
+            m = re.search(r'(给|对|在|把)\s*([\w\u4e00-\u9fff\-\.]{1,40}?)(?:这个|那个)?(?:文件|代码|程序|项目|脚本|游戏|软件)', task)
+            if m:
+                target = m.group(2)
+        if target is None and has_mod_verb:
+            # "加功能/加音效/优化" 等无明确目标的修改意图 → 注入 file_ops read 当前目录(让模型找目标文件)
+            return ("file_ops", {"action": "list", "path": "."}, 0.75, "detected file-modify intent (locate target first)")
+        if has_mod_verb and target and len(target) <= 60:
+            return ("file_ops", {"action": "read", "path": target}, 0.8, "detected file-modify intent (read target first)")
 
         # 1) 计算意图: 含算式模式(数字+运算符) → calculator
         if re.search(r'\d[\d\s]*[+\-*/^%]\s*\d', t):
@@ -1738,6 +1770,7 @@ class OpenMythosAgent:
             "- READING A FILE: 用户说'看/读/打开/查看 X文件/我的XX'时, 先确定文件路径(用 glob 或 file_ops 定向查找, 不要全盘 find), 然后 read 文件内容并基于内容回答。绝不能只列出路径不读内容。",
             "- FINDING FILES: 用 glob(pattern, path) 定向查找, 不要用 bash find 全盘扫描(会刷屏权限错误)。只在用户明确要求全盘搜索时才用 bash find, 并加 2>/dev/null 屏蔽权限报错。",
             "- CREATING FILES/ARTICLES: 用户说'新建/创建/写一篇/保存一篇文章/把XX放进去'时, 必须直接调用 file_ops(action='write', path='<当前目录/文件名.md>', content='<完整内容>') 真正创建文件。写完用 file_ops(action='read', path=...) 验证内容已写入。绝不能只 list 目录或只说'好的'而不实际 write。",
+            "- MODIFYING FILES: 用户说'给XX加功能/改一下/修改/更新/优化XX'时, 必须先 read 目标文件, 然后直接调用 file_ops(action='apply_diff', path=..., diff='<<<<<<< SEARCH\n原文\n=======\n新文\n>>>>>>> REPLACE') 或 file_ops(action='write', path=..., content='完整新内容') 真正修改文件。修改后 read 验证。绝不能只描述'应该怎么改'而不实际执行修改。",
             "- Final answer must be in concise, natural Chinese (do not repeat tool result verbatim unless asked).",
             "- 最终完成时, 用大白话/通俗易懂的话总结结论或结果(像跟朋友解释一样, 不用术语堆砌, 让非技术的人也能听懂你做了什么、得到什么)。",
         ]
