@@ -46,7 +46,8 @@ LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循
 ### 1. Install
 
 ```bash
-cd agent_project
+git clone https://github.com/Xinchen1/LV-Agent.git
+cd LV-Agent
 python -m venv .venv
 source .venv/bin/activate    # macOS/Linux
 pip install -e .
@@ -63,10 +64,14 @@ export NIM_API_KEY="your_key_here"
 ### 3. Run
 
 ```bash
-python super_agent.py        # interactive CLI (recommended)
+lv                      # global launcher: type "lv" to start from any directory
+# or
+python super_agent.py   # interactive CLI
 # or
 python -m agent_project --task "Your task"
 ```
+
+> **Tip**: add the repo to your `PATH` (or symlink `lv` into `/usr/local/bin`) so you can just type `lv` anywhere to launch.
 
 ## Usage
 
