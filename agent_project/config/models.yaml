@@ -125,29 +125,29 @@ models:
             max_tokens: 8192
             recommended_for: ["deep_analysis", "reasoning"]
 
-  # ===== NIM 格式（NVIDIA 兼容 /v1/chat/completions）=====
-  nim_compatible:
-    label: "NVIDIA NIM 格式"
-    description: "NVIDIA NIM 兼容端点，使用 OpenAI Chat 格式但通过 NVIDIA 代理"
+  # ===== DeepSeek 格式（OpenAI 兼容 /v1/chat/completions）=====
+  deepseek:
+    label: "DeepSeek 官方 API"
+    description: "DeepSeek 官方 API，OpenAI Chat 兼容格式"
     format: "openai_chat"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NIM_API_KEY"
+    base_url: "https://api.deepseek.com"
+    api_key_env: "DEEPSEEK_API_KEY"
     model_list:
-      - id: "nim-gemma-3"
-        name: "NVIDIA Gemma 3 (NIM)"
-        model_name: "google/gemma-3-27b-it"
-        description: "NVIDIA NIM 托管的 Gemma 3 官方模型"
-        max_tokens: 4096
+      - id: "deepseek-chat"
+        name: "DeepSeek Chat"
+        model_name: "deepseek-chat"
+        description: "DeepSeek 通用对话模型"
+        max_tokens: 8192
         recommended_for: ["agent", "chat"]
-      - id: "nim-llama-4"
-        name: "NVIDIA Llama 4 (NIM)"
-        model_name: "meta/llama-4-405b-instruct"
-        description: "NIM 托管的大型 Llama 4"
+      - id: "deepseek-reasoner"
+        name: "DeepSeek Reasoner"
+        model_name: "deepseek-reasoner"
+        description: "DeepSeek 深度推理模型"
         max_tokens: 8192
         recommended_for: ["agent", "reasoning"]
 
 # 流程说明：
-# 1. 用户在 config.yaml 中设置 backend: openai / anthropic / nim
+# 1. 用户在 config.yaml 中设置 backend: openai / anthropic / deepseek
 # 2. 根据 backend 自动匹配对应的 base_url 和格式
 # 3. 用户通过 model 注册表选择具体模型（id 或 model_name）
 # 4. 后端初始化时自动应用正确的格式（openai_chat / anthropic_messages）

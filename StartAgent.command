@@ -64,17 +64,17 @@ fi
 # Verify config exists
 if [ ! -f "config.yaml" ]; then
  echo -e "${YELLOW}⚠ No config.yaml found${NC}"
- echo "Creating a starter config for NVIDIA NIM."
+ echo "Creating a starter config for DeepSeek."
  "$VENV_PYTHON" - <<'PYCONF'
 import yaml
 from pathlib import Path
 cfg = {
   'agent': {
-    'backend': 'nim',
-    'nim': {
+    'backend': 'deepseek',
+    'deepseek': {
       'api_key': '',
-      'base_url': 'https://integrate.api.nvidia.com/v1',
-      'model': 'google/gemma-4-31b-it',
+      'base_url': 'https://api.deepseek.com',
+      'model': 'deepseek-chat',
       'temperature': 0.7,
       'max_tokens': 4096,
     },
@@ -170,69 +170,69 @@ except Exception:
   print('openai')
 " 2>/dev/null)
 
-# Ensure NIM API is configured when backend is nim
-if [ "$BACKEND" = "nim" ]; then
-  NIM_KEY=$("$VENV_PYTHON" -c "
+# Ensure DeepSeek API is configured when backend is deepseek
+if [ "$BACKEND" = "deepseek" ]; then
+  DS_KEY=$("$VENV_PYTHON" -c "
 import yaml
 try:
   with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
-    print(cfg.get('agent', {}).get('nim', {}).get('api_key', ''))
+    print(cfg.get('agent', {}).get('deepseek', {}).get('api_key', ''))
 except Exception:
   print('')
 " 2>/dev/null)
-  NIM_MODEL=$("$VENV_PYTHON" -c "
+  DS_MODEL=$("$VENV_PYTHON" -c "
 import yaml
 try:
   with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
-    print((cfg.get('agent', {}).get('nim', {}).get('model')) or '')
+    print((cfg.get('agent', {}).get('deepseek', {}).get('model')) or '')
 except Exception:
   print('')
 " 2>/dev/null)
 
-  if [ -z "$NIM_KEY" ] || [ -z "$NIM_MODEL" ]; then
-    echo -e "${YELLOW}⚠ NIM backend selected but API key or model is missing${NC}"
+  if [ -z "$DS_KEY" ] || [ -z "$DS_MODEL" ]; then
+    echo -e "${YELLOW}⚠ DeepSeek backend selected but API key or model is missing${NC}"
     echo ""
-    echo "Please provide your NVIDIA NIM API key:"
+    echo "Please provide your DeepSeek API key:"
     echo " 1) Paste from clipboard (macOS: cmd+V)"
     echo " 2) Type manually"
-    echo " 3) Use NIM_API_KEY environment variable"
+    echo " 3) Use DEEPSEEK_API_KEY environment variable"
     echo ""
-    read -p "Choice (1-3) or enter key directly: " nim_choice
+    read -p "Choice (1-3) or enter key directly: " ds_choice
 
-    if [[ "$nim_choice" == "1" ]]; then
+    if [[ "$ds_choice" == "1" ]]; then
       echo "Paste your API key and press Enter:"
-      read -r nim_key_input
-    elif [[ "$nim_choice" == "2" ]]; then
-      read -s -p "Enter your API key: " nim_key_input
+      read -r ds_key_input
+    elif [[ "$ds_choice" == "2" ]]; then
+      read -s -p "Enter your API key: " ds_key_input
       echo ""
-    elif [[ "$nim_choice" == "3" ]]; then
-      nim_key_input="${NIM_API_KEY}"
+    elif [[ "$ds_choice" == "3" ]]; then
+      ds_key_input="${DEEPSEEK_API_KEY}"
     else
-      nim_key_input="$nim_choice"
+      ds_key_input="$ds_choice"
     fi
 
-    if [ -z "$nim_key_input" ]; then
+    if [ -z "$ds_key_input" ]; then
       echo -e "${RED}❌ No API key provided${NC}"
       echo "Falling back to OpenAI backend for this session."
       BACKEND="openai"
     else
       echo ""
       echo "Select model to use:"
-      echo " 1) google/gemma-4-31b-it (Recommended)"
-      echo " 2) stepfun-ai/step-3.5-flash"
-      echo " 3) stepfun-ai/step-3.7"
-      echo " 4) meta/llama-3.1-405b-instruct"
+      echo " 1) deepseek-chat (Recommended)"
+      echo " 2) deepseek-reasoner"
+      echo " 3) deepseek-v4-flash"
+      echo " 4) deepseek-v4-pro"
       echo " 5) Custom..."
       read -p "Choice [1-5]: " model_choice
 
       case "$model_choice" in
-        2) nim_model_input="stepfun-ai/step-3.5-flash" ;;
-        3) nim_model_input="stepfun-ai/step-3.7" ;;
-        4) nim_model_input="meta/llama-3.1-405b-instruct" ;;
-        5) read -p "Enter model name: " nim_model_input ;;
-        *) nim_model_input="google/gemma-4-31b-it" ;;
+        2) ds_model_input="deepseek-reasoner" ;;
+        3) ds_model_input="deepseek-v4-flash" ;;
+        4) ds_model_input="deepseek-v4-pro" ;;
+        5) read -p "Enter model name: " ds_model_input ;;
+        *) ds_model_input="deepseek-chat" ;;
       esac
 tmpfile=$(mktemp)
 cat > "$tmpfile" <<'PYCONF'
@@ -243,24 +243,24 @@ path = Path('config.yaml')
 cfg = yaml.safe_load(path.read_text()) or {}
 if 'agent' not in cfg:
     cfg['agent'] = {}
-if 'nim' not in cfg['agent']:
-    cfg['agent']['nim'] = {}
-cfg['agent']['nim']['api_key'] = key
-cfg['agent']['nim']['model'] = model
-cfg['agent']['nim']['base_url'] = cfg['agent']['nim'].get('base_url', 'https://integrate.api.nvidia.com/v1')
-cfg['agent']['backend'] = 'nim'
+if 'deepseek' not in cfg['agent']:
+    cfg['agent']['deepseek'] = {}
+cfg['agent']['deepseek']['api_key'] = key
+cfg['agent']['deepseek']['model'] = model
+cfg['agent']['deepseek']['base_url'] = cfg['agent']['deepseek'].get('base_url', 'https://api.deepseek.com')
+cfg['agent']['backend'] = 'deepseek'
 path.write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
 PYCONF
-"$VENV_PYTHON" "$tmpfile" "$nim_key_input" "$nim_model_input" >/dev/null 2>&1
+"$VENV_PYTHON" "$tmpfile" "$ds_key_input" "$ds_model_input" >/dev/null 2>&1
 rm -f "$tmpfile"
 
-NIM_KEY="$nim_key_input"
-NIM_MODEL="$nim_model_input"
-      NIM_KEY="$nim_key_input"
-      NIM_MODEL="$nim_model_input"
-      echo -e "${GREEN}✓ NIM configuration saved${NC}"
-      echo " API Key: ********${nim_key_input: -4}"
-      echo " Model: $nim_model_input"
+DS_KEY="$ds_key_input"
+DS_MODEL="$ds_model_input"
+      DS_KEY="$ds_key_input"
+      DS_MODEL="$ds_model_input"
+      echo -e "${GREEN}✓ DeepSeek configuration saved${NC}"
+      echo " API Key: ********${ds_key_input: -4}"
+      echo " Model: $ds_model_input"
     fi
   fi
 fi
@@ -314,17 +314,17 @@ else
   echo -e "${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo "Backend: $BACKEND"
-  if [ "$BACKEND" = "nim" ]; then
+  if [ "$BACKEND" = "deepseek" ]; then
     MODEL=$("$VENV_PYTHON" -c "
 import yaml
 try:
   with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
-    print(cfg.get('agent', {}).get('nim', {}).get('model', 'unknown'))
+    print(cfg.get('agent', {}).get('deepseek', {}).get('model', 'unknown'))
 except Exception:
   print('unknown')
 " 2>/dev/null)
-    echo "Model: $MODEL (via NIM)"
+    echo "Model: $MODEL (via DeepSeek)"
   elif [ "$BACKEND" = "openai" ]; then
     MODEL=$("$VENV_PYTHON" -c "
 import yaml

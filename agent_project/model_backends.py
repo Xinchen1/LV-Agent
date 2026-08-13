@@ -1,6 +1,6 @@
 """
 Model Backend Support:
-- NIMBackend: NVIDIA NIM Cloud API
+- OpenAICompatBackend: OpenAI-compatible cloud API (OpenAI format)
 - OpenAIBackend: OpenAI-compatible endpoints (local or cloud)
 - DeepSeekBackend: Official DeepSeek API (OpenAI-compatible)
 - AnthropicBackend: Native Anthropic Messages API
@@ -53,23 +53,23 @@ def _extract_http_status(exc: Exception) -> Optional[int]:
     return None
 
 
-class NIMBackend:
+class OpenAICompatBackend:
 
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://integrate.api.nvidia.com/v1",
-        model: str = "stepfun-ai/step-3.7-flash",
+        base_url: str = "https://api.deepseek.com",
+        model: str = "deepseek-chat",
         temperature: float = 0.7,
         top_p: float = 0.9,
         max_tokens: int = 4096,
         timeout: int = 120,
     ):
         """
-        初始化NIM后端
+        初始化OpenAI兼容后端
 
         Args:
-            api_key: NIM API key
+            api_key: API key
             base_url: API base URL
             model: 模型名称
             temperature: 采样温度
@@ -87,7 +87,7 @@ class NIMBackend:
         # 延迟创建 requests.Session,避免初始化依赖
         self._session = None
 
-        print(_style("  NIM backend", "2"))
+        print(_style("  OpenAI-compatible backend", "2"))
         print(f"    {_style('model', '2')} {model}")
         print(f"    {_style('url', '2')}   {base_url}")
 
@@ -99,7 +99,7 @@ class NIMBackend:
         return self._session
 
     def _post_chat(self, payload: Dict[str, Any], stream: bool) -> requests.Response:
-        """POST 到 NVIDIA chat/completions 端点(requests 直连)"""
+        """POST 到 chat/completions 端点(requests 直连)"""
         url = self.base_url.rstrip("/") + "/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -107,7 +107,7 @@ class NIMBackend:
             "Content-Type": "application/json",
         }
         resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout, stream=stream)
-        # 强制 UTF-8: NVIDIA API 返回 UTF-8, requests 可能误判 encoding 为 latin-1
+        # 强制 UTF-8: API 返回 UTF-8, requests 可能误判 encoding 为 latin-1
         # 导致中文被 double-encoding 成乱码(如 "用户" -> "ç¨æ·")
         resp.encoding = "utf-8"
         return resp
@@ -304,7 +304,7 @@ class NIMBackend:
                     except Exception:
                         err_body = {}
                     raise RuntimeError(
-                        f"NIM API error {resp.status_code}: {err_body.get('error', {}).get('message', resp.text[:200])}"
+                        f"API error {resp.status_code}: {err_body.get('error', {}).get('message', resp.text[:200])}"
                     )
                 data = resp.json()
                 _report_usage(data)
@@ -354,24 +354,24 @@ class NIMBackend:
                         pass
                     if attempt < max_conn_attempts - 1:
                         wait = 1.5 * (2 ** attempt)
-                        print(_style(f"  NIM connection error, reconnecting & retrying in {wait:.0f}s: {e}", "2"))
+                        print(_style(f"  connection error, reconnecting & retrying in {wait:.0f}s: {e}", "2"))
                         time.sleep(wait)
                         continue
-                    print(_style(f"  NIM connection error after {max_conn_attempts} attempts: {e}", "31"))
+                    print(_style(f"  connection error after {max_conn_attempts} attempts: {e}", "31"))
                     raise
                 if attempt < max_attempts - 1:
                     if is_rate_limit:
                         wait = 5 * (2 ** attempt)  # 5, 10, 20s for rate limits
-                        print(_style(f"  NIM rate limit (429), retrying in {wait}s", "2"))
+                        print(_style(f"  rate limit (429), retrying in {wait}s", "2"))
                     else:
                         wait = 2 ** attempt  # 1, 2, 4s for other errors
-                        print(_style(f"  NIM API error, retrying in {wait}s: {e}", "2"))
+                        print(_style(f"  API error, retrying in {wait}s: {e}", "2"))
                     time.sleep(wait)
                 else:
                     if is_rate_limit:
-                        print(_style(f"  NIM rate limit (429) after {max_attempts} attempts. Please wait and retry.", "31"))
+                        print(_style(f"  rate limit (429) after {max_attempts} attempts. Please wait and retry.", "31"))
                     else:
-                        print(_style(f"  NIM API error after {max_attempts} attempts: {e}", "31"))
+                        print(_style(f"  API error after {max_attempts} attempts: {e}", "31"))
                     raise
 
     def _build_system_prompt(self, n_loops: int) -> str:
@@ -447,7 +447,7 @@ THINKING DEPTH: MODERATE (n_loops<8)
 
     def get_hidden_states(self, prompt: str) -> Optional[Any]:
         """
-        获取隐藏状态（NIM可能不支持，返回None）
+        获取隐藏状态（部分后端不支持，返回None）
         保持接口兼容性，但不实现
         """
         return None
@@ -604,7 +604,7 @@ class AnthropicBackend:
                     raise
 
     def _build_system_prompt(self, n_loops: int) -> str:
-        """Build system prompt similar to NIM backend."""
+        """Build system prompt similar to other backends."""
         base = """You are a deep-thinking AI agent with access to tools.
 
 Your core capability: **Deep Reasoning**
