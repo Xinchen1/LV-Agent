@@ -497,7 +497,10 @@ class ExecutionEngine:
         return "\n".join(hints) if hints else None
 
     def _llm_monitor(self, ctx: ExecutionContext) -> Optional[str]:
-        """分支 LLM agent: 感知主 agent 轨迹, 检测问题并生成简明干预提示."""
+        """协作分支 agent: 感知主 agent 轨迹, 判断问题并决策是否主动补位.
+
+        返回: (monitor_hint, backfill_action) 或 None
+        """
         recent_steps = ctx.steps[-4:] if len(ctx.steps) > 4 else ctx.steps
         recent_obs = ctx.observations[-4:] if len(ctx.observations) > 4 else ctx.observations
         lines = []
@@ -506,22 +509,65 @@ class ExecutionEngine:
             lines.append(f"步{st.step_number}: {tools}")
         obs_snippet = " | ".join(o[:80] for o in recent_obs)
         prompt = (
-            "你是旁路监控 agent, 感知主 agent 的执行轨迹, 判断是否有问题。\n"
+            "你是协作分支 agent, 与主 agent 共同完成任务。感知主 agent 执行轨迹。\n"
             "主 agent 任务: " + (ctx.task[:200]) + "\n"
             "最近步骤: " + "; ".join(lines) + "\n"
             "最近观察: " + obs_snippet[:400] + "\n"
-            "若发现异常(卡住/走偏/重复/方向错误), 用一句话简明提示主 agent 如何调整。\n"
-            "若无问题, 输出: OK\n"
-            "提示:"
+            "若发现异常(搜索失败/写入失败/卡住/走偏), 你应主动补位完成子任务。\n"
+            "只输出 JSON: {\"problem\": \"一句话描述问题或OK\", \"backfill\": "
+            "\"要补位的工具调用, 如web_search(query=...), 若无补位输出none\"}\n"
+            "JSON:"
         )
         try:
-            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=80)
+            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=120)
             text = str(raw or "").strip()
-            if not text or text.upper() == "OK":
+            if not text:
                 return None
-            return text[:160]
+            import json as _json, re as _re
+            m = _re.search(r'\{.*\}', text, _re.DOTALL)
+            if not m:
+                return None
+            payload = _json.loads(m.group(0))
+            problem = str(payload.get("problem", "") or "").strip()
+            if not problem or problem.upper() == "OK":
+                return None
+            backfill = str(payload.get("backfill", "") or "").strip()
+            if backfill and backfill.lower() != "none":
+                # 主动补位: 子 agent 执行补位动作, 把结果返回
+                result = self._execute_backfill(ctx, backfill)
+                if result:
+                    return f"[协作补位] {problem}。我已主动补位完成: {result}"
+            return problem[:160]
         except Exception as e:
             self.logger.debug(f"llm monitor failed: {e}")
+            return None
+
+    def _execute_backfill(self, ctx: ExecutionContext, backfill: str) -> Optional[str]:
+        """协作分支 agent 主动补位: 解析工具调用并执行, 返回结果摘要.
+
+        补位动作如 "web_search(query=AI新闻)" / "file_ops(action=write, path=..., content=...)"
+        """
+        from .policies import ToolCallParser
+        try:
+            calls = ToolCallParser.parse_all(backfill)
+            if not calls:
+                # 兼容函数式 "web_search(query=xxx)"
+                calls = ToolCallParser.parse_all(backfill)
+            if not calls:
+                return None
+            tool_name, args = calls[0]
+            from .tools import TOOLS_REGISTRY
+            tool = TOOLS_REGISTRY.get(tool_name)
+            if tool is None:
+                return None
+            result = tool.execute(**args)
+            if result.success:
+                out = (result.output or "")[:200]
+                ctx.observations.append(f"[协作补位] {tool_name}: {out[:150]}")
+                return f"{tool_name} → {out[:100]}"
+            return f"{tool_name} 补位失败: {(result.error or '')[:100]}"
+        except Exception as e:
+            self.logger.debug(f"backfill failed: {e}")
             return None
 
     def _monitor_and_inject(self, ctx: ExecutionContext, output: str) -> None:
