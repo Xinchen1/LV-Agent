@@ -268,3 +268,50 @@ def test_promise_detection_with_immediacy_words():
     # 不应误判: 正常问候 / 有结论的回答
     assert not a._is_promise_response("你好！有什么可以帮你的吗？")
     assert not a._is_promise_response("根据搜索结果,今天的 AI 新闻有……")
+
+
+def test_dynamic_loop_extension():
+    """模型持续产出新工具调用时应动态扩展 max_steps, 快速完成时不扩展."""
+    import sys
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+    import logging
+
+    cfg = AgentConfig()
+
+    # 持续进展: 9 次工具调用, 预算 6 → 应扩展到 10
+    class FB_Progress:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c <= 9:
+                return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
+            return '{"final_answer": "done"}'
+
+    eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                           config=cfg, max_steps=6)
+    tr = eng.run(ReActPolicy(), ctx)
+    assert len(tr.tools_used) == 9, f"应执行全部 9 次工具调用, 实际 {len(tr.tools_used)}"
+    assert ctx.max_steps > 6, f"max_steps 应动态扩展, 实际 {ctx.max_steps}"
+
+    # 快速完成: 1 次调用后给答案 → 不扩展
+    class FB_Fast:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c == 1:
+                return '{"action": "web_search", "args": {"query": "AI"}}'
+            return '{"final_answer": "answer"}'
+
+    eng2 = ExecutionEngine(model_backend=FB_Fast(), config=cfg)
+    eng2.logger = logging.getLogger("test")
+    ctx2 = ExecutionContext(task="搜", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                            config=cfg, max_steps=6)
+    tr2 = eng2.run(ReActPolicy(), ctx2)
+    assert ctx2.max_steps == 6, f"快速完成不应扩展, 实际 {ctx2.max_steps}"

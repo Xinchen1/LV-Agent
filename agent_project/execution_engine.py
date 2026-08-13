@@ -483,7 +483,9 @@ class ExecutionEngine:
 
         try:
             prompt = policy.first_prompt(ctx)
-            for step_number in range(1, ctx.max_steps + 1):
+            step_number = 0
+            while True:
+                step_number += 1
                 self._emit_status(ctx, f"thinking (step {step_number}/{ctx.max_steps})")
 
                 output = self._generate(prompt, ctx, step_number)
@@ -542,6 +544,21 @@ class ExecutionEngine:
 
                 ctx.steps.append(record)
                 trace.steps.append(record)
+
+                # 动态扩展预算: 接近上限时, 若模型仍产出新的工具调用(有进展),
+                # 且未超过硬上限, 则扩大 max_steps 继续(自适应思考深度)。
+                # 必须在 convergence.should_stop 之前执行, 否则到上限会被先判定停止。
+                if step_number >= ctx.max_steps:
+                    hard_limit = getattr(self.config, "max_thinking_loops", 32)
+                    if ctx.max_steps < hard_limit and parsed.tool_calls:
+                        new_max = min(hard_limit, ctx.max_steps + 4)
+                        self.logger.info(
+                            f"dynamic loop extension: step {step_number} → max_steps {ctx.max_steps} → {new_max} "
+                            f"(model still producing tool calls)"
+                        )
+                        ctx.max_steps = new_max
+                        if ctx.stream_callback:
+                            ctx.stream_callback("status", f"extending loops → up to {new_max} (still progressing)")
 
                 if self.convergence.should_stop(ctx, parsed, step_number):
                     break
