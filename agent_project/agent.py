@@ -895,6 +895,15 @@ class OpenMythosAgent:
         #     (_run_simple 有自动 list+read 文件夹逻辑; 走 fast 可避免主循环全盘 find/只列不读)
         if re.search(r"(看下|看一下|看看|查看|浏览|打开|读一下|读取)\s*[^，。！？!?]{1,40}?(文件夹|目录|folder|dir)", task):
             return True
+        # 2.6) "分析 X 文件夹/项目" → fast (同上, 走自动读文件夹逻辑)
+        if re.search(r"(分析|剖析|解析)\s*[^，。！？!?]{1,30}", task) and (
+            "文件夹" in task or "目录" in task or "项目" in task or "代码库" in task or "仓库" in task
+            or "folder" in task.lower() or "dir" in task.lower() or "project" in task.lower()
+        ):
+            return True
+        # 2.7) "X 分析下/分析一下" (名字在前) → fast
+        if re.search(r"[^，。！？!?]{1,30}?(分析下|分析一下|分析|剖析|解析)$", task):
+            return True
 
         # 3) 动作/工具/深度推理关键词 → deep (无论长度多少!)
         #    这是最高优先级的"必须使用工具"判断,必须排在长度判断之前.
@@ -981,6 +990,20 @@ class OpenMythosAgent:
                     fname = raw
             if fname:
                 return ("file_ops", {"action": "list", "path": fname}, 0.9, "detected folder-read intent")
+
+        # -0.5) 分析 X 文件夹/项目/代码库: 提取名称, 转 file_ops list(然后自动读内容)
+        if any(k in tl for k in ("分析", "剖析", "解析", "analyze")) and any(
+            k in tl for k in ("文件夹", "目录", "项目", "代码库", "仓库", "repo", "folder", "dir", "project")
+        ) or re.search(r'(分析|剖析|解析)\s*[^，。！？!?]{1,30}', t) or re.search(
+            r'[^，。！？!?]{1,30}?(分析|剖析|解析)\s*$', t
+        ):
+            name = re.sub(r'^(帮我|请|麻烦)?\s*(分析一下|分析下|分析|剖析|解析)\s*', '', t)
+            # 去掉尾部动作词与类型词 (支持 "grok-build 分析下" 这类名字在前)
+            name = re.sub(r'(分析一下|分析下|分析|剖析|解析)[，。！？!?]?$', '', name)
+            name = re.sub(r'(文件夹|目录|项目|代码库|仓库|的内容|里面|repo|folder|project|dir).*$', '', name, flags=re.IGNORECASE)
+            name = name.strip(' 的，。！？!?、')
+            if name and len(name) <= 40:
+                return ("file_ops", {"action": "list", "path": name}, 0.85, "detected folder-analysis intent")
 
         # 0) 先判断代码执行/命令意图, 避免 "print(1+1)" 这类被算术规则误判为 calculator
         if any(k in tl for k in ("python", "写代码", "运行代码", "执行代码", "写个程序", "写个脚本", "跑一下", "run code", "execute python", "写段代码")):
@@ -1416,6 +1439,13 @@ class OpenMythosAgent:
             return True
         # 看下 X 文件夹/目录(带文件夹名, 如"看下 health os 这个文件夹")
         if re.search(r"(看下|看一下|看看|查看|浏览|打开|读一下|读取|里面)\s*[^，。！？!?]{1,40}?(文件夹|目录|folder|dir)", t):
+            return True
+        # 分析 X 文件夹/项目: "分析下 grok-build"、"grok-build 分析下" 等
+        if re.search(r"(分析|剖析|解析)\s*[^，。！？!?]{1,40}?(文件夹|目录|项目|代码库|仓库|folder|dir|project)", t) or \
+           re.search(r"[^，。！？!?]{1,40}?(分析下|分析一下|分析|剖析|解析)", t):
+            return True
+        # "分析下 grok-build"(动词在前, 无"文件夹"词): 分析 + 后跟具体名
+        if re.search(r"^(分析下|分析一下|分析|剖析|解析)\s*[^，。！？!?]{1,40}", t):
             return True
         return False
 
@@ -1961,9 +1991,25 @@ class OpenMythosAgent:
             if tool_result.success and self._needs_tool_summary(tool_result.output, is_continuation):
                 # 看文件夹场景: list 成功后自动读取目录下的 markdown 文件内容
                 # 设计文档要求"list 后再 read 文件内容, 基于内容回答", 避免只列不读
-                if action.tool_name == 'file_ops' and action.arguments.get('action') == 'list' \
-                   and self._is_folder_read_intent(task):
-                    folder_contents = self._read_folder_markdown(action.arguments.get('path', ''))
+                list_path = None
+                if action.tool_name == 'file_ops' and action.arguments.get('action') == 'list':
+                    list_path = action.arguments.get('path', '')
+                elif action.tool_name == 'bash_exec' and self._is_folder_read_intent(task):
+                    # 模型用 bash ls 代替 file_ops list 时同样自动读内容(分析文件夹场景)
+                    cmd = str(action.arguments.get('command', ''))
+                    # 只在 "ls" 之后的 token 里找第一个非选项/非重定向的目标路径
+                    seg = re.split(r'[;&|]', cmd)[0]
+                    after_ls = seg.split('ls', 1)[1] if 'ls' in seg else ''
+                    path = None
+                    for tok in after_ls.split():
+                        if tok.startswith('-') or tok == '2>' or tok.endswith('/dev/null'):
+                            continue
+                        path = tok.strip().strip('"\'')
+                        break
+                    if path and not path.startswith('2>'):
+                        list_path = path
+                if list_path:
+                    folder_contents = self._read_folder_markdown(list_path)
                     if folder_contents:
                         tool_result.output = tool_result.output + "\n\n" + folder_contents
                 summary = self._summarize_tool_answer(task, action, tool_result.output, token_callback)
@@ -4091,6 +4137,20 @@ class OpenMythosAgent:
                 arguments = self._parse_tool_args(args_str)
                 if arguments:
                     results.append(ToolCall(tool_name=tool_name, arguments=arguments))
+
+        # tool_calls 数组格式(模型新格式):
+        # { "thoughts": "...", "final_answer": "", "tool_calls": [ { "action": "bash_exec", "args": {...} }, ... ] }
+        if not results:
+            for m in re.finditer(r'"tool_calls"\s*:\s*\[\s*(.*?)\s*\]', text, re.DOTALL):
+                arr = m.group(1)
+                for call in re.finditer(r'"action"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*(\{.*?\})', arr, re.DOTALL):
+                    tool_name = call.group(1)
+                    if not TOOLS_REGISTRY.get(tool_name):
+                        continue
+                    args_str = call.group(2)
+                    arguments = self._parse_tool_args(args_str)
+                    if arguments:
+                        results.append(ToolCall(tool_name=tool_name, arguments=arguments))
 
         # Function-call style: tool_name(key="value", key2="value2")
         # 用平衡括号匹配, 支持嵌套括号(如 python_exec("shutil.rmtree(p)"))
