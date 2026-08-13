@@ -1098,7 +1098,57 @@ class OpenMythosAgent:
             if q and len(q) >= 2:
                 return ("web_search", {"query": q}, 0.8, "detected web-search intent")
 
+        # 5.5) LLM 前置意图分析兜底: 规则未命中且有明确动作/需求时,
+        # 用一次简短 LLM 调用判断真实意图(应对规则盲区, 如"给我找点AI资料").
+        # 仅当任务长度适中且有内容(避免问候/闲聊也触发, 慢且费 token)。
+        if len(t) >= 6 and not self._is_simple_query(t):
+            llm_intent = self._llm_intent_classify(t)
+            if llm_intent:
+                return llm_intent
+
         return None
+
+    def _llm_intent_classify(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
+        """用 LLM 做一次简短的意图分类(规则未命中时的兜底).
+
+        让 LLM 从候选工具中选一个最匹配的, 并给出参数。
+        返回 (tool_name, arguments, confidence, reason), 失败/不确定返回 None。
+        """
+        from .tools import TOOLS_REGISTRY
+        tools_desc = ", ".join(TOOLS_REGISTRY.list_tools())
+        prompt = (
+            "你是意图分类器。判断用户请求最应该用哪个工具完成。\n"
+            "可用工具: " + tools_desc + "\n"
+            "其中: web_search 查网络信息/新闻/资料; file_ops 操作本地文件; "
+            "bash_exec 执行命令; glob/search_files 找文件; calculator 计算; weather 天气; "
+            "git 操作仓库; python_exec 运行代码。\n"
+            "只输出 JSON: {\"tool\": \"工具名\", \"args\": {...}, \"reason\": \"一句话原因\"}\n"
+            "若无法确定(闲聊/无明确动作), 输出 {\"tool\": \"none\"}\n\n"
+            f"用户请求: {task}\n"
+            "JSON:"
+        )
+        try:
+            raw = self.backend.generate(prompt, n_loops=1, temperature=0.0, max_tokens=200)
+            import json as _json
+            import re as _re
+            m = _re.search(r'\{.*\}', str(raw or ""), _re.DOTALL)
+            if not m:
+                return None
+            payload = _json.loads(m.group(0))
+            tool_name = payload.get("tool", "")
+            if not tool_name or tool_name == "none":
+                return None
+            if not TOOLS_REGISTRY.get(tool_name) and not TOOLS_REGISTRY.get(tool_name.lower()):
+                return None
+            args = payload.get("args", {}) or {}
+            if not isinstance(args, dict):
+                args = {}
+            conf = 0.75
+            reason = payload.get("reason", "llm intent classify")
+            return (tool_name, args, conf, reason)
+        except Exception as e:
+            self.logger.debug(f"llm intent classify failed: {e}")
+            return None
 
     @staticmethod
     def _is_pure_nudge(task: str) -> bool:
@@ -3407,6 +3457,19 @@ class OpenMythosAgent:
         if not (has_verb or has_location_marker or has_explicit_location_target):
             return None
         if not has_suffix and not re.search(r'[a-zA-Z_\-0-9]+', task):
+            return None
+
+        # 排除明显的"搜索信息/新闻/资料"意图: 这些应走 web_search, 而非 find 文件
+        # (如"查ai新闻""搜一下最新的资讯""查查天气"等)
+        info_search_markers = ["新闻", "资讯", "消息", "动态", "最新", "信息", "资料", "教程",
+                               "怎么", "如何", "教程", "介绍", "是什么", "怎么做", "天气",
+                               "news", "update", "info", "how to", "what is", "weather",
+                               "股票", "行情", "价格", "比分", "比赛"]
+        if has_suffix is False and any(m in task_lower for m in info_search_markers):
+            return None
+        # 即便含"文件夹/文件"后缀, 若是搜索网络信息意图也不触发 find
+        if any(m in task_lower for m in ["新闻", "资讯", "动态", "最新", "消息", "news", "update"]) and \
+           not has_location_marker and not has_explicit_location_target:
             return None
 
         # Resolve search root
