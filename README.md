@@ -19,16 +19,16 @@ Continuous self-learning, smarter over time
 
 **Mission**<br>
 Open-source AI at the core<br>
-Great AI for everyone<br>
-Intelligence for all
+AI that is easier for everyone to use<br>
+A small step toward intelligence equality
 
-以开源人工智能为核心，让每一个人都能用上最好的人工智能，实现智能平权
+以开源人工智能为核心，希望让更多人能方便地用上人工智能，为智能平权尽一份力
 
 </div>
 
 ---
 
-LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循环深度推理、真实工具调用、长期记忆与自我学习，目标是让复杂的任务在终端里获得接近 Cursor CLI、Hermes Agent 与 Grok Build 的交互体验。
+LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循环深度推理、真实工具调用、长期记忆与自我学习，在终端里提供多轮推理与工具协作的交互体验。项目仍在持续改进中，期待与大家一起成长。
 
 ## Features
 
