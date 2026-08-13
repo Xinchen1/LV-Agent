@@ -91,3 +91,53 @@ def test_python_fallback_verify_syntax():
     good = os.path.join(td, "good.py")
     r2 = tool._python_verify_syntax(Path(good), "print(1)\n")
     assert r2 == "", "好代码应返回空"
+
+
+def test_main_loop_json_final_answer_extraction():
+    """主循环: 模型输出 {thoughts, final_answer} JSON 时, 应提取纯文本而非整个 JSON."""
+    import sys
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.policies import ReActPolicy
+    from agent_project.policies import ToolCallParser
+
+    # 直接验证 _route_react_output: final_answer JSON 提取
+    policy = ReActPolicy()
+    out = '{"thoughts": "done", "final_answer": "目录已创建成功"}'
+    parsed = policy._route_react_output(out)
+    assert parsed.final_answer == "目录已创建成功", f"应提取纯文本, 实际: {parsed.final_answer!r}"
+    assert parsed.done, "应标记完成"
+
+    # answer 字段变体
+    out2 = '{"reasoning": "r", "answer": "好的, 完成了"}'
+    parsed2 = policy._route_react_output(out2)
+    assert parsed2.final_answer == "好的, 完成了"
+
+
+def test_main_loop_full_execution_with_json_tool_calls():
+    """主循环端到端: JSON action+args → 工具 → 观察 → JSON final_answer."""
+    import tempfile, os
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+
+    class FakeBackend:
+        def __init__(self):
+            self.calls = 0
+        def generate(self, prompt, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                return '{"thoughts": "t", "action": "bash_exec", "args": {"command": "echo loop_ok"}}'
+            if self.calls == 2:
+                return '{"thoughts": "t", "tool_calls": [{"action": "bash_exec", "args": {"command": "echo done2"}}]}'
+            return '{"thoughts": "t", "final_answer": "loop 执行完成"}'
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=FakeBackend(), config=cfg)
+    ctx = ExecutionContext(task="测试", available_tools=TOOLS_REGISTRY.get_tools_dict(), config=cfg, max_steps=6)
+    trace = eng.run(ReActPolicy(), ctx)
+    assert trace.success, "loop 应成功"
+    assert trace.final_answer == "loop 执行完成", f"应提取纯文本 final_answer, 实际: {trace.final_answer!r}"
+    assert len(trace.steps) >= 3, f"应有多次迭代, 实际 {len(trace.steps)}"
+    assert "bash_exec" in trace.tools_used
