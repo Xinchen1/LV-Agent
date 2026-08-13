@@ -1902,10 +1902,17 @@ class OpenMythosAgent:
             # "的，你好"/尾部回声等多余内容。
             # 这里只透出工具/状态事件; reasoning(思考过程)默认不实时显示,
             # 仅在交互式深度思考(非简单问答)时透出, 保证简洁输出。
+            # reasoning 到达时给一个轻量"思考中"状态, 避免用户看到空白以为卡死。
+            _thinking_shown = {"v": False}
             def _buffer_user_cb(kind, text):
-                if kind in ('tool_call', 'tool_result', 'status', 'error'):
+                if kind in ('tool_call', 'tool_result', 'error'):
                     stream_callback(kind, text)
-                # 'reasoning' 与 'content' 都不实时透出, 由最终清洗后的答案统一重放
+                elif kind == 'status':
+                    stream_callback(kind, text)
+                elif kind == 'reasoning' and not _thinking_shown["v"]:
+                    _thinking_shown["v"] = True
+                    stream_callback('status', 'thinking')
+                # 'reasoning' 与 'content' 的正文都不实时透出, 由最终清洗后的答案统一重放
 
             router = self._create_stream_router(_buffer_user_cb, reasoning_parts, content_parts)
             internal_callback = router.on_token
@@ -1958,8 +1965,7 @@ class OpenMythosAgent:
                 reasoning_text = m.group(1).strip()
                 answer_text = (raw_answer[:m.start()] + raw_answer[m.end():]).strip()
                 if stream_callback:
-                    for chunk in self._simulate_stream_tokens(reasoning_text, chunk_size=3):
-                        stream_callback("reasoning", chunk)
+                    stream_callback('status', 'thinking')
                 reasoning_parts.append(reasoning_text)
                 content_parts = [answer_text]
             else:

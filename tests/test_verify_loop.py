@@ -520,10 +520,12 @@ def test_fast_path_does_not_emit_reasoning():
     from agent_project.agent import OpenMythosAgent
 
     src = inspect.getsource(OpenMythosAgent._run_simple)
-    # _buffer_user_cb 只透出工具/状态事件, 不透出 reasoning/content
-    assert "if kind in ('tool_call', 'tool_result', 'status', 'error')" in src, "应只透出工具/状态事件"
-    assert "kind != 'content'" not in src.replace("if kind in ('tool_call', 'tool_result', 'status', 'error'):", ""), \
-        "不应有'非 content 就透出'的旧逻辑"
+    # _buffer_user_cb 只透出工具/状态事件 + 轻量 thinking 提示, 不透出 reasoning 正文
+    assert "'reasoning' 与 'content' 的正文都不实时透出" in src, "应注释明确不透出 reasoning 正文"
+    # 不应再直接透出 reasoning 原文(旧的 simulate_stream_tokens reasoning 透出)
+    assert "simulate_stream_tokens(reasoning_text" not in src, "不应把 reasoning 原文流式透出"
+    # 应有轻量 thinking 状态避免假死
+    assert "thinking" in src, "应有思考中状态提示"
 
 
 def test_deep_research_summary_no_meta_blurb():
