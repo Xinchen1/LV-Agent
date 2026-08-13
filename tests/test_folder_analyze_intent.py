@@ -170,3 +170,25 @@ def test_truncated_fragment_detection():
     assert not ExecutionEngine._is_truncated_fragment("完成")
     assert not ExecutionEngine._is_truncated_fragment("We should improve this project")
     assert not ExecutionEngine._is_truncated_fragment("首先, 需要分析文件")
+
+
+def test_unified_tool_parser_all_formats():
+    """统一解析器后, agent.py 应委托 ToolCallParser 且支持全部格式(含 XML)."""
+    import logging
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a.logger = logging.getLogger("test")
+
+    cases = {
+        "closed_tag": ('[TOOL:bash_exec] {"command": "ls"} [/TOOL]', "bash_exec", "ls"),
+        "json_string_action": ('{"thoughts": "t", "action": "bash_exec", "args": {"command": "mkdir x"}}', "bash_exec", "mkdir x"),
+        "tool_calls_array": ('{"tool_calls": [{"action": "bash_exec", "args": {"command": "ls"}}]}', "bash_exec", "ls"),
+        "func_single_str": ('bash_exec("echo hi; ls")', "bash_exec", "echo hi; ls"),
+        "xml": ('<tool_call><function=bash_exec><parameter=command>echo x</parameter></function></tool_call>', "bash_exec", "echo x"),
+        "opencode": ('<|message_model|>bash_exec<|content_invoke_tool_json|>{"args":{"command":"ls"}}<|end_message|>', "bash_exec", "ls"),
+    }
+    for name, (text, tool, arg_val) in cases.items():
+        r = a._parse_all_output_actions(text)
+        assert len(r) == 1, f"{name}: 应解析出 1 个, 实际 {r}"
+        assert r[0].tool_name == tool, f"{name}: 工具名错误 {r[0].tool_name}"
+        assert r[0].arguments.get("command") == arg_val, f"{name}: 参数错误 {r[0].arguments}"
