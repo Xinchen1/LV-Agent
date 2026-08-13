@@ -31,15 +31,15 @@ if [ -n "$OMNIROUTE_DIR" ] && [ -x "${OMNIROUTE_DIR}/omniroute" ] && ! curl -s h
     done
 fi
 
-# Load NIM API key from config.yaml so the agent always has it.
+# Load DeepSeek API key from config.yaml so the agent always has it.
 # 注意: 不要用系统 python3 解析 yaml —— 用户环境的 Python.framework 3.13
 # 在 import yaml(C 扩展)时会因代码签名无效崩溃(CODESIGNING, Invalid Page)。
-# 这里用纯 shell 提取 nim 段落的 api_key。
-NIM_KEY=$(grep -A8 '^[[:space:]]*nim:' "$PROJECT_DIR/config.yaml" 2>/dev/null \
+# 这里用纯 shell 提取 deepseek 段落的 api_key。
+DS_KEY=$(grep -A8 '^[[:space:]]*deepseek:' "$PROJECT_DIR/config.yaml" 2>/dev/null \
     | grep 'api_key' | head -1 \
     | sed -E 's/^[[:space:]]*api_key:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/' )
-if [ -n "$NIM_KEY" ]; then
-    export NIM_API_KEY="$NIM_KEY"
+if [ -n "$DS_KEY" ]; then
+    export DEEPSEEK_API_KEY="$DS_KEY"
 fi
 
 # Avoid vector-deps trying to phone home during import (keeps startup fast/offline)
@@ -68,6 +68,14 @@ if [ ! -f "$VENV_PYTHON" ]; then
     else
         "$VENV_PYTHON" -m pip install openai pyyaml pydantic requests tiktoken rich beautifulsoup4 $PIP_MIRROR --quiet
     fi
+fi
+
+# Build rust_file_ops for fast/verified file ops (apply_diff auto-verify etc.)
+# 若系统无 cargo, 静默跳过(文件操作将回退到纯 Python 实现)。
+RUST_BIN="$PROJECT_DIR/rust_file_ops/target/release/rust_file_ops"
+if [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v cargo >/dev/null 2>&1; then
+    echo "building rust_file_ops (fast file ops + auto syntax verification)..."
+    ( cd "$PROJECT_DIR/rust_file_ops" && cargo build --release >/dev/null 2>&1 && echo "✓ rust_file_ops ready" ) || echo "⚠ rust build failed; using Python fallback"
 fi
 
 # Run the agent from the user's current directory, preserving cwd.

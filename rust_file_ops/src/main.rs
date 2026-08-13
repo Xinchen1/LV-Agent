@@ -319,11 +319,23 @@ fn action_write(req: Request) -> Response {
         output.push_str(&format!("\nBackup saved to {}", bp.display()));
     }
 
+    // 自动语法验证: 代码文件写入后立即检查语法, 错误作为 warning 提示修复
+    if let Err(v_err) = verify_by_extension(&path, &content) {
+        let verr = v_err.trim();
+        output.push_str(&format!("\n⚠ SYNTAX VERIFICATION FAILED:\n{}\nPlease fix the syntax and re-write.", verr));
+        return Response {
+            success: true,
+            output,
+            error: None,
+            metadata: Some(serde_json::json!({ "verify": "failed", "verify_error": verr })),
+        };
+    }
+
     Response {
         success: true,
         output,
         error: None,
-        metadata: None,
+        metadata: Some(serde_json::json!({ "verify": "syntax OK" })),
     }
 }
 
@@ -803,26 +815,34 @@ fn action_apply_diff(req: Request) -> Response {
                 applied += 1;
             }
             None => {
-                let hint = {
-                    let lines: Vec<&str> = content.split('\n').collect();
-                    let mut hint_line = -1isize;
-                    for line in search.lines() {
-                        hint_line = find_similar_line(&lines, line);
-                        if hint_line > 0 {
-                            break;
-                        }
+                // 提供最接近的定位: 对 block 的每一行找相似行, 收集所有候选行号
+                let lines: Vec<&str> = content.split('\n').collect();
+                let mut hint_lines: Vec<isize> = Vec::new();
+                for line in search.lines() {
+                    let l = find_similar_line(&lines, line);
+                    if l > 0 {
+                        hint_lines.push(l);
                     }
-                    if hint_line > 0 {
-                        format!(" (closest match around line {})", hint_line)
+                }
+                hint_lines.sort_unstable();
+                hint_lines.dedup();
+                let hint = if !hint_lines.is_empty() {
+                    let range = if hint_lines.len() > 1 {
+                        format!("{}–{}", hint_lines[0], hint_lines[hint_lines.len() - 1])
                     } else {
-                        String::new()
-                    }
+                        format!("{}", hint_lines[0])
+                    };
+                    format!(" (nearest match around lines {})", range)
+                } else {
+                    String::new()
                 };
+                let mut detail = format!("Block {}/{} not found{}.", i + 1, blocks.len(), hint);
+                detail.push_str(" Check for differences in whitespace/indentation, and that the search text exactly matches the current file content. Re-read the file around the line above, then re-apply with corrected SEARCH text.");
                 return Response {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Block {}/{} not found{}:\n{}", i + 1, blocks.len(), hint, &search[..search.len().min(500)])),
-                    metadata: Some(serde_json::json!({ "applied": applied })),
+                    error: Some(detail),
+                    metadata: Some(serde_json::json!({ "applied": applied, "hint_lines": hint_lines })),
                 };
             }
         }
@@ -847,11 +867,22 @@ fn action_apply_diff(req: Request) -> Response {
         output.push_str(&format!("\nBackup saved to {}", backup.display()));
     }
 
+    // 自动语法验证闭环: 代码文件改完后立即检查语法, 失败则把错误附在输出里提示修复
+    if let Err(v_err) = verify_by_extension(&path, &current) {
+        let verr = v_err.trim();
+        return Response {
+            success: true, // diff 已成功应用; 语法错误作为 warning 提示下一步修复
+            output: format!("Applied {} block(s) to {}.\n⚠ SYNTAX VERIFICATION FAILED after apply:\n{}\nPlease fix the syntax (read the file, correct the code, re-apply).", applied, path.display(), verr),
+            error: None,
+            metadata: Some(serde_json::json!({ "applied": applied, "backup": backup_written.then(|| backup.display().to_string()), "verify": "failed", "verify_error": verr })),
+        };
+    }
+
     Response {
         success: true,
-        output,
+        output: output,
         error: None,
-        metadata: Some(serde_json::json!({ "applied": applied, "backup": backup_written.then(|| backup.display().to_string()) })),
+        metadata: Some(serde_json::json!({ "applied": applied, "backup": backup_written.then(|| backup.display().to_string()), "verify": "syntax OK" })),
     }
 }
 
@@ -868,14 +899,7 @@ fn action_verify(req: Request) -> Response {
         Err(e) => return error(&e),
     };
 
-    let result = match ext.as_str() {
-        "py" => verify_python(&content),
-        "json" => verify_json(&content),
-        "yaml" | "yml" => verify_yaml(&content),
-        _ => Ok(format!("No syntax verification available for file type: {}", ext)),
-    };
-
-    match result {
+    match verify_by_extension(&path, &content) {
         Ok(msg) => Response {
             success: true,
             output: msg,
@@ -885,9 +909,23 @@ fn action_verify(req: Request) -> Response {
         Err(e) => Response {
             success: false,
             output: String::new(),
-            error: Some(e),
+            error: Some(e.trim().to_string()),
             metadata: None,
         },
+    }
+}
+
+/// 按扩展名验证语法. 成功返回 "xxx syntax OK", 失败返回 Err(具体错误).
+fn verify_by_extension(path: &Path, content: &str) -> Result<String, String> {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default().to_lowercase();
+    match ext.as_str() {
+        "py" => verify_python(content),
+        "json" => verify_json(content),
+        "yaml" | "yml" => verify_yaml(content),
+        "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" => verify_node(content),
+        "sh" | "bash" | "command" => verify_shell(content),
+        "rs" => verify_rust(content),
+        _ => Ok(format!("No syntax verification available for file type: {}", ext)),
     }
 }
 
@@ -909,6 +947,70 @@ fn verify_python(content: &str) -> Result<String, String> {
         Ok("Python syntax OK".to_string())
     } else {
         Err(format!("Python syntax error: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn verify_node(content: &str) -> Result<String, String> {
+    let mut child = match Command::new("node").arg("--check")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return Ok(format!("node not available, skipping JS/TS syntax check ({})", e)),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    let output = child.wait_with_output().map_err(|e| format!("Failed to read output: {}", e))?;
+    if output.status.success() {
+        Ok("JavaScript/TypeScript syntax OK".to_string())
+    } else {
+        Err(format!("JS/TS syntax error: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn verify_shell(content: &str) -> Result<String, String> {
+    let mut child = match Command::new("bash").arg("-n")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return Ok(format!("bash not available, skipping shell syntax check ({})", e)),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    let output = child.wait_with_output().map_err(|e| format!("Failed to read output: {}", e))?;
+    if output.status.success() {
+        Ok("Shell syntax OK".to_string())
+    } else {
+        Err(format!("Shell syntax error: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn verify_rust(content: &str) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!("lv_verify_{}.rs", std::process::id()));
+    if fs::write(&tmp, content).is_err() {
+        return Err("Failed to write temp file for rust check".to_string());
+    }
+    let out = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-type")
+        .arg("lib")
+        .arg(&tmp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let _ = fs::remove_file(&tmp);
+    match out {
+        Ok(o) if o.status.success() => Ok("Rust syntax OK".to_string()),
+        Ok(o) => Err(format!("Rust syntax error: {}", String::from_utf8_lossy(&o.stderr))),
+        Err(e) => Err(format!("rustc not available: {}", e)),
     }
 }
 
