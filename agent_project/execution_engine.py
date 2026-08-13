@@ -728,23 +728,34 @@ class ExecutionEngine:
                 self._monitor_and_inject(ctx, output)
 
                 # 动态扩展预算: 自适应思考深度, 不只简单加循环。
-                # 触发信号(任一):
+                # 触发信号(任一) + 必须有真实进展(工具成功率/新信息):
                 #   A. 接近上限(step >= max_steps)且模型仍产出新工具调用(有进展)
                 #   B. 模型明确表达"继续/还要/补充/再多搜"意图(继续信号, 更主动)
                 # 必须在 convergence.should_stop 之前执行, 否则到上限会被先判定停止。
                 if step_number >= ctx.max_steps or self._wants_to_continue(output):
                     hard_limit = getattr(self.config, "max_thinking_loops", 32)
-                    if ctx.max_steps < hard_limit and (parsed.tool_calls or self._wants_to_continue(output)):
-                        new_max = min(hard_limit, ctx.max_steps + 4)
-                        reason = "explicit continue intent" if self._wants_to_continue(output) and not parsed.tool_calls \
-                                 else "still producing tool calls"
-                        self.logger.info(
-                            f"dynamic loop extension: step {step_number} → max_steps {ctx.max_steps} → {new_max} "
-                            f"({reason})"
-                        )
-                        ctx.max_steps = new_max
-                        if ctx.stream_callback:
-                            ctx.stream_callback("status", f"extending loops → up to {new_max} (still progressing)")
+                    wants_more = self._wants_to_continue(output)
+                    if ctx.max_steps < hard_limit and (parsed.tool_calls or wants_more):
+                        # 进展质量感知: 最近几步工具是否真在产出新信息?
+                        # 若连续失败/原地打转, 即使有工具调用也不扩展(避免烧预算)。
+                        if parsed.tool_calls and not self._has_real_progress(ctx):
+                            self.logger.info(
+                                f"loop extension SKIPPED: step {step_number}, no real progress "
+                                f"(recent tools failing/repeating)"
+                            )
+                            if ctx.stream_callback:
+                                ctx.stream_callback("status", "no real progress — not extending")
+                        else:
+                            new_max = min(hard_limit, ctx.max_steps + 4)
+                            reason = "explicit continue intent" if wants_more and not parsed.tool_calls \
+                                     else "still producing tool calls (real progress)"
+                            self.logger.info(
+                                f"dynamic loop extension: step {step_number} → max_steps {ctx.max_steps} → {new_max} "
+                                f"({reason})"
+                            )
+                            ctx.max_steps = new_max
+                            if ctx.stream_callback:
+                                ctx.stream_callback("status", f"extending loops → up to {new_max} (still progressing)")
 
                 if self.convergence.should_stop(ctx, parsed, step_number):
                     break
@@ -901,6 +912,39 @@ class ExecutionEngine:
         if len(t) <= 6 and all(ord(c) < 128 for c in t) and not any(c in ".,;:!?()\"'" for c in t):
             return True
         return False
+
+    @staticmethod
+    def _has_real_progress(ctx: ExecutionContext) -> bool:
+        """评估最近几步是否产生真实进展(而非原地打转).
+
+        依据:
+        - 最近 N 个观察中, 成功工具结果的比例(排除 SYSTEM STOP/错误/空输出)
+        - 至少 1 个非空、非错误的成功观察才视为有进展
+        """
+        obs = ctx.observations[-6:] if len(ctx.observations) > 6 else ctx.observations
+        if not obs:
+            return False
+        _fail_markers = (
+            "tool error", "tool execution error", "failed", "timed out",
+            "error:", "denied", "blocked", "not found", "no results",
+            "already executed", "SYSTEM STOP", "No search results",
+            "no output", "(no output)",
+        )
+        successful = 0
+        total = 0
+        for o in obs:
+            ol = str(o).lower()
+            if "SYSTEM STOP" in ol or "already executed" in ol:
+                continue  # 去重拦截不算进展也不算失败
+            total += 1
+            if any(m in ol for m in _fail_markers):
+                continue  # 失败
+            if ol.strip():
+                successful += 1
+        if total == 0:
+            return False
+        # 至少一半成功, 且至少 1 个真实成功 → 有进展
+        return successful >= max(1, total // 2)
 
     @staticmethod
     def _wants_to_continue(output: str) -> bool:

@@ -620,3 +620,29 @@ def test_low_budget_continue_intent_expands():
     tr = eng.run(ReActPolicy(), ctx)
     assert tr.final_answer == "已确认", f"应完成确认, 实际 {tr.final_answer!r}"
     assert ctx.max_steps > 2, f"预算应动态扩展, 实际 {ctx.max_steps}"
+
+
+def test_real_progress_detection():
+    """进展质量感知: 搜索成功有结果算进展; 重复/失败/打转不算."""
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.config import AgentConfig
+    cfg = AgentConfig()
+
+    # 真实进展(搜索成功)
+    ctx1 = ExecutionContext(task="搜新闻", available_tools={}, config=cfg, max_steps=8)
+    ctx1.observations = ['[{"title": "AI news", "url": "..."}]', '[{"title": "trend"}]']
+    assert ExecutionEngine._has_real_progress(ctx1)
+
+    # 原地打转(去重拦截 + 失败)
+    ctx2 = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx2.observations = [
+        "SYSTEM STOP: already executed file_ops list",
+        "Tool error: No search results returned",
+        "Tool 'web_search' timed out",
+    ]
+    assert not ExecutionEngine._has_real_progress(ctx2), "失败+重复不应算进展"
+
+    # 混合
+    ctx3 = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx3.observations = ['{"title": "found"}', "Tool error: xxx"]
+    assert ExecutionEngine._has_real_progress(ctx3), "有真实成功结果应算进展"
