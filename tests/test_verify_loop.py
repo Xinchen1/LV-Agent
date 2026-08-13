@@ -646,3 +646,19 @@ def test_real_progress_detection():
     ctx3 = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
     ctx3.observations = ['{"title": "found"}', "Tool error: xxx"]
     assert ExecutionEngine._has_real_progress(ctx3), "有真实成功结果应算进展"
+
+
+def test_promise_detection_continuation_words():
+    """'那我继续搜索/先换关键词再试' 等承诺应识别为空承诺(说了要做却没执行)."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+
+    # 用户场景: 承诺继续/换词搜索但没执行工具
+    assert a._is_promise_response("好的，那我继续搜索最新 AI 新闻，搜到后写入 lv 目录。\n\n先换更精准的关键词搜索：")
+    assert a._is_promise_response("好的，我换个关键词再试一次搜索")
+    assert a._is_promise_response("那我接着搜一下")
+
+    # 已完成/正常 → 不误判
+    assert not a._is_promise_response("好的，已经搜索完成并写入 lv 目录了")
+    assert not a._is_promise_response("根据搜索结果，总结如下")
+    assert not a._is_promise_response("你好")
