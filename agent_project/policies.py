@@ -646,6 +646,22 @@ Rules:
             final_text = self._strip_think_tags(final_text)
             return PolicyOutput(reasoning=thought, final_answer=final_text, done=True)
 
+        # JSON 里带 final_answer/answer 字段: 提取它, 而不是把整个 JSON 当答案
+        if first_brace >= 0:
+            for start in range(first_brace, len(output)):
+                candidate = output[start:]
+                if not candidate.startswith("{"):
+                    continue
+                try:
+                    payload = ToolCallParser._normalize_json_keys(json.loads(candidate))
+                    if isinstance(payload, dict):
+                        fa = payload.get("final_answer") or payload.get("final answer") or payload.get("answer")
+                        if isinstance(fa, str) and fa.strip():
+                            return PolicyOutput(reasoning=thought, final_answer=fa.strip(), done=True)
+                        break
+                except Exception:
+                    continue
+
         # Fallback: plain answer
         stripped = self._strip_think_tags(output.strip())
         if stripped:
