@@ -81,7 +81,32 @@ class SearchCache:
                 f.unlink()
 
     def _key(self, query: str) -> str:
-        return hashlib.sha256(query.lower().strip().encode()).hexdigest()[:32]
+        """生成规范化缓存键, 提高命中率.
+
+        策略: 小写 → 去标点 → 去修饰/动作虚词 → 去空格 → 排序.
+        这样 "最新的AI新闻" 与 "ai 新闻"、"hermes 使用" 与 "查hermes用法"
+        会命中同一缓存(核心语义相同)。
+        排序使 "人工智能 趋势" 与 "趋势 人工智能" 也命中。
+        注意: 保留主题词, 避免不同主题串缓存。
+        """
+        q = query.lower().strip()
+        # 1. 去标点与多余空白
+        import re as _re
+        q = _re.sub(r"[，。！？!?、；;：:\s()（）\[\]【】\"'“”‘’,，\-_]+", " ", q).strip()
+        # 2. 去修饰/动作/时间虚词(核心语义以外的词)
+        # 注意: "新闻/趋势/价格" 等是主题词必须保留; "动态/资讯/消息" 等弱主题词可删
+        for w in ("最新的", "最新", "最近的", "最近", "今天", "本月", "昨天", "上周",
+                  "2026", "2026年", "年", "月份", "帮我", "请", "一下", "方面",
+                  "有关", "关于", "的", "查一下", "查查", "查", "看看", "找找",
+                  "使用", "用法", "教程", "方法", "怎么", "如何", "介绍", "what is", "how to",
+                  "today", "this week", "latest", "recent", "news update",
+                  "样", "呢", "吗", "呀", "啊", "了", "动态", "动向", "资讯", "消息"):
+            q = q.replace(w, "")
+        # 3. 去空格
+        q = q.replace(" ", "")
+        # 4. 排序字符(词序无关: "人工智能趋势"=="趋势人工智能")
+        q = "".join(sorted(q))
+        return hashlib.sha256(q.encode()).hexdigest()[:32]
 
     def _enforce_memory_limit(self) -> None:
         if len(self._memory) <= self.max_memory_entries:
