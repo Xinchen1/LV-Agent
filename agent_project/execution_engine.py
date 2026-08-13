@@ -540,7 +540,9 @@ class ExecutionEngine:
                     break
                 prompt = next_prompt
 
-            if not trace.final_answer:
+            if not trace.final_answer or self._is_truncated_fragment(trace.final_answer):
+                # final_answer 为空或为截断碎片(如 "We"/"The")时,
+                # 基于已有观察重新生成完整答案, 避免残缺回答直接返回给用户
                 trace.final_answer = self._force_final_answer(ctx)
                 trace.success = bool(trace.final_answer)
 
@@ -657,7 +659,33 @@ class ExecutionEngine:
             "## Final Answer:\n"
         )
         answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, 2048)
-        return self._clean_final_text(answer or "")
+        cleaned = self._clean_final_text(answer or "")
+        # 二次兜底: 生成仍为空/截断时, 用最近一步思考或观察作为答案
+        if self._is_truncated_fragment(cleaned):
+            if ctx.steps:
+                reasoning = (ctx.steps[-1].reasoning or "").strip()
+                if reasoning and not self._is_truncated_fragment(reasoning):
+                    return reasoning
+            if ctx.observations:
+                obs = ctx.observations[-1].strip()
+                if obs and len(obs) > 6:
+                    return f"根据工具结果:\n{obs[:800]}"
+        return cleaned
+
+    @staticmethod
+    def _is_truncated_fragment(text: str) -> bool:
+        """判断最终答案是否为流截断碎片(过短/残缺, 如 "We"/"The"/"And").
+
+        正常短答("好"/"ok"/"完成")不算; 仅当纯 ASCII、无标点、很短时视为截断。
+        """
+        t = (text or "").strip()
+        if not t:
+            return True
+        if t in {"好", "好的", "ok", "okay", "OK", "嗯", "对", "是", "完成", "done", "yes", "no", "y", "n"}:
+            return False
+        if len(t) <= 6 and all(ord(c) < 128 for c in t) and not any(c in ".,;:!?()\"'" for c in t):
+            return True
+        return False
 
     @staticmethod
     def _clean_final_text(text: str) -> str:
