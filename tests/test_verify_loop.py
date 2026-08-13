@@ -296,6 +296,7 @@ def test_dynamic_loop_extension():
     eng.logger = logging.getLogger("test")
     ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
                            config=cfg, max_steps=6)
+    ctx.monitor_enabled = False  # 聚焦测试动态扩展, 不触发监控 LLM
     tr = eng.run(ReActPolicy(), ctx)
     assert len(tr.tools_used) == 9, f"应执行全部 9 次工具调用, 实际 {len(tr.tools_used)}"
     assert ctx.max_steps > 6, f"max_steps 应动态扩展, 实际 {ctx.max_steps}"
@@ -412,6 +413,46 @@ def test_recurrent_depth_reasoning_allows_multi_round_introspection():
     eng.logger = logging.getLogger("test")
     ctx = ExecutionContext(task="复杂分析", available_tools=TOOLS_REGISTRY.get_tools_dict(),
                            config=cfg, max_steps=12)
+    ctx.monitor_enabled = False  # 聚焦测试循环深度, 不触发监控 LLM
     tr = eng.run(ReActPolicy(), ctx)
     assert tr.final_answer == "这是分析结论"
     assert len(tr.steps) >= 3, f"应允许多轮内省, 实际 {len(tr.steps)} steps"
+
+
+def test_branch_monitor_rule_layer():
+    """分支监控 agent: 规则层应检测连续失败/权限错误并生成简明提示."""
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.config import AgentConfig
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=None, config=cfg)
+
+    # 连续工具失败 → 提示
+    ctx = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx.observations = ["tool error: x", "Tool 'web_search' timed out", "error: boom"]
+    hint = eng._rule_monitor(ctx)
+    assert hint and "连续工具失败" in hint, f"应提示换工具: {hint}"
+
+    # 权限错误(全盘扫描) → 提示缩小范围
+    ctx2 = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx2.observations = ["Operation not permitted"] * 4
+    hint2 = eng._rule_monitor(ctx2)
+    assert hint2 and "缩小搜索范围" in hint2, f"应提示缩小范围: {hint2}"
+
+    # 正常 → 无提示
+    ctx3 = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx3.observations = ["成功", "done"]
+    assert eng._rule_monitor(ctx3) is None
+
+
+def test_branch_monitor_inject():
+    """分支监控提示应注入到主 agent 的下一轮 prompt."""
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.config import AgentConfig
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=None, config=cfg)
+    ctx = ExecutionContext(task="t", available_tools={}, config=cfg, max_steps=8)
+    ctx.monitor_hints = ["提示: 换工具"]
+    out = eng._attach_monitor_hints("原始prompt", ctx)
+    assert "监控提示" in out and "换工具" in out
