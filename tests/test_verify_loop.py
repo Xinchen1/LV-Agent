@@ -533,3 +533,30 @@ def test_deep_research_summary_no_meta_blurb():
     src = inspect.getsource(ResearchReportGenerator._generate_summary)
     assert "报告含 '## 证据与置信度'" not in src, "summary 不应含'证据与置信度'说明句"
     assert "HTML 版可直接在浏览器打开阅读" not in src, "summary 不应含 HTML 说明句"
+
+
+def test_search_cache_normalized_key_improves_hit_rate():
+    """缓存键规范化: 相同意图不同说法应命中; 不同主题不串缓存."""
+    from agent_project.tools.search_cache import SearchCache
+    c = SearchCache(disk_path=None)
+
+    # 相同意图不同说法 → 命中
+    same = [
+        ("AI 新闻", "最新的ai新闻"),
+        ("人工智能 趋势 2026", "2026年人工智能最新趋势"),
+        ("hermes 使用", "帮我查一下hermes的用法"),
+        ("天气 北京", "北京的天气怎么样"),
+        ("苹果 AI", "苹果AI的最新动态"),
+    ]
+    for a, b in same:
+        assert c._key(a) == c._key(b), f"应命中同一缓存: {a!r} vs {b!r}"
+
+    # 不同主题 → 严格区分
+    diff = [
+        ("AI 新闻", "足球 新闻"),
+        ("AI 新闻", "AI 趋势"),
+        ("苹果 AI", "苹果 种植"),
+        ("天气 北京", "北京 房价"),
+    ]
+    for a, b in diff:
+        assert c._key(a) != c._key(b), f"不应串缓存: {a!r} vs {b!r}"
