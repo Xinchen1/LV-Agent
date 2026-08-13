@@ -169,14 +169,14 @@ class ToolCallParser:
                         for action in actions:
                             if not isinstance(action, dict):
                                 continue
-                            tool_name = action.get("name") or action.get("tool")
+                            tool_name = action.get("name") or action.get("tool") or action.get("action")
                             args = action.get("args") or action.get("arguments") or action.get("parameters", {})
                             if tool_name == "python_exec":
                                 add_call(tool_name, cls._extract_python_exec_code(args.get("code", "")))
                             else:
                                 add_call(tool_name, args)
                     elif isinstance(actions, dict):
-                        tool_name = actions.get("name") or actions.get("tool")
+                        tool_name = actions.get("name") or actions.get("tool") or actions.get("action")
                         args = actions.get("args") or actions.get("arguments") or actions.get("parameters", {})
                         if tool_name:
                             if tool_name == "python_exec":
@@ -186,6 +186,33 @@ class ToolCallParser:
                     break
                 except Exception:
                     continue
+
+        # Format 5b: JSON {"action": "tool_name", "args": {...}} (action 是字符串, args 同级)
+        # 模型常输出 {thoughts/action/args} 或 {reasoning/action/arguments} 单工具 JSON
+        if not calls:
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                for start in range(first_brace, len(text)):
+                    candidate = text[start:]
+                    if not candidate.startswith("{"):
+                        continue
+                    try:
+                        payload = cls._normalize_json_keys(json.loads(candidate))
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    action_name = payload.get("action") or payload.get("tool") or payload.get("name")
+                    if not isinstance(action_name, str):
+                        continue
+                    args = payload.get("args") or payload.get("arguments") or payload.get("parameters", {})
+                    if not isinstance(args, dict):
+                        args = {}
+                    if action_name == "python_exec":
+                        add_call(action_name, cls._extract_python_exec_code(args.get("code", "")))
+                    else:
+                        add_call(action_name, args)
+                    break
 
         seen = set()
         unique = []
