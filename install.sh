@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenMythos Agent + NVIDIA Step3.5 一键安装脚本
+# OpenMythos Agent + DeepSeek 一键安装脚本
 # 支持: macOS / Linux / Windows (WSL)
 
 set -e  # 遇到错误退出
@@ -28,7 +28,7 @@ echo ""
 echo -e "${YELLOW}[2/7] Checking project structure...${NC}"
 if [ ! -d "../OpenMythos-main" ]; then
     echo -e "${YELLOW}⚠ OpenMythos not found in parent directory${NC}"
-    echo "   You can still use NIM backend without it."
+    echo "   You can still use cloud backends (DeepSeek/OpenAI) without it."
     echo "   To use local OpenMythos:"
     echo "     git clone https://github.com/The-Swarm-Corporation/OpenMythos.git ../OpenMythos-main"
 fi
@@ -79,7 +79,7 @@ if [ -f "../OpenMythos-main/setup.py" ] || [ -f "../OpenMythos-main/pyproject.to
         echo -e "${GREEN}✓ OpenMythos installed${NC}"
     else
         echo -e "${YELLOW}⚠ OpenMythos install skipped (may fail on some systems)${NC}"
-        echo "  You can still use NIM backend without it."
+        echo "  You can still use cloud backends (DeepSeek/OpenAI) without it."
     fi
 else
     echo -e "${YELLOW}⚠ OpenMythos not found, skipping${NC}"
@@ -109,8 +109,8 @@ echo ""
 echo "📝 Next steps:"
 echo "   1. Edit config.yaml:"
 echo "      agent:"
-echo "        backend: \"nim\""
-echo "        nim:"
+echo "        backend: \"deepseek\""
+echo "        deepseek:"
 echo "          api_key: \"your-key-here\""
 echo ""
 echo "   2. Test the installation:"

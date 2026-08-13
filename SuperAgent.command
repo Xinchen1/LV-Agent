@@ -54,7 +54,7 @@ if [ ! -f "config.yaml" ]; then
     if [ -f "config.example.yaml" ]; then
         echo -e "${YELLOW}config.yaml not found, copying from config.example.yaml${NC}"
         cp config.example.yaml config.yaml
-        echo -e "${RED}IMPORTANT: edit config.yaml and set your API key (or use NIM_API_KEY env var)${NC}"
+        echo -e "${RED}IMPORTANT: edit config.yaml and set your API key (or use DEEPSEEK_API_KEY env var)${NC}"
     else
         echo -e "${RED}no config.yaml or config.example.yaml found${NC}"
         exit 1

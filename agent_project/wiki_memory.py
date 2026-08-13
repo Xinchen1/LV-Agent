@@ -56,7 +56,7 @@ class LLMClient:
     """
     最简 OpenAI-compatible 调用接口。
     传入一个实现 `chat(messages) -> str` 方法的具体 client 即可。
-    也可以传入 NIMBackend / OpenAIBackend 实例。
+    也可以传入 OpenAICompatBackend / OpenAIBackend 实例。
     """
 
     def chat(self, messages: List[Dict[str, str]], *, temperature: float = 0.3,
@@ -99,7 +99,7 @@ class OpenAICompatibleClient(LLMClient):
 
 class PassthroughBackendClient(LLMClient):
     """
-    直接包裹已有 backend 对象（NIMBackend / OpenAIBackend）。
+    直接包裹已有 backend 对象（OpenAICompatBackend / OpenAIBackend）。
     这些 backend 的接口是 generate(prompt, n_loops, temperature, max_tokens, ...)
     我们用 system prompt 把 conversation 压进单条 user message。
     """

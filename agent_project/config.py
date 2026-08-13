@@ -271,20 +271,10 @@ class ModelConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    backend: str = Field(default="openai", description="Backend: nim, openai, deepseek, openrouter, anthropic, openmythos")
+    backend: str = Field(default="deepseek", description="Backend: openai, deepseek, openrouter, anthropic, openmythos")
     # 新增：原生官方模型注册表路径（支持 openai / anthropic 格式）
     model_registry_path: Optional[str] = Field(default="agent_project/config/models.yaml",
         description="Path to official native model registry (openai/anthropic format)")
-
-    nim: Dict[str, Any] = Field(default_factory=lambda: {
-        "api_key": None,
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": "meta/llama-3.1-8b-instruct",
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "max_tokens": 4096,
-        "timeout": 180
-    })
 
     openai: Dict[str, Any] = Field(default_factory=lambda: {
         "api_key": None,
@@ -467,9 +457,9 @@ def load_config(config_path: str = "config.yaml") -> AgentConfig:
         if not raw_config.get(key) and key in agent_config and agent_config.get(key):
             merged[key] = agent_config[key]
 
-    backend = merged.get('backend', 'nim')
+    backend = merged.get('backend', 'deepseek')
     # Ensure backend-specific config section exists to avoid AttributeError
-    backend_sections = ['openai', 'openmythos', 'deepseek', 'anthropic', 'openrouter', 'nim']
+    backend_sections = ['openai', 'openmythos', 'deepseek', 'anthropic', 'openrouter']
     for section in backend_sections:
         if backend == section and section not in merged:
             merged[section] = {}

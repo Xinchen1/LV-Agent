@@ -66,7 +66,7 @@ class OpenMythosAgent:
         # 日志优先初始化，确保后续模块加载错误能写入文件
         self._setup_logging()
 
-        # 初始化模型后端(支持NIM或OpenMythos本地)
+        # 初始化模型后端(支持DeepSeek或OpenMythos本地)
         self.backend = self._load_model_backend()
 
         # 核心高级模块占位符（延迟加载）
@@ -407,30 +407,31 @@ class OpenMythosAgent:
         """
         加载模型后端
         支持:
-        - NIM (NVIDIA API) - 推荐,使用Google Gemma 4等
+        - DeepSeek - 推荐,使用deepseek-chat等
         - OpenAI-compatible (本地端点或OpenRouter等)
         - OpenMythos本地模型 (离线)
         """
         # 延迟导入,避免不必要的依赖
-        from .model_backends import NIMBackend, OpenAIBackend, AnthropicBackend, OpenMythosBackend, DeepSeekBackend
+        from .model_backends import OpenAIBackend, AnthropicBackend, OpenMythosBackend, DeepSeekBackend
 
-        if self.config.backend == "nim":
-            nim_cfg = self.config.nim
-            api_key = nim_cfg.get('api_key') or os.getenv('NIM_API_KEY')
+        if self.config.backend == "deepseek":
+            # DeepSeek official API (OpenAI-compatible)
+            ds_cfg = self.config.deepseek
+            api_key = ds_cfg.get('api_key') or os.getenv('DEEPSEEK_API_KEY')
             if not api_key:
                 raise ValueError(
-                    "NIM backend selected but no API key provided. "
-                    "Set agent.nim.api_key in config.yaml or NIM_API_KEY env var."
+                    "DeepSeek backend selected but no API key provided. "
+                    "Set agent.deepseek.api_key in config.yaml or DEEPSEEK_API_KEY env var."
                 )
-
-            backend = NIMBackend(
+            backend = DeepSeekBackend(
                 api_key=api_key,
-                base_url=nim_cfg.get('base_url', 'https://integrate.api.nvidia.com/v1'),
-                model=nim_cfg.get('model', 'google/gemma-4-31b-it'),
-                temperature=nim_cfg.get('temperature', self.config.temperature),
-                top_p=nim_cfg.get('top_p', 0.9),
-                max_tokens=nim_cfg.get('max_tokens', 4096),
-                timeout=nim_cfg.get('timeout', 120),
+                base_url=ds_cfg.get('base_url', 'https://api.deepseek.com'),
+                model=ds_cfg.get('model', 'deepseek-chat'),
+                temperature=ds_cfg.get('temperature', self.config.temperature),
+                top_p=ds_cfg.get('top_p', 0.9),
+                max_tokens=ds_cfg.get('max_tokens', 4096),
+                timeout=ds_cfg.get('timeout', 120),
+                bypass_proxy=ds_cfg.get('bypass_proxy', True),
             )
             backend.tokenizer = self._create_simple_tokenizer()
             return backend
@@ -466,28 +467,6 @@ class OpenMythosAgent:
                 top_p=openai_cfg.get('top_p', 0.9),
                 max_tokens=openai_cfg.get('max_tokens', 4096),
                 timeout=openai_cfg.get('timeout', 120),
-            )
-            backend.tokenizer = self._create_simple_tokenizer()
-            return backend
-
-        elif self.config.backend == "deepseek":
-            # DeepSeek official API (OpenAI-compatible)
-            ds_cfg = self.config.deepseek
-            api_key = ds_cfg.get('api_key') or os.getenv('DEEPSEEK_API_KEY')
-            if not api_key:
-                raise ValueError(
-                    "DeepSeek backend selected but no API key provided. "
-                    "Set agent.deepseek.api_key in config.yaml or DEEPSEEK_API_KEY env var."
-                )
-            backend = DeepSeekBackend(
-                api_key=api_key,
-                base_url=ds_cfg.get('base_url', 'https://api.deepseek.com'),
-                model=ds_cfg.get('model', 'deepseek-chat'),
-                temperature=ds_cfg.get('temperature', self.config.temperature),
-                top_p=ds_cfg.get('top_p', 0.9),
-                max_tokens=ds_cfg.get('max_tokens', 4096),
-                timeout=ds_cfg.get('timeout', 120),
-                bypass_proxy=ds_cfg.get('bypass_proxy', True),
             )
             backend.tokenizer = self._create_simple_tokenizer()
             return backend
@@ -2207,7 +2186,7 @@ class OpenMythosAgent:
     def _clean_fast_answer(self, text: str) -> str:
         """清理 fast path 回复中的多余内容: think 标签残留与尾部回声.
 
-        模型(如 nemotron)有时输出 <thinking>...</thinking> 或回答后再开一个
+        模型(如 deepseek-reasoner)有时输出 <thinking>...</thinking> 或回答后再开一个
         think 块(回声), 被截断后留下 <th 残片或 "可以/我/好的" 等短回声。
         """
         if not text:
@@ -2263,7 +2242,7 @@ class OpenMythosAgent:
     def _is_truncated_answer(cls, text: str) -> bool:
         """判断回答是否疑似流截断(过短/残缺). 正常短答("好"/"ok")不算.
 
-        流被掐断时 NIM 后端可能把残缺内容(如 "The")当完整返回;
+        流被掐断时后端可能把残缺内容(如 "The")当完整返回;
         这类碎片若写进历史会污染后续所有追问。
         """
         t = (text or "").strip()

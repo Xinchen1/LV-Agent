@@ -32,5 +32,5 @@
 
 # Environment variables (copy .env.example to .env)
 # echo "SERPAPI_KEY=your_key_here" > .env
-# echo "NIM_API_KEY=your_nim_key_here" >> .env
+# echo "DEEPSEEK_API_KEY=your_deepseek_key_here" >> .env
 # echo "TELEGRAM_BOT_TOKEN=your_bot_token_here" >> .env

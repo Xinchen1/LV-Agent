@@ -60,7 +60,7 @@ LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循
 - **Dashboard**: `/dashboard` Ctrl+`\`
 
 **Backends**
-- NVIDIA NIM, OpenAI, DeepSeek, Anthropic, OpenRouter, Ollama
+- DeepSeek, OpenAI, Anthropic, OpenRouter, Ollama
 - Streaming with native reasoning-content display
 
 ## Quick Start
@@ -106,7 +106,7 @@ python -m agent_project --task "Your task"
 
 ```yaml
 agent:
-  backend: "deepseek"   # nim | openai | deepseek | anthropic | openrouter | ollama
+  backend: "deepseek"   # deepseek | openai | openrouter | anthropic | ollama
   deepseek:
     api_key: "${DEEPSEEK_API_KEY:-}"
     base_url: "https://api.deepseek.com"
@@ -137,7 +137,7 @@ agent_project/
 │   ├── planning.py         # Task planner
 │   ├── memory.py           # Knowledge graph + memory
 │   ├── self_correction.py  # Self-correction
-│   ├── model_backends.py   # NIM/OpenAI/DeepSeek/Anthropic backends
+│   ├── model_backends.py   # DeepSeek/OpenAI/Anthropic backends
 │   ├── stream_adapters.py  # Terminal rendering
 │   ├── ui/                 # Terminal UI (theme/status bar/cards)
 │   └── tools/              # Tool ecosystem

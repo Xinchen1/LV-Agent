@@ -28,8 +28,8 @@ if exist ".venv\" (
 REM Check config
 findstr /c:"api_key:" config.yaml >nul 2>&1
 if errorlevel 1 (
-    echo WARNING: NIM API key not set in config.yaml
-    echo Edit config.yaml and set agent.nim.api_key
+    echo WARNING: DeepSeek API key not set in config.yaml
+    echo Edit config.yaml and set agent.deepseek.api_key
     echo.
 )
 
