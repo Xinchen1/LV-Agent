@@ -420,27 +420,38 @@ Guidelines:
 """
 
         # 根据n_loops调整思考深度指导
+        # OpenMythos 思路: 循环深度推理(Recurrent-Depth Reasoning)
+        # 把"循环迭代+ACT自适应停止"翻译给文本模型, 让它模拟潜空间循环思考:
+        # 每轮 = 压缩当前理解 -> 反思 -> 更新"思维状态", 自主决定是否继续深挖。
         if n_loops >= 16:
             depth_guide = """
-THINKING DEPTH: VERY HIGH (n_loops=16+)
-- Perform extensive reasoning before each action
-- Consider 3-5 different approaches
-- Verify assumptions step by step
-- Self-critique: "What could go wrong?"
+THINKING DEPTH: RECURRENT-DEPTH REASONING (n_loops=16+, 深层循环)
+执行 OpenMythos 式循环深度推理(在"思维状态空间"迭代, 而非单次线性回答):
+1. ROUND 1(首次前向): 快速通读问题, 形成初步理解。压缩为一行"当前状态"。
+2. ROUND 2..N(循环迭代): 每一轮都基于"上一轮状态"继续——
+   · 修正: 指出上一轮结论的漏洞/未考虑因素
+   · 深化: 从不同视角(因果/反事实/类比)重新审视
+   · 扩张: 尝试 3-5 种不同思路, 含最不可能的那种
+   · 验证: 假设是否成立?证据链是否完整?
+   每轮结束时, 把最新理解压缩成新的"当前状态", 供下一轮使用。
+3. ACT 自适应停止: 每轮自问"状态是否收敛?"——若连续两轮状态无实质变化
+   (无新发现/无新视角/无矛盾), 立即停止循环, 否则继续, 最多到 n_loops。
+4. 收敛后: 基于最终"思维状态"输出答案。
+关键: 这是循环递归, 不是罗列要点。后一轮必须建立在前一轮之上。
 """
         elif n_loops >= 8:
             depth_guide = """
-THINKING DEPTH: HIGH (n_loops=8-15)
-- Think thoroughly but concisely
-- Evaluate 2-3 approaches
-- Check your reasoning
+THINKING DEPTH: RECURRENT REASONING (n_loops=8-15, 中等循环深度)
+1. ROUND 1: 初步理解, 记录"当前状态"。
+2. ROUND 2: 从反方向审视——我哪里可能错了?遗漏了什么?
+3. ROUND 3: 若状态有变化则继续深化(因果/反事实), 否则收敛。
+每轮更新"当前状态", 以最近一轮为基础继续, 不重复已确认结论。
 """
         else:
             depth_guide = """
-THINKING DEPTH: MODERATE (n_loops<8)
-- Quick but careful reasoning
-- 1-2 approach considerations
-- Proceed to action after minimal analysis
+THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
+- 一轮通读 -> 一轮快速核查(有无明显漏洞/缺失) -> 若无大问题即输出。
+- 不展开多轮循环, 保持效率。
 """
 
         return base + depth_guide
@@ -882,27 +893,38 @@ Guidelines:
 """
 
         # 根据n_loops调整思考深度指导
+        # OpenMythos 思路: 循环深度推理(Recurrent-Depth Reasoning)
+        # 把"循环迭代+ACT自适应停止"翻译给文本模型, 让它模拟潜空间循环思考:
+        # 每轮 = 压缩当前理解 -> 反思 -> 更新"思维状态", 自主决定是否继续深挖。
         if n_loops >= 16:
             depth_guide = """
-THINKING DEPTH: VERY HIGH (n_loops=16+)
-- Perform extensive reasoning before each action
-- Consider 3-5 different approaches
-- Verify assumptions step by step
-- Self-critique: "What could go wrong?"
+THINKING DEPTH: RECURRENT-DEPTH REASONING (n_loops=16+, 深层循环)
+执行 OpenMythos 式循环深度推理(在"思维状态空间"迭代, 而非单次线性回答):
+1. ROUND 1(首次前向): 快速通读问题, 形成初步理解。压缩为一行"当前状态"。
+2. ROUND 2..N(循环迭代): 每一轮都基于"上一轮状态"继续——
+   · 修正: 指出上一轮结论的漏洞/未考虑因素
+   · 深化: 从不同视角(因果/反事实/类比)重新审视
+   · 扩张: 尝试 3-5 种不同思路, 含最不可能的那种
+   · 验证: 假设是否成立?证据链是否完整?
+   每轮结束时, 把最新理解压缩成新的"当前状态", 供下一轮使用。
+3. ACT 自适应停止: 每轮自问"状态是否收敛?"——若连续两轮状态无实质变化
+   (无新发现/无新视角/无矛盾), 立即停止循环, 否则继续, 最多到 n_loops。
+4. 收敛后: 基于最终"思维状态"输出答案。
+关键: 这是循环递归, 不是罗列要点。后一轮必须建立在前一轮之上。
 """
         elif n_loops >= 8:
             depth_guide = """
-THINKING DEPTH: HIGH (n_loops=8-15)
-- Think thoroughly but concisely
-- Evaluate 2-3 approaches
-- Check your reasoning
+THINKING DEPTH: RECURRENT REASONING (n_loops=8-15, 中等循环深度)
+1. ROUND 1: 初步理解, 记录"当前状态"。
+2. ROUND 2: 从反方向审视——我哪里可能错了?遗漏了什么?
+3. ROUND 3: 若状态有变化则继续深化(因果/反事实), 否则收敛。
+每轮更新"当前状态", 以最近一轮为基础继续, 不重复已确认结论。
 """
         else:
             depth_guide = """
-THINKING DEPTH: MODERATE (n_loops<8)
-- Quick but careful reasoning
-- 1-2 approach considerations
-- Proceed to action after minimal analysis
+THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
+- 一轮通读 -> 一轮快速核查(有无明显漏洞/缺失) -> 若无大问题即输出。
+- 不展开多轮循环, 保持效率。
 """
 
         return base + depth_guide

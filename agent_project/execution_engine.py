@@ -520,6 +520,20 @@ class ExecutionEngine:
                     if not parsed.done and step_number < ctx.max_steps:
                         ctx.steps.append(record)
                         trace.steps.append(record)
+                        # OpenMythos 循环深度: 复杂任务(预算≥8)允许模型继续内省
+                        # (压缩状态->反思->更新), 而非强制立即行动; 但限制内省轮数防死循环。
+                        is_deep = ctx.max_steps >= 8
+                        think_steps = sum(1 for st in ctx.steps if not st.tool_calls and not st.final_answer)
+                        if is_deep and think_steps < 3 and self._wants_to_continue(output):
+                            next_prompt = policy.next_prompt(ctx, output)
+                            prompt = (next_prompt or "") + (
+                                "\n\n继续你的循环深度思考(ROUND 下一轮):\n"
+                                "· 压缩当前理解为一行\"思维状态\"\n"
+                                "· 从新视角(因果/反事实/类比)审视或验证\n"
+                                "· 若状态已收敛, 请直接给出 Final Answer; 否则更新状态继续。\n"
+                                "你可以在思考中更新状态, 也可以调用工具获取信息。"
+                            )
+                            continue
                         nudge = (
                             "\n\n注意: 你刚才只进行了思考, 没有做出下一步动作。\n"
                             "· 若任务需要查文件/搜索/执行, 必须立即输出: Action: [TOOL:工具名] {参数} [/TOOL]\n"
