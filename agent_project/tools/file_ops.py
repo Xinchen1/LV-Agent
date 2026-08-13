@@ -744,6 +744,10 @@ class FileOpsTool(BaseTool):
             if action == "open":
                 resolved_path = str(self._resolve_path_smart(path))
                 return self._open_path(resolved_path)
+            if action == "apply_diff":
+                return self._python_apply_diff(p, payload)
+            if action == "verify":
+                return self._python_verify(p)
             # Unsupported action in fallback
             return ToolResult(
                 success=False, output="",
@@ -753,6 +757,131 @@ class FileOpsTool(BaseTool):
             )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Python fallback error: {e}")
+
+    def _python_apply_diff(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
+        """纯 Python 的 apply_diff: 支持 SEARCH/REPLACE 块, 精确+行级匹配, 失败给最近行提示."""
+        import shutil
+        diff = payload.get("diff", "")
+        blocks = re.findall(
+            r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE",
+            diff,
+            flags=re.DOTALL,
+        )
+        if not blocks:
+            return ToolResult(success=False, output="", error="No valid diff blocks found")
+        if not p.exists():
+            return ToolResult(success=False, output="", error=f"File not found: {p}")
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"Failed to read {p}: {e}")
+
+        def apply_block(current: str, search: str, replace: str) -> Optional[str]:
+            if search in current:
+                return current.replace(search, replace, 1)
+            # 行级匹配(忽略行尾空白差异)
+            cur_lines = current.split("\n")
+            s_lines = search.split("\n")
+            for i in range(len(cur_lines) - len(s_lines) + 1):
+                if all(cur_lines[i + j].rstrip() == s_lines[j].rstrip() for j in range(len(s_lines))):
+                    return "\n".join(cur_lines[:i] + replace.split("\n") + cur_lines[i + len(s_lines):])
+            return None
+
+        backup = None
+        try:
+            backup = str(p) + f".{int(time.time())}.bak"
+            shutil.copy2(p, backup)
+        except Exception:
+            backup = None
+
+        current = content
+        applied = 0
+        for idx, (search, replace) in enumerate(blocks, 1):
+            next_content = apply_block(current, search, replace)
+            if next_content is None:
+                # 最近行定位
+                hint = None
+                for line in search.split("\n"):
+                    for li, cl in enumerate(current.split("\n"), 1):
+                        if line.strip() and (line.strip() in cl or cl.strip() == line.strip()):
+                            hint = li
+                            break
+                    if hint:
+                        break
+                detail = f"Block {idx}/{len(blocks)} not found"
+                if hint:
+                    detail += f" (nearest match around line {hint})"
+                detail += ". Check whitespace/indentation and that SEARCH exactly matches file content."
+                return ToolResult(success=False, output="", error=detail)
+            current = next_content
+            applied += 1
+
+        try:
+            p.write_text(current, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"Failed to write {p}: {e}")
+        out = f"Applied {applied} diff block(s) to {p}"
+        if backup:
+            out += f"\nBackup saved to {backup}"
+        # 自动语法验证
+        verr = self._python_verify_syntax(p, current)
+        if verr:
+            out += f"\n⚠ SYNTAX VERIFICATION FAILED:\n{verr}\nPlease fix the syntax and re-apply."
+        return ToolResult(success=True, output=out, metadata={"fallback": "python"})
+
+    def _python_verify(self, p: Path) -> ToolResult:
+        if not p.exists():
+            return ToolResult(success=False, output="", error=f"File not found: {p}")
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"Failed to read {p}: {e}")
+        verr = self._python_verify_syntax(p, content)
+        if verr:
+            return ToolResult(success=False, output="", error=verr)
+        ext = p.suffix.lower().lstrip(".")
+        names = {"py": "Python", "js": "JavaScript", "ts": "TypeScript", "json": "JSON",
+                 "yaml": "YAML", "yml": "YAML", "sh": "Shell"}
+        name = names.get(ext, "Unknown")
+        return ToolResult(success=True, output=f"{name} syntax OK", metadata={"fallback": "python"})
+
+    def _python_verify_syntax(self, p: Path, content: str) -> str:
+        """返回空串表示语法 OK, 否则返回错误描述."""
+        ext = p.suffix.lower().lstrip(".")
+        try:
+            if ext == "py":
+                import ast
+                ast.parse(content)
+                return ""
+            if ext in ("json",):
+                json.loads(content)
+                return ""
+            if ext in ("yaml", "yml"):
+                import yaml
+                yaml.safe_load(content)
+                return ""
+            if ext in ("js", "mjs", "cjs", "ts"):
+                # 无 node 时跳过 JS 检查
+                import subprocess as sp
+                if ext == "ts":
+                    return ""  # TS 需要 tsc, 跳过
+                r = sp.run(["node", "--check"], input=content.encode(),
+                           capture_output=True, timeout=15)
+                if r.returncode != 0:
+                    return f"JS syntax error: {r.stderr.decode()[:300]}"
+                return ""
+            if ext in ("sh", "command", "bash"):
+                import subprocess as sp
+                r = sp.run(["bash", "-n"], input=content.encode(),
+                           capture_output=True, timeout=15)
+                if r.returncode != 0:
+                    return f"Shell syntax error: {r.stderr.decode()[:300]}"
+                return ""
+            return ""
+        except SyntaxError as e:
+            return f"Syntax error: {e}"
+        except Exception as e:
+            return f"Verification error: {e}"
 
     def _json_to_result(self, data: Dict[str, Any]) -> ToolResult:
         return ToolResult(
