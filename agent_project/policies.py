@@ -55,7 +55,7 @@ class ToolCallParser:
         registry = TOOLS_REGISTRY
 
         def strip_tool_markers(s: str) -> str:
-            return re.sub(r"\[/TOOL\]|</tool_call>|</function>|</parameter>", "", s, flags=re.IGNORECASE).strip()
+            return re.sub(r"\[/TOOL\]|</tool_call>|</function>", "", s, flags=re.IGNORECASE).strip()
 
         def add_call(tool_name: str, args: Dict[str, Any]):
             if not isinstance(tool_name, str) or not isinstance(args, dict):
@@ -213,6 +213,41 @@ class ToolCallParser:
                     else:
                         add_call(action_name, args)
                     break
+
+        # Format 6: function-call style: tool_name(key="value", key2="value2")
+        # 用平衡括号匹配, 支持嵌套括号(如 python_exec("shutil.rmtree(p)"))
+        if not calls:
+            func_pattern = re.compile(r"(?<!\w)([a-zA-Z_][\w_]*)\s*\(", re.DOTALL)
+            for m in func_pattern.finditer(text):
+                tool_name = m.group(1).strip()
+                if registry.get(tool_name) is None:
+                    continue
+                start = m.end() - 1
+                depth = 0
+                i = start
+                while i < len(text):
+                    if text[i] == "(":
+                        depth += 1
+                    elif text[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                if depth != 0:
+                    continue
+                args_str = text[start + 1:i].strip()
+                if args_str:
+                    single_str = (args_str.startswith('"') and args_str.endswith('"')) or \
+                                 (args_str.startswith("'") and args_str.endswith("'"))
+                    if single_str and tool_name in ("bash_exec", "python_exec", "run_code"):
+                        inner = args_str[1:-1]
+                        inner = inner.replace('\\"', '"').replace("\\'", "'")
+                        arguments = {("command" if tool_name == "bash_exec" else "code"): inner}
+                    else:
+                        arguments = cls._parse_args(args_str)
+                else:
+                    arguments = {}
+                add_call(tool_name, arguments)
 
         seen = set()
         unique = []
