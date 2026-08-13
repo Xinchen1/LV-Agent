@@ -382,3 +382,36 @@ def test_post_execution_verification_file_exists():
     # 写入无效路径应失败(系统会拦截)
     r2 = tool.execute(action="write", path="/nonexistent_dir_xxx_123/xx.md", content="x")
     assert not r2.success, "无效路径写入应失败"
+
+
+def test_recurrent_depth_reasoning_allows_multi_round_introspection():
+    """复杂任务允许模型多轮内省(OpenMythos 循环深度思路), 不被强制打断."""
+    import sys
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+    import logging
+
+    class FB:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c == 1:
+                return '<think>初步理解</think>\nThought: 让我继续深入思考'
+            if self.c == 2:
+                return '<think>反方向审视, 发现遗漏</think>\nThought: 还需要再看看因果链'
+            if self.c == 3:
+                return '<think>状态收敛</think>\nFinal Answer: 这是分析结论'
+            return 'Final Answer: done'
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=FB(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="复杂分析", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                           config=cfg, max_steps=12)
+    tr = eng.run(ReActPolicy(), ctx)
+    assert tr.final_answer == "这是分析结论"
+    assert len(tr.steps) >= 3, f"应允许多轮内省, 实际 {len(tr.steps)} steps"
