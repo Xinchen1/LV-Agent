@@ -93,3 +93,22 @@ def test_tool_calls_array_json_parsing():
 
     first = a._parse_output_for_action(out)
     assert first is not None and first.tool_name == "bash_exec"
+
+
+def test_read_folder_markdown_is_instance_method():
+    """_read_folder_markdown 必须是实例方法(有 self), 否则实例调用会报缺参."""
+    import inspect
+    from agent_project.agent import OpenMythosAgent
+    m = getattr(OpenMythosAgent, "_read_folder_markdown")
+    assert not isinstance(m, staticmethod), "不应是 staticmethod(签名含 self 会导致缺参)"
+    sig = inspect.signature(m)
+    assert "self" in sig.parameters, "签名应包含 self(实例方法)"
+
+    # 实例调用不应报 TypeError
+    a = make_agent()
+    a.conversation_history = []
+    try:
+        out = a._read_folder_markdown("/Users/mac/Desktop/grok-build")
+        assert out == "" or isinstance(out, str)
+    except TypeError as e:
+        assert False, f"实例调用 _read_folder_markdown 报错: {e}"
