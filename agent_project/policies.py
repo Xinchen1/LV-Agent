@@ -61,9 +61,16 @@ class ToolCallParser:
             if not isinstance(tool_name, str) or not isinstance(args, dict):
                 return
             args = cls._sanitize_parsed_args(args)
+            # 工具名大小写归一化: 模型可能输出 BASH_EXEC / Bash_Exec, registry 用小写
             tool = registry.get(tool_name)
             if tool is None:
+                tool = registry.get(tool_name.lower())
+            if tool is None:
+                tool = registry.get(tool_name.strip().lower())
+            if tool is None:
                 return
+            # 统一使用注册名, 后续 file_ops/python_exec 特判也用注册名
+            tool_name = tool.name if hasattr(tool, "name") else tool_name
             if tool_name == "file_ops":
                 action = args.get("action")
                 for key in list(args.keys()):
@@ -97,12 +104,13 @@ class ToolCallParser:
 
         # Format 1b: [TOOL:name] args without closing tag
         # 允许行首列表标记(如 "- [TOOL:...]" / "1. [TOOL:...]" / "* [TOOL:...]")
+        valid_lower = set(t.lower() for t in registry.list_tools())
         for match in re.finditer(r"^[ \t]*(?:[-*•]|\d+[.)]|>)?[ \t]*\[TOOL:([^\]]+)\][ \t]*(.*?)[ \t]*$", text, re.MULTILINE | re.IGNORECASE):
             tool_name = match.group(1).strip()
             args_str = strip_tool_markers(match.group(2))
-            if tool_name not in set(registry.list_tools()):
+            if tool_name.lower() not in valid_lower:
                 continue
-            if tool_name == "python_exec":
+            if tool_name.lower() == "python_exec":
                 add_call(tool_name, cls._extract_python_exec_code(args_str))
             else:
                 add_call(tool_name, cls._parse_args(args_str))
@@ -121,7 +129,7 @@ class ToolCallParser:
             add_call(tool_name, args)
 
         # Format 3: python_exec(code=...)
-        for match in re.finditer(r"^[ \t]*python_exec\s*\((.*?)\)[ \t]*$", text, re.MULTILINE | re.DOTALL):
+        for match in re.finditer(r"^[ \t]*python_exec\s*\((.*?)\)[ \t]*$", text, re.MULTILINE | re.DOTALL | re.IGNORECASE):
             args_str = strip_tool_markers(match.group(1))
             add_call("python_exec", cls._extract_python_exec_code(args_str))
 
@@ -221,7 +229,7 @@ class ToolCallParser:
             func_pattern = re.compile(r"(?<!\w)([a-zA-Z_][\w_]*)\s*\(", re.DOTALL)
             for m in func_pattern.finditer(text):
                 tool_name = m.group(1).strip()
-                if registry.get(tool_name) is None:
+                if registry.get(tool_name) is None and registry.get(tool_name.lower()) is None:
                     continue
                 start = m.end() - 1
                 depth = 0
@@ -240,10 +248,11 @@ class ToolCallParser:
                 if args_str:
                     single_str = (args_str.startswith('"') and args_str.endswith('"')) or \
                                  (args_str.startswith("'") and args_str.endswith("'"))
-                    if single_str and tool_name in ("bash_exec", "python_exec", "run_code"):
+                    tool_lower = tool_name.lower()
+                    if single_str and tool_lower in ("bash_exec", "python_exec", "run_code"):
                         inner = args_str[1:-1]
                         inner = inner.replace('\\"', '"').replace("\\'", "'")
-                        arguments = {("command" if tool_name == "bash_exec" else "code"): inner}
+                        arguments = {("command" if tool_lower == "bash_exec" else "code"): inner}
                     else:
                         arguments = cls._parse_args(args_str)
                 else:
