@@ -456,3 +456,31 @@ def test_branch_monitor_inject():
     ctx.monitor_hints = ["提示: 换工具"]
     out = eng._attach_monitor_hints("原始prompt", ctx)
     assert "监控提示" in out and "换工具" in out
+
+
+def test_collaborative_backfill():
+    """协作 agent: 检测到主 agent 失败时主动补位执行子任务."""
+    import logging
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine, StepRecord
+    from agent_project.config import AgentConfig
+
+    class FB:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            return '{"problem": "主agent搜索失败", "backfill": "web_search(query=AI新闻 最新)"}'
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=FB(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="搜集AI新闻", available_tools={}, config=cfg, max_steps=10)
+    ctx.observations.append("Tool error: No search results returned")
+    for i in range(2):
+        ctx.steps.append(StepRecord(step_number=i+1, prompt="p", output="o", reasoning="r",
+                                    tool_calls=[], observations=["error"]))
+
+    result = eng._llm_monitor(ctx)
+    assert result and "协作补位" in result, f"应主动补位, 实际: {result}"
+    assert "web_search" in result
+    # 补位结果应写入观察
+    assert any("协作补位" in o for o in ctx.observations)
