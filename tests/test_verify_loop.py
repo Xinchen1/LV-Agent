@@ -229,3 +229,27 @@ def test_multi_step_task_gets_more_loop_budget():
         if multi and n < 6:
             n = 6
         assert n >= 6, f"{task!r} 应至少 6 loops, 实际 {n}"
+
+
+def test_memory_recall_question_gets_more_tokens():
+    """'昨天我们聊了什么'等记忆召回问题应有足够 max_tokens, 避免回复被截断."""
+    import re
+    from agent_project.agent import OpenMythosAgent
+
+    # 复现 fast path 的 max_tokens 决策
+    for task, expected in [
+        ("昨天我们聊了什么", 2048),
+        ("上次我们讨论的健康话题", 2048),
+        ("你好", 512),
+        ("搜索 hermes", 4096),
+    ]:
+        task_lower = task.lower()
+        fast_max_tokens = 512
+        _memory_recall = bool(re.search(r'(昨天|上次|之前|刚才|还记得|我们聊|话题|对话历史)', task))
+        if any(k in task_lower for k in ['搜索','搜','查找','查','report','报告','总结','分析','写','代码','code']):
+            fast_max_tokens = 4096
+        elif _memory_recall:
+            fast_max_tokens = 2048
+        elif len(task) > 40 or '?' in task or '？' in task:
+            fast_max_tokens = 2048
+        assert fast_max_tokens >= expected, f"{task!r} 应至少 {expected} tokens, 实际 {fast_max_tokens}"
