@@ -796,6 +796,35 @@ class OpenMythosAgent:
         final_answer = report_result.get("final_answer", "")
         self.last_report_path = report_result.get("report_path")
 
+        # 后置核验: 深度研究必须真实产出报告文件(非空)且有来源, 否则视为失败并补救。
+        # 防止搜索失败(sources=0)时 agent 谎报"研究完成"。
+        _report_path = report_result.get("report_path") or report_result.get("metadata", {}).get("report_path")
+        _sources_count = (report_result.get("metadata", {}) or {}).get("sources_count", 0)
+        _report_valid = False
+        if _report_path:
+            try:
+                from pathlib import Path as _P
+                rp = _P(_report_path)
+                _report_valid = rp.exists() and rp.stat().st_size > 200 and _sources_count > 0
+            except Exception:
+                _report_valid = False
+        if not _report_valid:
+            # 深度研究未真正完成(无报告/空报告/无来源): 降级为普通深度回答 + 提示重试
+            self.logger.warning(f"deep research verification FAILED: path={_report_path} sources={_sources_count}")
+            if _report_path:
+                try:
+                    from pathlib import Path as _P
+                    rp = _P(_report_path)
+                    if rp.exists() and rp.stat().st_size > 200:
+                        # 文件在但无来源: 至少告知用户文件位置
+                        final_answer = (final_answer or "") + f"\n\n(注: 报告已保存, 但本次搜索来源较少, 内容可能不够全面。)"
+                    else:
+                        final_answer = (final_answer or "") + "\n\n⚠ 深度研究的报告未能完整生成(搜索未返回结果)。请稍后重试, 或换个表述再试。"
+                except Exception:
+                    pass
+            else:
+                final_answer = (final_answer or "") + "\n\n⚠ 深度研究的报告未能生成(搜索未返回结果)。请稍后重试。"
+
         # Persist report summary to file memory.
         raw_mm = getattr(self, "_raw_memory_manager", None)
         if raw_mm is not None and hasattr(raw_mm, "remember_file"):

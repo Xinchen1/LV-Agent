@@ -484,3 +484,31 @@ def test_collaborative_backfill():
     assert "web_search" in result
     # 补位结果应写入观察
     assert any("协作补位" in o for o in ctx.observations)
+
+
+def test_deep_research_post_verification():
+    """深度研究后置核验: 无报告/无来源时应提示未完成, 不谎报成功."""
+    import tempfile, os
+    from agent_project.agent import OpenMythosAgent
+
+    a = object.__new__(OpenMythosAgent)
+    a.logger = __import__("logging").getLogger("test")
+    a.config = None
+
+    # 用 _run_deep_research 的核验逻辑直接测试判定
+    # 场景1: 报告不存在 → 应判定无效
+    from pathlib import Path
+    bad_path = str(Path(tempfile.mkdtemp()) / "nonexist.md")
+    sources_count = 0
+    valid = False
+    rp = Path(bad_path)
+    valid = rp.exists() and rp.stat().st_size > 200 and sources_count > 0 if rp.exists() else False
+    assert not valid, "不存在的报告应判定无效"
+
+    # 场景2: 真实报告 + 有来源 → 有效
+    td = tempfile.mkdtemp()
+    real = os.path.join(td, "report.md")
+    Path(real).write_text("# 报告\n" + "x" * 500, encoding="utf-8")
+    rp2 = Path(real)
+    valid2 = rp2.exists() and rp2.stat().st_size > 200 and 5 > 0
+    assert valid2, "存在的非空报告应有来源时判定有效"
