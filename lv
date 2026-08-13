@@ -1,0 +1,74 @@
+#!/bin/bash
+# Lv agent global launcher
+# Preserves the user's current working directory.
+
+set -e
+
+# Resolve this script's directory, following symlinks.
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SOURCE" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
+
+# venv lives at the repo root (parent of agent_project).
+REPO_ROOT="$(cd "$PROJECT_DIR/.." && pwd)"
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+SUPER_AGENT="$PROJECT_DIR/super_agent.py"
+# Optional local LLM proxy. Override via OMNIROUTE_DIR env var; skipped if absent.
+OMNIROUTE_DIR="${OMNIROUTE_DIR:-}"
+
+# Auto-start omniroute (local DeepSeek V4 proxy) if not already running
+if [ -n "$OMNIROUTE_DIR" ] && [ -x "${OMNIROUTE_DIR}/omniroute" ] && ! curl -s http://localhost:20128/health >/dev/null 2>&1; then
+    echo "   starting omniroute (local LLM proxy)..."
+    ( cd "$OMNIROUTE_DIR" && set -a && . .env && set +a && omniroute ) 2>/dev/null &
+    for i in $(seq 1 30); do
+        curl -s http://localhost:20128/health >/dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+
+# Load NIM API key from config.yaml so the agent always has it.
+# 注意: 不要用系统 python3 解析 yaml —— 用户环境的 Python.framework 3.13
+# 在 import yaml(C 扩展)时会因代码签名无效崩溃(CODESIGNING, Invalid Page)。
+# 这里用纯 shell 提取 nim 段落的 api_key。
+NIM_KEY=$(grep -A8 '^[[:space:]]*nim:' "$PROJECT_DIR/config.yaml" 2>/dev/null \
+    | grep 'api_key' | head -1 \
+    | sed -E 's/^[[:space:]]*api_key:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/' )
+if [ -n "$NIM_KEY" ]; then
+    export NIM_API_KEY="$NIM_KEY"
+fi
+
+# Avoid vector-deps trying to phone home during import (keeps startup fast/offline)
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export CHROMADB_TELEMETRY_DISABLED=1
+
+# Ensure virtual environment exists (at the repo root, alongside agent_project).
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "creating virtual environment at $REPO_ROOT/.venv ..."
+    # 优先用 homebrew python3(避免系统 Python.framework 3.13 的代码签名崩溃)
+    PY_LAUNCHER="/opt/homebrew/bin/python3"
+    [ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="/usr/bin/python3"
+    [ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="python3"
+    "$PY_LAUNCHER" -m venv "$REPO_ROOT/.venv"
+    # Prefer the lightweight core deps so the agent starts fast on any machine.
+    # requirements-core.txt excludes torch/chromadb/sentence-transformers (heavy,
+    # architecture-sensitive). Install requirements-minimal.txt manually for
+    # full memory/embedding features.
+    # Use Tsinghua PyPI mirror for faster, more reliable installs in China.
+    PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+    if [ -f "$SCRIPT_DIR/requirements-core.txt" ]; then
+        "$VENV_PYTHON" -m pip install -r "$SCRIPT_DIR/requirements-core.txt" $PIP_MIRROR --quiet
+    elif [ -f "$SCRIPT_DIR/requirements-minimal.txt" ]; then
+        "$VENV_PYTHON" -m pip install -r "$SCRIPT_DIR/requirements-minimal.txt" $PIP_MIRROR --quiet
+    else
+        "$VENV_PYTHON" -m pip install openai pyyaml pydantic requests tiktoken rich beautifulsoup4 $PIP_MIRROR --quiet
+    fi
+fi
+
+# Run the agent from the user's current directory, preserving cwd.
+exec "$VENV_PYTHON" "$SUPER_AGENT" "$@"
