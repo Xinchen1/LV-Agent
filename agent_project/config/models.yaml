@@ -1,0 +1,153 @@
+# 官方原生模型注册表 — 支持 Anthropic Messages 格式 & OpenAI Chat 格式
+# 流程：选后端 → 选格式 → 选模型 → 自动匹配 base_url / api_key
+
+models:
+  # ===== OpenAI 格式（Chat Completions /v1/chat/completions）=====
+  openai_native:
+    label: "OpenAI 格式 — 原生官方"
+    description: "使用 OpenAI /v1/chat/completions API，兼容 DeepSeek、Kimi、Qwen 等官方端点"
+    format: "openai_chat"
+    base_url_template: "https://api.{provider}/v1"
+    api_key_env: "{provider}_API_KEY"
+
+    providers:
+      # DeepSeek 官方
+      deepseek:
+        provider_id: "deepseek"
+        base_url: "https://api.deepseek.com/v1"
+        api_key_env: "DEEPSEEK_API_KEY"
+        model_list:
+          - id: "deepseek-chat"
+            name: "DeepSeek Chat (官方)"
+            model_name: "deepseek-chat"
+            description: "DeepSeek 官方聊天模型，支持工具调用和长上下文"
+            max_tokens: 8192
+            recommended_for: ["agent", "chat", "reasoning"]
+          - id: "deepseek-reasoner"
+            name: "DeepSeek Reasoner (推理版)"
+            model_name: "deepseek-reasoner"
+            description: "DeepSeek 官方推理增强版，强化多步推理能力"
+            max_tokens: 8192
+            recommended_for: ["deep_reasoning", "math", "analysis"]
+          - id: "deepseek-coder"
+            name: "DeepSeek Coder (代码版)"
+            model_name: "deepseek-coder"
+            description: "DeepSeek 代码专用模型"
+            max_tokens: 8192
+            recommended_for: ["code", "python_exec"]
+
+      # Kimi / Moonshot 官方
+      kimi:
+        provider_id: "kimi"
+        base_url: "https://api.moonshot.cn/v1"
+        api_key_env: "MOONSHOT_API_KEY"
+        model_list:
+          - id: "moonshot-v1-8k"
+            name: "Kimi k1.5 (8K 上下文)"
+            model_name: "moonshot-v1-8k"
+            description: "Kimi 官方 8K 上下文模型，流畅中文交互"
+            max_tokens: 8192
+            recommended_for: ["agent", "chat", "reasoning"]
+          - id: "moonshot-v1-32k"
+            name: "Kimi k1.5 (32K 上下文)"
+            model_name: "moonshot-v1-32k"
+            description: "Kimi 官方 32K 长上下文模型，适合长文档分析"
+            max_tokens: 32768
+            recommended_for: ["file_ops", "analysis", "long_context"]
+          - id: "moonshot-v1-128k"
+            name: "Kimi k1.5 (128K 上下文)"
+            model_name: "moonshot-v1-128k"
+            description: "Kimi 官方 128K 超长上下文，处理大型项目源码"
+            max_tokens: 131072
+            recommended_for: ["large_project", "codebase_analysis"]
+          - id: "kimi-k1.5"
+            name: "Kimi k1.5 (通用)"
+            model_name: "kimi-k1.5"
+            description: "Kimi 最新通用推理模型，原生支持工具调用"
+            max_tokens: 8192
+            recommended_for: ["agent", "reasoning", "tools"]
+
+      # Qwen / 通义千问 官方
+      qwen:
+        provider_id: "qwen"
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        api_key_env: "DASHSCOPE_API_KEY"
+        model_list:
+          - id: "qwen-max"
+            name: "通义千问 Qwen-Max"
+            model_name: "qwen-max"
+            description: "通义千问官方旗舰模型"
+            max_tokens: 32768
+            recommended_for: ["agent", "reasoning"]
+          - id: "qwen-plus"
+            name: "通义千问 Qwen-Plus"
+            model_name: "qwen-plus"
+            description: "通义千问高效平衡版"
+            max_tokens: 32768
+            recommended_for: ["agent", "chat"]
+
+  # ===== Anthropic 格式（Messages API /v1/messages）=====
+  anthropic_native:
+    label: "Anthropic 格式 — 原生官方"
+    description: "使用 Anthropic Messages API（/v1/messages），原生 tool_use / tool_result 格式"
+    format: "anthropic_messages"
+    base_url_template: "https://api.{provider}/v1"
+    api_key_env: "ANTHROPIC_API_KEY"
+
+    providers:
+      anthropic:
+        provider_id: "anthropic"
+        base_url: "https://api.anthropic.com/v1"
+        api_key_env: "ANTHROPIC_API_KEY"
+        model_list:
+          - id: "claude-3-5-sonnet"
+            name: "Claude 3.5 Sonnet (官方)"
+            model_name: "claude-3-5-sonnet-20241022"
+            description: "Anthropic 官方高性能推理模型，原生 tool_use 支持"
+            max_tokens: 8192
+            recommended_for: ["agent", "reasoning", "tools", "deep_thinking"]
+          - id: "claude-3-7-sonnet"
+            name: "Claude 3.7 Sonnet (官方)"
+            model_name: "claude-3-7-sonnet-20250219"
+            description: "Anthropic 最新推理增强版，支持扩展思考模式"
+            max_tokens: 8192
+            recommended_for: ["agent", "reasoning", "deep_thinking"]
+          - id: "claude-4-sonnet"
+            name: "Claude 4 Sonnet (官方预览)"
+            model_name: "claude-sonnet-4-20250514"
+            description: "Anthropic 下一代旗舰模型"
+            max_tokens: 16384
+            recommended_for: ["agent", "research", "analysis"]
+          - id: "claude-opus"
+            name: "Claude Opus (官方)"
+            model_name: "claude-opus-4-20250514"
+            description: "Anthropic 最高级推理能力模型"
+            max_tokens: 8192
+            recommended_for: ["deep_analysis", "reasoning"]
+
+  # ===== NIM 格式（NVIDIA 兼容 /v1/chat/completions）=====
+  nim_compatible:
+    label: "NVIDIA NIM 格式"
+    description: "NVIDIA NIM 兼容端点，使用 OpenAI Chat 格式但通过 NVIDIA 代理"
+    format: "openai_chat"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NIM_API_KEY"
+    model_list:
+      - id: "nim-gemma-3"
+        name: "NVIDIA Gemma 3 (NIM)"
+        model_name: "google/gemma-3-27b-it"
+        description: "NVIDIA NIM 托管的 Gemma 3 官方模型"
+        max_tokens: 4096
+        recommended_for: ["agent", "chat"]
+      - id: "nim-llama-4"
+        name: "NVIDIA Llama 4 (NIM)"
+        model_name: "meta/llama-4-405b-instruct"
+        description: "NIM 托管的大型 Llama 4"
+        max_tokens: 8192
+        recommended_for: ["agent", "reasoning"]
+
+# 流程说明：
+# 1. 用户在 config.yaml 中设置 backend: openai / anthropic / nim
+# 2. 根据 backend 自动匹配对应的 base_url 和格式
+# 3. 用户通过 model 注册表选择具体模型（id 或 model_name）
+# 4. 后端初始化时自动应用正确的格式（openai_chat / anthropic_messages）

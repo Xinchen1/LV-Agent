@@ -1,0 +1,36 @@
+# CPU-optimized PyTorch installation
+# For Mac (M1/M2/M3 or Intel), we use MPS or CPU backend
+
+# Core dependencies (already in pyproject.toml)
+# pip install -e .
+
+# If you don't have OpenMythos locally, install from PyPI:
+# pip install open-mythos
+
+# For better tokenization (optional)
+# pip install tiktoken
+
+# For web search (optional)
+# pip install google-search-results  # SerpAPI
+
+# For vector memory and embeddings (optional but recommended)
+# pip install chromadb sentence-transformers
+
+# For browser automation (optional)
+# pip install playwright
+# playwright install
+
+# For database operations (optional, sqlite is built-in)
+# pip install pymongo  # for MongoDB
+# pip install psycopg2-binary  # for PostgreSQL
+
+# For Telegram bot integration (optional)
+# pip install python-telegram-bot --upgrade
+
+# For enhanced logging
+# pip install rich
+
+# Environment variables (copy .env.example to .env)
+# echo "SERPAPI_KEY=your_key_here" > .env
+# echo "NIM_API_KEY=your_nim_key_here" >> .env
+# echo "TELEGRAM_BOT_TOKEN=your_bot_token_here" >> .env
