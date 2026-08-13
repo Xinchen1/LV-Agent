@@ -80,7 +80,7 @@ pip install -e .
 ```bash
 cp config.example.yaml config.yaml
 # or set env vars
-export NIM_API_KEY="your_key_here"
+export DEEPSEEK_API_KEY="your_key_here"
 ```
 
 ### 3. Run
@@ -106,11 +106,11 @@ python -m agent_project --task "Your task"
 
 ```yaml
 agent:
-  backend: "nim"   # nim | openai | deepseek | anthropic | openrouter | ollama
-  nim:
-    api_key: "${NIM_API_KEY:-}"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    model: "nvidia/nemotron-3-super-120b-a12b"
+  backend: "deepseek"   # nim | openai | deepseek | anthropic | openrouter | ollama
+  deepseek:
+    api_key: "${DEEPSEEK_API_KEY:-}"
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-chat"   # or "deepseek-reasoner"
 ```
 
 See `config.example.yaml` for all options.
