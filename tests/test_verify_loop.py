@@ -253,3 +253,18 @@ def test_memory_recall_question_gets_more_tokens():
         elif len(task) > 40 or '?' in task or '？' in task:
             fast_max_tokens = 2048
         assert fast_max_tokens >= expected, f"{task!r} 应至少 {expected} tokens, 实际 {fast_max_tokens}"
+
+
+def test_promise_detection_with_immediacy_words():
+    """'马上帮你搜...稍等' 等即时承诺词应被识别为空承诺(光说不做)."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+
+    # 用户实际场景: 说了要做但没执行
+    assert a._is_promise_response("马上帮你搜最新的 AI 动态,稍等～")
+    assert a._is_promise_response("这就去查一下 AI 新闻")
+    assert a._is_promise_response("好的,我来搜索一下")
+
+    # 不应误判: 正常问候 / 有结论的回答
+    assert not a._is_promise_response("你好！有什么可以帮你的吗？")
+    assert not a._is_promise_response("根据搜索结果,今天的 AI 新闻有……")
