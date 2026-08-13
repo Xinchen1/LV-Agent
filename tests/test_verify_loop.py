@@ -141,3 +141,21 @@ def test_main_loop_full_execution_with_json_tool_calls():
     assert trace.final_answer == "loop 执行完成", f"应提取纯文本 final_answer, 实际: {trace.final_answer!r}"
     assert len(trace.steps) >= 3, f"应有多次迭代, 实际 {len(trace.steps)}"
     assert "bash_exec" in trace.tools_used
+
+
+def test_task_complexity_estimation_chinese():
+    """中文复杂任务应获得更高的复杂度估算(动态 loop 调整)."""
+    from agent_project.reasoning import LoopController, ReasoningEngine, ReasoningStrategy
+
+    simple = ReasoningEngine._estimate_task_complexity("你好")
+    complex_cn = ReasoningEngine._estimate_task_complexity("分析一下桌面那个文件夹,看看里面每个爬虫的用途和区别")
+    assert simple < complex_cn, f"中文复杂任务应比简单问候复杂度高: {simple} vs {complex_cn}"
+
+    lc = LoopController(min_loops=2, max_loops=16, default_loops=4)
+    loops_simple = lc.determine_loops("你好", ReasoningStrategy.REACT, estimated_complexity=simple)
+    loops_complex = lc.determine_loops("分析文件夹", ReasoningStrategy.REACT, estimated_complexity=complex_cn)
+    assert loops_complex > loops_simple, f"复杂任务 loop 数应更多: {loops_simple} vs {loops_complex}"
+
+    # 中文重构关键词
+    c = ReasoningEngine._estimate_task_complexity("帮我重构一下这个项目的代码,优化性能并编写单元测试")
+    assert c > 0.3, f"中文重构任务应有较高复杂度: {c}"
