@@ -116,23 +116,37 @@ def safe_default_policy(workspace_root: str = ".") -> List[Rule]:
         ),
         Rule(Decision.ALLOW, EffectClass.PURE, reason="pure computation"),
         Rule(Decision.ALLOW, EffectClass.READ, reason="reads are safe"),
-        # Sensitive system paths
+        Rule(
+            Decision.DENY,
+            EffectClass.WRITE,
+            paths=("../*", "**/../*"),
+            reason="parent-directory traversal",
+        ),
+    ]
+    # 工作区内绝对路径写: 放行(必须在系统敏感路径/**之前, 否则 tempdir/自定义工作区被误拦)
+    if root != ".":
+        rules.insert(6,
+            Rule(Decision.ALLOW, EffectClass.WRITE, paths=(root, f"{root}/**"),
+                 reason="write inside workspace")
+        )
+    # 系统敏感路径(永远拒绝, 即使询问也不放行)
+    rules.append(
         Rule(
             Decision.DENY,
             EffectClass.WRITE,
             paths=("/etc/**", "/usr/**", "/bin/**", "/sbin/**", "/lib/**", "/lib64/**", "/var/**", "/sys/**", "/proc/**", "/.ssh/**", "~/.ssh/**"),
             reason="system or sensitive path write",
-        ),
-        Rule(Decision.DENY, EffectClass.WRITE, paths=("/**",),
-             reason="absolute path write (outside workspace control)"),
-        Rule(Decision.DENY, EffectClass.WRITE, paths=("../*", "**/../*"),
-             reason="parent-directory traversal"),
-    ]
-    if root != ".":
-        rules.append(
-            Rule(Decision.ALLOW, EffectClass.WRITE, paths=(root, f"{root}/**"),
-                 reason="write inside workspace")
         )
+    )
+    # 工作区外绝对路径写: 不直接拦截, 改为询问用户(用户确认才放行)
+    rules.append(
+        Rule(
+            Decision.ASK,
+            EffectClass.WRITE,
+            paths=("/**",),
+            reason="absolute path write (outside workspace control)",
+        )
+    )
     rules.extend([
         Rule(Decision.ALLOW, EffectClass.WRITE, reason="relative write inside cwd"),
         # 执行代码/命令是该 Agent 的核心能力: 非破坏性命令放行
@@ -217,6 +231,27 @@ class Kernel:
         self.audit = audit
         self.allowlist_path = allowlist_path
         self.allowlist: Set[str] = load_allowlist(allowlist_path) if allowlist_path else set()
+
+    def allowlist_add(self, effect: Effect) -> None:
+        """记住用户手动批准的效应(写日志以便持久化)."""
+        try:
+            import json
+            serialized = json.dumps(effect.arguments, sort_keys=True, ensure_ascii=False)
+            self.allowlist.add(serialized)
+            cmd = effect.arguments.get("command") if isinstance(effect.arguments, dict) else None
+            if cmd:
+                self.allowlist.add(str(cmd))
+            if self.allowlist_path is not None:
+                try:
+                    import os
+                    os.makedirs(os.path.dirname(os.path.abspath(self.allowlist_path)), exist_ok=True)
+                    with open(self.allowlist_path, "w", encoding="utf-8") as f:
+                        for item in sorted(self.allowlist):
+                            f.write(item + "\n")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ----- policy -----
 
