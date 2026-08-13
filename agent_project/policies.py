@@ -232,10 +232,12 @@ class ToolCallParser:
                     candidate = text[start:]
                     if not candidate.startswith("{"):
                         continue
+                    payload = None
                     try:
                         payload = cls._normalize_json_keys(json.loads(candidate))
                     except Exception:
-                        continue
+                        # 容错: content 含裸引号时用字符级扫描解析
+                        payload = cls._parse_json_with_bare_quotes(candidate)
                     if not isinstance(payload, dict):
                         continue
                     sub_action = payload.get("action")
@@ -255,10 +257,11 @@ class ToolCallParser:
                     candidate = text[start:]
                     if not candidate.startswith("{"):
                         continue
+                    payload = None
                     try:
                         payload = cls._normalize_json_keys(json.loads(candidate))
                     except Exception:
-                        continue
+                        payload = cls._parse_json_with_bare_quotes(candidate)
                     if not isinstance(payload, dict):
                         continue
                     t_name = payload.get("action") or payload.get("tool") or payload.get("name")
@@ -380,6 +383,127 @@ class ToolCallParser:
         return {"code": code}
 
     @classmethod
+    def _parse_json_with_bare_quotes(cls, s: str) -> Optional[Dict[str, Any]]:
+        """容错解析含裸英文双引号(未转义)的 JSON 对象.
+
+        模型有时在 content 等值里直接写 "..."(未转义), 破坏标准 JSON。
+        这里用字符级引号平衡扫描, 逐键提取值:
+        - 键: 双引号包裹的标识符(JSON 结构引号)
+        - 值: 若为双引号开头, 扫描到与之配对的闭合引号
+              (对内容里的裸引号, 用"连续两个引号后的规则"尽量容忍)
+
+        注意: 这是启发式容错, 无法覆盖所有边缘; 主要用于 content 含裸引号的常见场景。
+        """
+        if not s or "{" not in s:
+            return None
+        s = s.strip()
+        # 定位最外层对象起点
+        start = s.find("{")
+        end = -1
+        depth = 0
+        in_str = False
+        in_quote = False
+        i = start
+        while i < len(s):
+            c = s[i]
+            if c == '"':
+                if not in_str:
+                    in_str = True
+                else:
+                    # 检查是否转义
+                    if i > 0 and s[i-1] == "\\":
+                        pass  # 转义引号, 不翻转
+                    else:
+                        in_str = False
+            elif not in_str:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            i += 1
+        if end < 0:
+            return None
+        obj_text = s[start:end+1]
+
+        # 逐键解析: pattern "key": value
+        result: Dict[str, Any] = {}
+        # 用正则找 "key": 后跟 值
+        import re as _re
+        pos = 1  # 跳过 {
+        while pos < len(obj_text) - 1:
+            m = _re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:').match(obj_text, pos)
+            if not m:
+                break
+            key = m.group(1)
+            vstart = m.end()
+            # 跳过空白
+            while vstart < len(obj_text) and obj_text[vstart] in " \t\n\r":
+                vstart += 1
+            if vstart >= len(obj_text):
+                break
+            # 值类型判断
+            if obj_text[vstart] == '"':
+                # 字符串值: 扫描到配对闭合引号
+                v = []
+                vi = vstart + 1
+                closed = False
+                while vi < len(obj_text):
+                    ch = obj_text[vi]
+                    if ch == "\\" and vi + 1 < len(obj_text):
+                        v.append(ch)
+                        v.append(obj_text[vi+1])
+                        vi += 2
+                        continue
+                    if ch == '"':
+                        # 可能是闭合引号, 也可能是内容里的裸引号
+                        # 若后跟 , 或 } (JSON结构), 视为闭合; 否则视为内容(裸引号)
+                        nxt = obj_text[vi+1:].lstrip()
+                        if nxt.startswith((",", "}")):
+                            closed = True
+                            break
+                        else:
+                            v.append(ch)  # 裸引号当内容
+                            vi += 1
+                            continue
+                    v.append(ch)
+                    vi += 1
+                if closed:
+                    result[key] = "".join(v)
+                    pos = vi + 1
+                else:
+                    break
+            elif obj_text[vstart] in "0123456789-":
+                # 数字
+                vm = _re.compile(r'-?\d+(?:\.\d+)?').match(obj_text, vstart)
+                if vm:
+                    num = vm.group(0)
+                    try:
+                        result[key] = int(num) if "." not in num else float(num)
+                    except ValueError:
+                        result[key] = num
+                    pos = vm.end()
+                else:
+                    break
+            elif obj_text[vstart] in "tfn":
+                # true/false/null
+                vm = _re.compile(r'(?:true|false|null)').match(obj_text, vstart)
+                if vm:
+                    val = vm.group(0)
+                    result[key] = {"true": True, "false": False, "null": None}.get(val)
+                    pos = vm.end()
+                else:
+                    break
+            else:
+                break
+            # 跳过键值后的逗号/空白
+            while pos < len(obj_text) and obj_text[pos] in " \t\n\r,":
+                pos += 1
+        return result if result else None
+
+    @classmethod
     def _extract_balanced_code_value(cls, s: str) -> Optional[str]:
         idx = s.find("code=")
         if idx < 0:
@@ -439,6 +563,12 @@ class ToolCallParser:
                     return cls._sanitize_parsed_args(parsed)
             except (SyntaxError, ValueError):
                 continue
+
+        # 容错修复: content 等值里含裸英文双引号(如（"这部分太虚"）)破坏 JSON 时,
+        # 用字符级引号平衡扫描提取各键值(不依赖标准 JSON 解析)。
+        fixed = cls._parse_json_with_bare_quotes(args_str)
+        if fixed is not None:
+            return cls._sanitize_parsed_args(fixed)
 
         # 健壮兜底: 提取最外层 JSON 对象, 逐位置尝试解析
         # 模型可能在 content 里内嵌未转义的引号/中文引号, 导致整块 JSON 解析失败。
