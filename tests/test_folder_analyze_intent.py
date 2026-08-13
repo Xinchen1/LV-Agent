@@ -389,3 +389,26 @@ def test_llm_intent_classify_fallback():
     r3 = a._classify_intent("查下最新的 ai 新闻")
     assert r3 and r3[0] == "web_search"
     assert calls["n"] == 0, "规则命中不应调 LLM"
+
+
+def test_tool_parser_bare_quotes_in_content():
+    """content 里含裸英文双引号(未转义)时, 平铺 JSON 仍应能解析并写入."""
+    from agent_project.policies import ToolCallParser
+
+    # 用户实际场景: content 含（"这部分太虚"）裸引号
+    out = (
+        '{"action": "write", "path": "lv/提高使用AI的水平.md", '
+        '"content": "好的提问（"这部分太虚，换成具体案例"）\\n效率 = 明确目标"}'
+    )
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个, 实际 {calls}"
+    assert calls[0][0] == "file_ops"
+    args = calls[0][1]
+    assert args["action"] == "write"
+    assert args["path"] == "lv/提高使用AI的水平.md"
+    assert "这部分太虚" in args["content"], "裸引号应保留在 content 里"
+    assert "效率 = 明确目标" in args["content"]
+
+    # 标准 JSON 仍正常
+    ok = ToolCallParser.parse_all('{"action": "write", "path": "lv/a.md", "content": "测试"}')
+    assert ok
