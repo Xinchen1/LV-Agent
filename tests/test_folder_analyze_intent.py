@@ -232,3 +232,26 @@ def test_tool_parser_handles_chinese_quotes_in_json():
     r = tool.execute(**args3)
     assert r.success, f"应能实际写入: {r.error}"
     assert os.path.exists(args3["path"])
+
+
+def test_tool_parser_list_prefixed_unclosed():
+    """带列表前缀(- / 1. / *)且无 [/TOOL] 闭合的调用应能解析."""
+    from agent_project.policies import ToolCallParser
+
+    # 用户场景: 正文列出多个无闭合调用, 带 "- " 前缀
+    out = (
+        "Let me execute:\n"
+        '- [TOOL:web_search] {"query": "Hermes Agent 使用教程"}\n'
+        '- [TOOL:bash_exec] {"command": "ls -la lv"}'
+    )
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 2, f"应解析出 2 个, 实际 {calls}"
+    assert calls[0][0] == "web_search"
+    assert calls[1][0] == "bash_exec"
+
+    # 数字列表 + * 列表
+    assert len(ToolCallParser.parse_all('1. [TOOL:web_search] {"query": "x"}')) == 1
+    assert len(ToolCallParser.parse_all('* [TOOL:bash_exec] {"command": "ls"}')) == 1
+
+    # 行首无前缀仍正常
+    assert len(ToolCallParser.parse_all('[TOOL:web_search] {"query": "hermes"}')) == 1

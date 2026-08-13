@@ -96,7 +96,8 @@ class ToolCallParser:
                 add_call(tool_name, cls._parse_args(args_str))
 
         # Format 1b: [TOOL:name] args without closing tag
-        for match in re.finditer(r"^[ \t]*\[TOOL:([^\]]+)\][ \t]*(.*?)[ \t]*$", text, re.MULTILINE | re.IGNORECASE):
+        # 允许行首列表标记(如 "- [TOOL:...]" / "1. [TOOL:...]" / "* [TOOL:...]")
+        for match in re.finditer(r"^[ \t]*(?:[-*•]|\d+[.)]|>)?[ \t]*\[TOOL:([^\]]+)\][ \t]*(.*?)[ \t]*$", text, re.MULTILINE | re.IGNORECASE):
             tool_name = match.group(1).strip()
             args_str = strip_tool_markers(match.group(2))
             if tool_name not in set(registry.list_tools()):
