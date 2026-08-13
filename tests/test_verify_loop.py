@@ -585,3 +585,38 @@ def test_continuation_topic_inference():
     # 旧逻辑会把整句当主题(错误)
     old = extract_research_topic(task)
     assert old != topic or "整合" not in topic, "不应把延续话术当主题"
+
+
+def test_low_budget_continue_intent_expands():
+    """低预算任务中模型表达继续意图('让我先确认')时, loop 应动态扩展而非终止."""
+    import sys, logging
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+
+    class FB:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c == 1:
+                return '{"action": "bash_exec", "args": {"command": "ls"}}'
+            if self.c == 2:
+                return '{"action": "bash_exec", "args": {"command": "grep x"}}'
+            if self.c == 3:
+                return '<think>让我先确认</think>\nThought: 让我先确认是否已写入'
+            if self.c == 4:
+                return '{"final_answer": "已确认"}'
+            return '{"final_answer": "done"}'
+
+    cfg = AgentConfig()
+    eng = ExecutionEngine(model_backend=FB(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="你已经写入文档了?", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                           config=cfg, max_steps=2)
+    ctx.monitor_enabled = False
+    tr = eng.run(ReActPolicy(), ctx)
+    assert tr.final_answer == "已确认", f"应完成确认, 实际 {tr.final_answer!r}"
+    assert ctx.max_steps > 2, f"预算应动态扩展, 实际 {ctx.max_steps}"
