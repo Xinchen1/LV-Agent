@@ -69,7 +69,7 @@ if [ ! -f "config.yaml" ]; then
         echo "  created config.yaml from example"
         echo ""
         echo "IMPORTANT: edit config.yaml and set your API key, or set env var:"
-        echo "  export NIM_API_KEY=your_key_here"
+        echo "  export DEEPSEEK_API_KEY=your_key_here"
     else
         echo "  warning: no config.example.yaml found"
     fi

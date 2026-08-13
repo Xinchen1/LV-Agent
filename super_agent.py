@@ -339,8 +339,6 @@ class SuperAgentCLI:
         backend = getattr(self.config, 'backend', None) if self.config else None
         if backend == 'deepseek':
             model_name = (self.config.deepseek or {}).get('model', 'unknown')
-        elif backend == 'nim':
-            model_name = ((self.config.nim or {}).get('model', 'unknown') or 'unknown').split('/')[-1]
         elif backend == 'openai':
             model_name = (self.config.openai or {}).get('model', 'unknown')
         elif backend == 'anthropic':
@@ -381,9 +379,7 @@ class SuperAgentCLI:
         from agent_project.tools import TOOLS_REGISTRY
         backend = type(self.agent.backend).__name__
         model = "unknown"
-        if self.config.backend == 'nim':
-            model = self.config.nim.get('model', 'unknown').split('/')[-1]
-        elif self.config.backend == 'openai':
+        if self.config.backend == 'openai':
             model = self.config.openai.get('model', 'unknown')
         elif self.config.backend == 'anthropic':
             model = self.config.anthropic.get('model', 'unknown')
@@ -1243,7 +1239,6 @@ class SuperAgentCLI:
                 if self.config:
                     print(f" backend: {self.config.backend}")
                     cfg_map = {
-                        'nim': self.config.nim,
                         'openai': self.config.openai,
                         'deepseek': self.config.deepseek,
                         'anthropic': getattr(self.config, 'anthropic', {}),
@@ -1671,12 +1666,11 @@ class SuperAgentCLI:
         print(" [2] OpenAI API")
         print(" [3] OpenRouter")
         print(" [4] Local endpoint")
-        print(" [5] Custom (NVIDIA NIM)")
-        print(" [6] DeepSeek")
-        print(" [7] Cancel")
+        print(" [5] DeepSeek")
+        print(" [6] Cancel")
 
-        choice = Prompt.ask("choice", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
-        if choice == "7":
+        choice = Prompt.ask("choice", choices=["1", "2", "3", "4", "5", "6"], default="1")
+        if choice == "6":
             print("cancelled.")
             return False
 
@@ -1689,8 +1683,6 @@ class SuperAgentCLI:
         elif choice == "4":
             self._configure_local_endpoint(cfg)
         elif choice == "5":
-            self._configure_nim_model(cfg)
-        elif choice == "6":
             self._configure_deepseek(cfg)
 
         with open(self.config_path, 'w') as f:
@@ -1738,50 +1730,6 @@ class SuperAgentCLI:
             'base_url': 'https://api.anthropic.com/v1',
             'model': model,
             'temperature': temp,
-            'max_tokens': 4096,
-            'timeout': 120
-        }
-
-    def _configure_nim_model(self, cfg):
-        import yaml
-        print("\n\033[1mCustom (NVIDIA NIM)\033[0m\n")
-        api_key = Prompt.ask("API Key (nvapi-...)").strip()
-        if not api_key.startswith('nvapi-'):
-            print(" \033[33mwarning: usually starts with 'nvapi-'\033[0m")
-
-        print(" 1) google/gemma-4-31b-it")
-        print(" 2) stepfun-ai/step-3.5-flash")
-        print(" 3) stepfun-ai/step-3.7")
-        print(" 4) meta/llama-3.1-405b-instruct")
-        print(" 5) custom...")
-        model_choice = Prompt.ask("select", choices=["1", "2", "3", "4", "5"], default="1")
-
-        models = {
-            "1": "google/gemma-4-31b-it",
-            "2": "stepfun-ai/step-3.5-flash",
-            "3": "stepfun-ai/step-3.7",
-            "4": "meta/llama-3.1-405b-instruct",
-        }
-
-        if model_choice in models:
-            model = models[model_choice]
-        else:
-            model = Prompt.ask("model name").strip()
-
-        temp = Prompt.ask("temperature", default="0.7")
-        try:
-            temp = float(temp)
-        except ValueError:
-            temp = 0.7
-
-        cfg.setdefault('agent', {})
-        cfg['agent']['backend'] = 'nim'
-        cfg['agent']['nim'] = {
-            'api_key': api_key,
-            'base_url': 'https://integrate.api.nvidia.com/v1',
-            'model': model,
-            'temperature': temp,
-            'top_p': 0.9,
             'max_tokens': 4096,
             'timeout': 120
         }

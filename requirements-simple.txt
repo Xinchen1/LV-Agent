@@ -1,4 +1,4 @@
-# Core dependencies for OpenMythos Agent with NVIDIA NIM
+# Core dependencies for OpenMythos Agent with DeepSeek
 openai>=1.0.0
 chromadb>=0.4.22
 sentence-transformers>=2.2.2

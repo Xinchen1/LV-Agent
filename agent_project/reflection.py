@@ -106,7 +106,7 @@ Do NOT just summarize. Identify CAUSES and SOLUTIONS."""
             max_tokens=1024
         )
 
-        # Handle both token IDs (OpenMythosBackend) and text (OpenAI/NIM backends)
+        # Handle both token IDs (OpenMythosBackend) and text (OpenAI/DeepSeek backends)
         if isinstance(reflection_tokens, str):
             reflection_text = reflection_tokens
         else:

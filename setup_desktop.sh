@@ -85,11 +85,11 @@ fi
 # Step 5: Check configuration
 echo ""
 echo "Step 5/6: Checking configuration..."
-if grep -q "api_key: .nvapi" config.yaml 2>/dev/null; then
-    echo -e "  ${GREEN}✓ NIM API key seems set${NC}"
+if grep -qE "api_key: (sk-|\\\${DEEPSEEK_API_KEY)" config.yaml 2>/dev/null || grep -q "DEEPSEEK_API_KEY" config.yaml 2>/dev/null; then
+    echo -e "  ${GREEN}✓ DeepSeek API key seems set${NC}"
 else
-    echo -e "  ${YELLOW}⚠ NIM API key not found in config.yaml${NC}"
-    echo "  Please edit config.yaml and set agent.nim.api_key"
+    echo -e "  ${YELLOW}⚠ DeepSeek API key not found in config.yaml${NC}"
+    echo "  Please edit config.yaml and set agent.deepseek.api_key"
 fi
 
 if grep -q "bot_token: \".+\"" config.yaml 2>/dev/null; then
@@ -144,7 +144,7 @@ echo ""
 echo "What's next:"
 echo ""
 echo "1. Edit config.yaml and set:"
-echo "   - agent.nim.api_key (get from https://api.nvidia.com)"
+echo "   - agent.deepseek.api_key (get from https://platform.deepseek.com)"
 echo "   - tools.telegram.bot_token (optional, from @BotFather)"
 echo ""
 echo "2. Launch from Desktop:"
