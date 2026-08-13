@@ -562,3 +562,26 @@ def test_search_cache_normalized_key_improves_hit_rate():
     ]
     for a, b in diff:
         assert c._key(a) != c._key(b), f"不应串缓存: {a!r} vs {b!r}"
+
+
+def test_continuation_topic_inference():
+    """延续性请求('我的意思是你也去搜索整合')应解析出真实主题而非整句."""
+    import logging
+    from agent_project.agent import OpenMythosAgent
+    from agent_project.research_report import extract_research_topic
+
+    a = object.__new__(OpenMythosAgent)
+    a.logger = logging.getLogger("test")
+    a.conversation_history = [
+        {"user": "你也去搜索一些和这方面有关的,主要是用ai增强个人生命体能的", "assistant": "好的"},
+        {"user": "搜AI增强个人生命体能 相关", "assistant": "已搜索"},
+    ]
+
+    task = "我的意思是你也去搜索然后整合起来一起分析"
+    topic = a._infer_continuation_topic(task)
+    assert topic, "应解析出延续主题"
+    assert "生命体能" in topic or "AI" in topic, f"应得到真实主题, 实际 {topic!r}"
+
+    # 旧逻辑会把整句当主题(错误)
+    old = extract_research_topic(task)
+    assert old != topic or "整合" not in topic, "不应把延续话术当主题"

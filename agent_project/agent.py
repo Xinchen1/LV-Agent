@@ -785,6 +785,21 @@ class OpenMythosAgent:
                     clean_task = f"深度研究 {rest}"
                 break
 
+        # 延续性指代解析: "我的意思是你也去搜索整合" "继续刚才的XX" 等是对上一轮话题的延续,
+        # 若提取不出独立主题, 从最近对话历史中找真实主题(否则会把整句话当搜索词)。
+        from .research_report import extract_research_topic
+        _raw_topic = extract_research_topic(clean_task)
+        _continuation_markers = ("我的意思", "的意思", "你也", "你也去", "然后整合", "整合起来",
+                                 "接着", "继续刚才", "继续上", "同上面", "和刚才那个",
+                                 "同刚才", "和上次", "像刚才", "接着刚才")
+        if (not _raw_topic or len(_raw_topic) > 12 or any(m in clean_task for m in _continuation_markers)) \
+           and any(m in clean_task for m in _continuation_markers):
+            # 从历史提取上一轮真实主题
+            prev_topic = self._infer_continuation_topic(clean_task)
+            if prev_topic:
+                self.logger.info(f"deep research continuation: '{clean_task[:30]}' → topic '{prev_topic}'")
+                clean_task = f"深度研究 {prev_topic}"
+
         report_result = generate_research_report(
             clean_task,
             backend=self.backend,
@@ -860,6 +875,41 @@ class OpenMythosAgent:
                 **report_result.get("metadata", {}),
             },
         }
+
+    def _infer_continuation_topic(self, task: str) -> Optional[str]:
+        """从最近对话历史推断延续性请求的真实研究主题.
+
+        当用户说"我的意思是你也去搜索整合""继续刚才那个"等延续话术时,
+        主题应从上一轮对话提取, 而不是把整句当搜索词。
+        """
+        try:
+            from .research_report import extract_research_topic as _ext
+            # 1. 最近一轮用户真实话题(排除纯延续话术)
+            for entry in reversed(self.conversation_history):
+                ut = str(entry.get("user", "") or "").strip()
+                if not ut:
+                    continue
+                # 跳过纯延续话术(本身不包含主题)
+                if any(m in ut for m in ("我的意思", "的意思", "你也", "然后整合", "整合起来", "继续刚才", "接着刚才", "和刚才那个", "像刚才")):
+                    continue
+                # 从该轮提取主题
+                topic = _ext(ut)
+                # 若提取的太长(像是整句), 用简化的"最近关键词"兜底
+                if topic and len(topic) <= 12:
+                    return topic
+                # 太长的主题: 提取其中较短的候选(取最近对话的实体词)
+                import re as _re
+                cands = [c for c in re.findall(r"[\u4e00-\u9fff]{2,8}(?:AI|ai|Agent|agent)?", topic) if len(c) >= 2]
+                if cands:
+                    return cands[0]
+            # 2. 兜底: 用户当前话术里"我的意思是X"中的 X
+            m = re.search(r"(?:我的意思是|的意思就是|就是说)\s*(.+)", task)
+            if m:
+                return m.group(1).strip()[:40]
+            return None
+        except Exception as e:
+            self.logger.debug(f"infer continuation topic failed: {e}")
+            return None
 
     # ============ 快速路径 ============
 
