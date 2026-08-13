@@ -1901,64 +1901,79 @@ class OpenMythosAgent:
         final_answer = ""
         ambiguous_reply = ""
 
-        # 意图分类器兜底: LLM 没生成有效工具调用或生成错误工具时,
-        # 用确定性规则直接注入正确的工具调用(置信度高的场景)。
-        if action is None or not TOOLS_REGISTRY.get(action.tool_name):
-            classified = self._classify_intent(task)
-            if classified:
+        # 意图分类器兜底: LLM 没生成有效工具调用、生成错误工具, 或生成的工具与
+        # 用户意图明显冲突(如"查新闻"却去 find 全盘扫描)时,
+        # 用确定性规则注入正确的工具调用(置信度高的场景)。
+        _classifier_override = False
+        classified = self._classify_intent(task)
+        if classified and classified[2] >= 0.8:
+            c_tool, c_args, c_conf, c_reason = classified
+            if action is None or not TOOLS_REGISTRY.get(action.tool_name):
+                _classifier_override = True
+            else:
+                # 模型生成的工具与意图严重冲突 → 强制纠正
+                a_name = action.tool_name
+                _mismatch = False
+                if c_tool == "web_search" and a_name in ("bash_exec", "find", "glob", "search_files"):
+                    _mismatch = True
+                if c_tool == "glob" and a_name == "web_search":
+                    _mismatch = True
+                if _mismatch:
+                    self.logger.info(f"intent mismatch: model chose {a_name}, classifier wants {c_tool}; overriding")
+                    _classifier_override = True
+            if _classifier_override:
                 tool_name, intent_args, conf, reason = classified
-                if conf >= 0.8:
-                    self.logger.info(f"intent classifier: {tool_name} (conf={conf}, {reason})")
-                    # 创建文件意图: 需要确认文件名, 若分类器提取不到就提示而非乱建
-                    if tool_name == "file_ops" and intent_args.get("action") == "list" and intent_args.get("path"):
-                        # 文件夹读取意图: 用真实目录解析(大小写不敏感), 解析不到才用原始名
-                        resolved_folder = self._recent_folder_from_history(task)
-                        if resolved_folder:
-                            intent_args["path"] = resolved_folder
+                self.logger.info(f"intent classifier: {tool_name} (conf={conf}, {reason})")
+                # 创建文件意图: 需要确认文件名, 若分类器提取不到就提示而非乱建
+                if tool_name == "file_ops" and intent_args.get("action") == "list" and intent_args.get("path"):
+                    # 文件夹读取意图: 用真实目录解析(大小写不敏感), 解析不到才用原始名
+                    resolved_folder = self._recent_folder_from_history(task)
+                    if resolved_folder:
+                        intent_args["path"] = resolved_folder
+                    from .tools import ToolCall
+                    action = ToolCall(tool_name="file_ops", arguments=intent_args)
+                elif tool_name == "file_ops" and not intent_args.get("path") and any(
+                    k in task for k in ("新建", "创建", "写一篇", "保存为", "输出到文件", "写个文件", "新建文件", "创建文件")
+                ):
+                    # 没提取到文件名 → 询问用户或使用默认名
+                    fname_match = re.search(r'([\w\u4e00-\u9fff\-\.]{1,60}\.(?:md|txt|py|json|yaml|yml|csv|html))', task)
+                    path = fname_match.group(1) if fname_match else None
+                    if path:
+                        intent_args["path"] = path
                         from .tools import ToolCall
-                        action = ToolCall(tool_name="file_ops", arguments=intent_args)
-                    elif tool_name == "file_ops" and not intent_args.get("path") and any(
-                        k in task for k in ("新建", "创建", "写一篇", "保存为", "输出到文件", "写个文件", "新建文件", "创建文件")
-                    ):
-                        # 没提取到文件名 → 询问用户或使用默认名
-                        fname_match = re.search(r'([\w\u4e00-\u9fff\-\.]{1,60}\.(?:md|txt|py|json|yaml|yml|csv|html))', task)
-                        path = fname_match.group(1) if fname_match else None
-                        if path:
-                            intent_args["path"] = path
-                            from .tools import ToolCall
-                            action = ToolCall(tool_name="file_ops", arguments={"action": "write", "path": path})
-                    elif tool_name == "glob" and intent_args.get("pattern"):
-                        # "看 X 文章"(无扩展名)意图: 用 glob 定位实际文件, 然后直接 read
-                        try:
-                            from .tools import GlobTool
-                            g = GlobTool()
-                            res = g.execute(pattern=intent_args.get("pattern", "**"), path=".", max_results=5)
-                            if res.success and res.output:
-                                # 从 glob 结果提取第一个 .md/.txt 文件路径
-                                first_file = None
-                                for line in res.output.splitlines():
-                                    line = line.strip()
-                                    if line and not line.startswith("Found"):
-                                        cand = line.split(" (")[0].strip()
-                                        p = Path(cand)
-                                        if p.is_file() and p.suffix.lower() in (".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".html", ".py"):
-                                            first_file = str(p.resolve())
-                                            break
-                                if first_file:
-                                    from .tools import ToolCall
-                                    action = ToolCall(tool_name="file_ops", arguments={"action": "read", "path": first_file})
-                                    self.logger.info(f"article glob resolved: {first_file}")
-                                else:
-                                    from .tools import ToolCall
-                                    action = ToolCall(tool_name="file_ops", arguments={"action": "read", "path": "."})
+                        action = ToolCall(tool_name="file_ops", arguments={"action": "write", "path": path})
+                elif tool_name == "glob" and intent_args.get("pattern"):
+                    # "看 X 文章"(无扩展名)意图: 用 glob 定位实际文件, 然后直接 read
+                    try:
+                        from .tools import GlobTool
+                        g = GlobTool()
+                        res = g.execute(pattern=intent_args.get("pattern", "**"), path=".", max_results=5)
+                        if res.success and res.output:
+                            # 从 glob 结果提取第一个 .md/.txt 文件路径
+                            first_file = None
+                            for line in res.output.splitlines():
+                                line = line.strip()
+                                if line and not line.startswith("Found"):
+                                    cand = line.split(" (")[0].strip()
+                                    p = Path(cand)
+                                    if p.is_file() and p.suffix.lower() in (".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".html", ".py"):
+                                        first_file = str(p.resolve())
+                                        break
+                            if first_file:
+                                from .tools import ToolCall
+                                action = ToolCall(tool_name="file_ops", arguments={"action": "read", "path": first_file})
+                                self.logger.info(f"article glob resolved: {first_file}")
                             else:
                                 from .tools import ToolCall
                                 action = ToolCall(tool_name="file_ops", arguments={"action": "read", "path": "."})
-                        except Exception:
-                            pass
-                    else:
-                        from .tools import ToolCall
-                        action = ToolCall(tool_name=tool_name, arguments=intent_args)
+                        else:
+                            from .tools import ToolCall
+                            action = ToolCall(tool_name="file_ops", arguments={"action": "read", "path": "."})
+                    except Exception:
+                        pass
+                else:
+                    from .tools import ToolCall
+                    action = ToolCall(tool_name=tool_name, arguments=intent_args)
 
         # 超短歧义输入(如 "nih"): 模型容易幻觉成某个机构/缩写去搜索,
         # 一旦搜不到就整屏报错。这里直接不走工具, 用自然语言澄清/问候。

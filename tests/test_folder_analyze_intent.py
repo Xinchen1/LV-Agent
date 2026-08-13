@@ -286,3 +286,45 @@ def test_tool_parser_full_matrix_case_insensitive():
     for name, out in cases.items():
         r = ToolCallParser.parse_all(out)
         assert r, f"{name}: 工具调用被漏解析! 输出={out[:80]}"
+
+
+def test_tool_parser_flat_json_fileops_and_toolname():
+    """模型省略工具名/用平铺参数时, 应能推断出工具调用(不把执行当文本)."""
+    from agent_project.policies import ToolCallParser
+
+    # file_ops 子动作平铺
+    out = '{"action": "write", "path": "lv/健身计划.md", "content": "# 减脂健身计划\\n\\n目标: 减脂"}'
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"file_ops 平铺应解析, 实际 {calls}"
+    assert calls[0][0] == "file_ops"
+    assert calls[0][1]["action"] == "write"
+    assert calls[0][1]["path"] == "lv/健身计划.md"
+    assert "减脂" in calls[0][1]["content"]
+
+    # 工具名 + 平铺参数
+    out2 = '{"action": "web_search", "query": "hermes", "max_results": 5}'
+    calls2 = ToolCallParser.parse_all(out2)
+    assert len(calls2) == 1 and calls2[0][0] == "web_search"
+    assert calls2[0][1]["query"] == "hermes"
+
+    # 带 thoughts 字段
+    out3 = '{"thoughts": "先搜", "action": "web_search", "query": "AI 新闻"}'
+    calls3 = ToolCallParser.parse_all(out3)
+    assert len(calls3) == 1 and calls3[0][0] == "web_search"
+    assert "thoughts" not in calls3[0][1], "thoughts 不应作为参数"
+
+
+def test_intent_mismatch_overrides_wrong_tool():
+    """模型生成与意图冲突的工具(find)时, 意图分类器应覆盖为 web_search."""
+    import logging
+    from agent_project.agent import OpenMythosAgent
+    from agent_project.tools import ToolCall
+    a = object.__new__(OpenMythosAgent)
+    a.logger = logging.getLogger("test")
+
+    action = ToolCall(tool_name="bash_exec", arguments={"command": "find /Users/mac -name '*ai*'"})
+    classified = a._classify_intent("查下ai 方面新闻")
+    assert classified and classified[0] == "web_search"
+    c_tool, c_args, c_conf, c_reason = classified
+    mismatch = (c_tool == "web_search" and action.tool_name in ("bash_exec", "find", "glob", "search_files"))
+    assert mismatch, "查新闻用 find 应判定为意图冲突"
