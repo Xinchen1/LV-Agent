@@ -32,14 +32,36 @@ LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循
 
 ## Features
 
+**Reasoning & Planning**
 - **Multi-strategy reasoning**: CoT, ReAct, Self-Consistency, Verification, Zero-shot
 - **Adaptive loop control**: adjusts thinking depth by task complexity
 - **Task planning**: MCTS, graph-based planning, key-path analysis
 - **Self-correction**: quality monitoring + automatic parameter tuning
-- **Memory system**: knowledge graph, episodic memory, context compression
-- **Tool ecosystem**: web search, file ops, code exec, bash, git, browser, database, telegram
-- **Terminal-native UI**: status bar with context bar, tool cards, themes, deep-research live panel
-- **Multi-backend**: NVIDIA NIM, OpenAI, DeepSeek, Anthropic, OpenRouter, Ollama
+
+**Memory & Learning**
+- **Knowledge graph**: structured long-term memory
+- **Episodic memory**: recalls past conversations across sessions
+- **Self-learning**: learns from successes/failures and improves over time
+- **Context compression**: keeps long sessions within token budget
+
+**Tools**
+- **Web search & fusion**: multi-source search with scoring/reranking
+- **File ops**: read / write / list / grep / analyze
+- **Code execution**: python / bash / file execution with sandbox
+- **Git ops**: clone / commit / push / pull
+- **Browser**: Playwright automation, web page fetching
+- **Database & Telegram**: structured DB queries, Telegram bot mode
+- **Weather / Calculator / URL unfurl / GitHub search**
+
+**Terminal UI**
+- **Status bar** with context bar & tool cards
+- **Multiple themes**
+- **Deep-research live panel** with progress tracking
+- **Dashboard**: `/dashboard` Ctrl+`\`
+
+**Backends**
+- NVIDIA NIM, OpenAI, DeepSeek, Anthropic, OpenRouter, Ollama
+- Streaming with native reasoning-content display
 
 ## Quick Start
 
