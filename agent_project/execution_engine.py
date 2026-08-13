@@ -316,9 +316,20 @@ class ConvergenceChecker:
         if step_number < self.min_steps:
             return False
 
-        # Two consecutive SYSTEM STOP observations -> stuck
-        recent_obs = ctx.observations[-2:]
-        if len(recent_obs) >= 2 and all("SYSTEM STOP" in o for o in recent_obs):
+        # 连续 SYSTEM STOP -> 判断是真卡住还是良性去重:
+        # - "already executed" (去重) 是良性, 模型应换工具继续, 不算卡住
+        # - "timed out" / "harness blocked" 是真失败, 连续出现才是卡住
+        recent_obs = ctx.observations[-3:]
+        hard_stops = [o for o in recent_obs
+                      if "SYSTEM STOP" in o
+                      and "already executed" not in o
+                      and "You already have this result" not in o]
+        dedup_stops = [o for o in recent_obs if "already executed" in o]
+        # 真失败连续 3 个 → 卡住
+        if len(hard_stops) >= 3 and step_number >= 5:
+            return True
+        # 全部是去重拦截且 ≥3 个, 且步骤足够多 → 模型在绕圈, 停止并让其反思
+        if len(dedup_stops) >= 3 and step_number >= 6 and len(hard_stops) == 0:
             return True
 
         # Repeated identical tool calls 3+ times

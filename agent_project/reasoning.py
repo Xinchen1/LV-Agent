@@ -229,6 +229,15 @@ class ReasoningEngine:
                 n_loops = self.loop_controller.determine_loops(
                     task, strategy, similarity_score, estimated_complexity
                 )
+                # 动态预算保证: 明确的多步任务(搜索+写入/读取+修改等)需要足够步骤,
+                # 防止因预算不足在多步任务中提前截断(未完成就结束)。
+                multi_step = any(k in task for k in
+                    ("搜索", "查找", "搜", "写", "创建", "修改", "新建", "下载",
+                     "search", "find", "write", "create", "modify", "download",
+                     "分析", "总结", "调研", "研究",
+                     "加", "加上", "加入", "添加", "增加", "优化", "重构", "修复", "实现"))
+                if multi_step and n_loops < 6:
+                    n_loops = 6
             trace.total_loops = n_loops
 
             policy = self._create_policy(strategy)
