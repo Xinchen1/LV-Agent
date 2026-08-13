@@ -545,16 +545,20 @@ class ExecutionEngine:
                 ctx.steps.append(record)
                 trace.steps.append(record)
 
-                # 动态扩展预算: 接近上限时, 若模型仍产出新的工具调用(有进展),
-                # 且未超过硬上限, 则扩大 max_steps 继续(自适应思考深度)。
+                # 动态扩展预算: 自适应思考深度, 不只简单加循环。
+                # 触发信号(任一):
+                #   A. 接近上限(step >= max_steps)且模型仍产出新工具调用(有进展)
+                #   B. 模型明确表达"继续/还要/补充/再多搜"意图(继续信号, 更主动)
                 # 必须在 convergence.should_stop 之前执行, 否则到上限会被先判定停止。
-                if step_number >= ctx.max_steps:
+                if step_number >= ctx.max_steps or self._wants_to_continue(output):
                     hard_limit = getattr(self.config, "max_thinking_loops", 32)
-                    if ctx.max_steps < hard_limit and parsed.tool_calls:
+                    if ctx.max_steps < hard_limit and (parsed.tool_calls or self._wants_to_continue(output)):
                         new_max = min(hard_limit, ctx.max_steps + 4)
+                        reason = "explicit continue intent" if self._wants_to_continue(output) and not parsed.tool_calls \
+                                 else "still producing tool calls"
                         self.logger.info(
                             f"dynamic loop extension: step {step_number} → max_steps {ctx.max_steps} → {new_max} "
-                            f"(model still producing tool calls)"
+                            f"({reason})"
                         )
                         ctx.max_steps = new_max
                         if ctx.stream_callback:
@@ -713,6 +717,62 @@ class ExecutionEngine:
             return False
         if len(t) <= 6 and all(ord(c) < 128 for c in t) and not any(c in ".,;:!?()\"'" for c in t):
             return True
+        return False
+
+    @staticmethod
+    def _wants_to_continue(output: str) -> bool:
+        """精准检测模型是否明确表达'还想继续/补充/再多做'的意图.
+
+        用于动态扩展 loop 预算: 模型主动要求继续时, 即使还没到预算上限也扩展。
+
+        识别信号(任一命中即为继续意图):
+        - 明确的继续/补充动词 + 动作对象: "再搜索一下/补充一下/还需要/让我继续/接着做/多找找/再查查"
+        - "还/再" 前缀 + 动词: "还要看看/再试试/再来一轮"
+        - 收尾性但含未完成语义: "暂时先这些, 不过我还想…"
+
+        排除误判(不当作继续):
+        - 已完成/收尾: "已完成/不需要了/就这些/不用了/这是最终/到此为止/以上是全部"
+        - 只是描述现状而非主动继续: "我已经搜索了/我们已经有了"
+        """
+        t = (output or "").strip()
+        if not t:
+            return False
+
+        # 强排除: 明确完成/收尾/否定继续
+        _done = (
+            "已完成", "完成了", "不需要了", "不用了", "就这些", "到此为止", "以上是全部",
+            "这是最终", "最终答案", "全部找到", "已经够了", "这就够了", "不用继续",
+            "done", "that's all", "no more", "finished", "complete", "this is all",
+            "总结如下", "综上所述", "最后总结",
+        )
+        for d in _done:
+            if d in t.lower():
+                return False
+
+        # 强肯定: 明确的继续/补充意图
+        _continue = (
+            "再搜索", "再搜", "再查", "再找", "再试", "再来", "再补充", "再深入",
+            "继续搜索", "继续查", "继续找", "继续分析", "继续研究", "继续查看",
+            "还要", "还想", "还需要", "让我继续", "我继续", "接着", "接下来",
+            "补充一下", "补充搜索", "多找找", "多搜", "多查", "再看看",
+            "还没有", "尚未", "不够全面", "再完善", "继续探索",
+            "search more", "keep going", "continue", "let me continue",
+            "more results", "dig deeper", "further", "one more",
+        )
+        # 通用模式: "再/继续/接着" + 任意动作(高置信)
+        _generic_continue = re.compile(
+            r"(?:再|继续|接着|再多|再来)\s*[^。！？!?\n]{0,12}?(?:看|查|找|搜|试|做|写|读|执行|补充|分析|研究|探索|搜索|更新|深入)",
+            re.IGNORECASE,
+        )
+        if _generic_continue.search(t) and not any(d in t.lower() for d in ("但已经", "不过已经", "已经够了", "不需要", "不用继续")):
+            return True
+        for c in _continue:
+            if c in t.lower():
+                # 若命中但紧跟完成词(如"还要再搜, 但已经够了") → 排除
+                if any(d in t.lower() for d in ("但已经", "不过已经", "已经够了", "不需要")):
+                    return False
+                return True
+
         return False
 
     @staticmethod
