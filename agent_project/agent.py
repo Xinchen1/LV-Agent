@@ -2135,7 +2135,8 @@ class OpenMythosAgent:
             _claim_words = ["搜索", "查找", "查看", "分析", "打开", "读取", "下载", "克隆",
                             "search", "look up", "fetch", "read", "open", "analyze", "clone",
                             "查询", "调查", "查一下", "找找", "调研", "研究一下"]
-            _promise_words = ["我会", "我将", "我先", "稍后", "准备", "接下来", "下一步", "再去", "随后"]
+            _promise_words = ["我会", "我将", "我先", "稍后", "准备", "接下来", "下一步", "再去", "随后",
+                              "马上", "立刻", "这就", "等一等", "别急"]
             _promised_but_no_action = any(w in final_answer for w in _claim_words) and any(
                 w in final_answer for w in _promise_words
             )
@@ -2151,8 +2152,29 @@ class OpenMythosAgent:
                     token_callback=token_callback,
                 )
                 retry_answer = self._clean_fast_answer(str(retry_raw or "")).strip()
-                if retry_answer and not self._is_promise_response(retry_answer):
-                    final_answer = retry_answer
+                if retry_answer:
+                    # 重试后若模型真正输出了工具调用, 重新解析并直接执行
+                    retry_action = self._parse_output_for_action(retry_answer)
+                    if retry_action and TOOLS_REGISTRY.get(retry_action.tool_name):
+                        self.logger.info(f"promise retry produced tool call: {retry_action.tool_name}")
+                        try:
+                            r_needs_summary = is_continuation or self._tool_returns_listing(retry_action)
+                            r_result, r_answer = self._execute_tool_and_observe(
+                                retry_action, stream_callback, suppress_content=r_needs_summary
+                            )
+                            if r_result.success:
+                                final_answer = r_answer or f"已执行: {r_result.output[:300]}"
+                                actions.append({
+                                    'tool_name': retry_action.tool_name,
+                                    'arguments': retry_action.arguments,
+                                    'success': True,
+                                    'output': r_result.output[:500],
+                                    'error': r_result.error,
+                                })
+                        except Exception as e:
+                            self.logger.debug(f"promise retry tool exec failed {e}")
+                    elif not self._is_promise_response(retry_answer):
+                        final_answer = retry_answer
             except Exception as e:
                 self.logger.debug(f"promise retry failed {e}")
 
@@ -2260,7 +2282,7 @@ class OpenMythosAgent:
 
     # "光说不做"模式: 只承诺要做某事, 却没真正执行(如"我先看一下文件"/"让我查一下")
     _PROMISE_RE = re.compile(
-        r"(让我|我来|我先|我准备|我来看|我去|先看|先查|先确认|先检查|回头|接下来|稍后|然后我|我再|我会|我将|准备去|随后|下一步)"
+        r"(让我|我来|我先|我准备|我来看|我去|先看|先查|先确认|先检查|回头|接下来|稍后|然后我|我再|我会|我将|准备去|随后|下一步|马上|立刻|这就|等一等|别急|好的马上|这就帮你)"
     )
     # "只思考不行动"模式: 输出全是 <think>/思考性文字, 没有任何工具调用
     _THINK_ONLY_RE = re.compile(
