@@ -223,6 +223,58 @@ class ToolCallParser:
                         add_call(action_name, args)
                     break
 
+        # Format 5c: JSON {"action": "write", "path": ..., "content": ...} (file_ops 参数平铺)
+        # 模型有时省略工具名, 直接输出 file_ops 的子动作 + 平铺参数.
+        if not calls:
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                for start in range(first_brace, len(text)):
+                    candidate = text[start:]
+                    if not candidate.startswith("{"):
+                        continue
+                    try:
+                        payload = cls._normalize_json_keys(json.loads(candidate))
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    sub_action = payload.get("action")
+                    if not isinstance(sub_action, str):
+                        continue
+                    if sub_action in cls.FILE_OPS_ACTIONS:
+                        # 平铺参数 = 整个 JSON (去掉 action 已是参数之一, 保留即可)
+                        add_call("file_ops", payload)
+                        break
+
+        # Format 5d: JSON {"action": "web_search", "query": "hermes", ...} (工具名 + 参数平铺)
+        # action 是注册工具名, 参数直接平铺在顶层(而非 args 包裹).
+        if not calls:
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                for start in range(first_brace, len(text)):
+                    candidate = text[start:]
+                    if not candidate.startswith("{"):
+                        continue
+                    try:
+                        payload = cls._normalize_json_keys(json.loads(candidate))
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    t_name = payload.get("action") or payload.get("tool") or payload.get("name")
+                    if not isinstance(t_name, str):
+                        continue
+                    if registry.get(t_name) or registry.get(t_name.lower()):
+                        # 去掉 action/tool/name 元字段, 其余平铺参数
+                        flat_args = {k: v for k, v in payload.items()
+                                     if k not in ("action", "tool", "name", "thought", "thoughts", "reasoning", "final_answer", "confidence", "conf")}
+                        if flat_args:
+                            if t_name.lower() == "python_exec":
+                                add_call(t_name, cls._extract_python_exec_code(flat_args.get("code", "")))
+                            else:
+                                add_call(t_name, flat_args)
+                        break
+
         # Format 6: function-call style: tool_name(key="value", key2="value2")
         # 用平衡括号匹配, 支持嵌套括号(如 python_exec("shutil.rmtree(p)"))
         if not calls:
