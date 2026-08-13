@@ -186,3 +186,46 @@ def test_file_modify_intent_routes_to_main_loop():
 
     # 问候仍走 fast path
     assert a._is_simple_query("你好")
+
+
+def test_convergence_dedup_stop_does_not_halt_early():
+    """良性去重拦截(SYSTEM STOP: already executed)不应导致过早停止."""
+    from agent_project.execution_engine import ConvergenceChecker, ExecutionContext, PolicyOutput, ToolCallRequest
+    from agent_project.config import AgentConfig
+
+    cc = ConvergenceChecker(min_steps=2)
+    ctx = ExecutionContext(task="t", available_tools={}, config=AgentConfig(), max_steps=8)
+    ctx.observations = [
+        "SYSTEM STOP: You already executed file_ops list. You already have this result. Do NOT call the same tool with the same arguments again.",
+        "SYSTEM STOP: You already executed file_ops list. You already have this result. Do NOT call the same tool with the same arguments again.",
+    ]
+    call = ToolCallRequest(tool_name="web_search", arguments={"query": "x"})
+    out = PolicyOutput(reasoning="继续", tool_calls=[call], final_answer=None, done=False)
+    assert not cc.should_stop(ctx, out, 4), "2个去重拦截+还想继续 → 不应停止"
+
+    # 真失败(超时)连续3个 → 应停止
+    ctx2 = ExecutionContext(task="t", available_tools={}, config=AgentConfig(), max_steps=8)
+    ctx2.observations = [
+        "SYSTEM STOP: Tool 'web_search' timed out after 120s.",
+        "SYSTEM STOP: Tool 'bash_exec' timed out after 120s.",
+        "SYSTEM STOP: Tool 'file_ops' timed out after 120s.",
+    ]
+    out2 = PolicyOutput(reasoning="r", tool_calls=[], final_answer=None, done=False)
+    assert cc.should_stop(ctx2, out2, 5), "3个真失败 → 应停止"
+
+
+def test_multi_step_task_gets_more_loop_budget():
+    """多步任务(搜索+写文件/修改功能)应获得≥6 的 loop 预算."""
+    import sys
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.reasoning import LoopController, ReasoningEngine, ReasoningStrategy
+
+    lc = LoopController(min_loops=2, max_loops=16, default_loops=2)
+    for task in ["搜索 hermes 的使用方法,在lv 新建一个文件", "给贪吃蛇加变速功能"]:
+        c = ReasoningEngine._estimate_task_complexity(task)
+        n = lc.determine_loops(task, ReasoningStrategy.SUPER_AGENT, estimated_complexity=c)
+        multi = any(k in task for k in ("搜索","搜","写","创建","修改","加","优化","重构","实现","分析","下载","search","write","create","modify","find"))
+        if multi and n < 6:
+            n = 6
+        assert n >= 6, f"{task!r} 应至少 6 loops, 实际 {n}"

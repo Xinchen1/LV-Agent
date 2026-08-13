@@ -794,8 +794,9 @@ class SuperAgentPolicy(ThinkingPolicy):
             "tool error", "tool execution error", "verification failed",
             "search block not found", "file does not exist", "syntax error",
             "cannot access local variable", "name '", "is not defined",
-            "system stop: you already executed",
         ]
+        # 注意: "system stop: you already executed" (去重) 是良性提示,
+        # 模型应换工具继续, 不算可重试的错误, 避免无谓的 reflection 重试。
         for obs in observations[-10:]:
             obs_lower = obs.lower()
             if any(m in obs_lower for m in markers):
