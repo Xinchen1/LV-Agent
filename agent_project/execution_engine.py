@@ -124,6 +124,11 @@ class ExecutionContext:
     call_counts: Dict[str, int] = field(default_factory=dict)
     observations: List[str] = field(default_factory=list)
 
+    # 分支监控 agent 状态(旁路感知主 agent 执行)
+    monitor_enabled: bool = True
+    monitor_hints: List[str] = field(default_factory=list)  # 注入给主 agent 的简明提示
+    monitor_rounds: int = 0  # 监控检查轮数(限制频率)
+
 
 # ---------------------------------------------------------------------------
 # Tool executor
@@ -469,6 +474,82 @@ class ExecutionEngine:
         self.obs_manager = ObservationManager()
         self.logger = logging.getLogger("ExecutionEngine")
 
+    # ------------------------------------------------------------------
+    # 分支监控 agent: 旁路感知主 agent 执行, 发现异常注入简明提示
+    # ------------------------------------------------------------------
+    def _rule_monitor(self, ctx: ExecutionContext) -> Optional[str]:
+        """规则层监控(零成本): 检测明显异常信号, 返回简明提示或 None."""
+        obs = ctx.observations[-3:] if len(ctx.observations) > 3 else ctx.observations
+        hints = []
+        # 1. 连续工具失败
+        fails = [o for o in obs if "tool error" in o.lower() or "failed" in o.lower()
+                 or "timed out" in o.lower() or "error:" in o.lower()]
+        if len(fails) >= 2:
+            hints.append("提示: 连续工具失败, 换一种工具或方法, 检查参数/路径。")
+        # 2. 重复调用同一工具(去重拦截)
+        dedups = [o for o in obs if "already executed" in o]
+        if len(dedups) >= 2:
+            hints.append("提示: 你重复调用了相同工具, 请换新工具或直接总结。")
+        # 3. 偏离任务(工具结果与任务主题无关) - 简化: 观察里大量权限错误
+        perm_errors = sum(1 for o in obs if "Operation not permitted" in o or "permission denied" in o.lower())
+        if perm_errors >= 3:
+            hints.append("提示: 正在全盘扫描遇到权限错误, 缩小搜索范围(如指定目录)。")
+        return "\n".join(hints) if hints else None
+
+    def _llm_monitor(self, ctx: ExecutionContext) -> Optional[str]:
+        """分支 LLM agent: 感知主 agent 轨迹, 检测问题并生成简明干预提示."""
+        recent_steps = ctx.steps[-4:] if len(ctx.steps) > 4 else ctx.steps
+        recent_obs = ctx.observations[-4:] if len(ctx.observations) > 4 else ctx.observations
+        lines = []
+        for st in recent_steps:
+            tools = ", ".join(c.display_key for c in st.tool_calls) or "(思考)"
+            lines.append(f"步{st.step_number}: {tools}")
+        obs_snippet = " | ".join(o[:80] for o in recent_obs)
+        prompt = (
+            "你是旁路监控 agent, 感知主 agent 的执行轨迹, 判断是否有问题。\n"
+            "主 agent 任务: " + (ctx.task[:200]) + "\n"
+            "最近步骤: " + "; ".join(lines) + "\n"
+            "最近观察: " + obs_snippet[:400] + "\n"
+            "若发现异常(卡住/走偏/重复/方向错误), 用一句话简明提示主 agent 如何调整。\n"
+            "若无问题, 输出: OK\n"
+            "提示:"
+        )
+        try:
+            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=80)
+            text = str(raw or "").strip()
+            if not text or text.upper() == "OK":
+                return None
+            return text[:160]
+        except Exception as e:
+            self.logger.debug(f"llm monitor failed: {e}")
+            return None
+
+    def _monitor_and_inject(self, ctx: ExecutionContext, output: str) -> None:
+        """监控入口: 规则层+LLM 分支 agent, 发现异常注入简明提示到 monitor_hints."""
+        if not ctx.monitor_enabled:
+            return
+        ctx.monitor_rounds += 1
+        # 频率控制: 每 2 步检查一次, 避免过度干预
+        if ctx.monitor_rounds % 2 != 0:
+            return
+        hint = self._rule_monitor(ctx)
+        if hint is None and ctx.max_steps >= 8 and len(ctx.steps) >= 3:
+            # 规则没发现, 但复杂任务已有多个步骤时, 用 LLM 分支 agent 感知
+            # (降低频率: 每 4 轮才做一次 LLM 感知, 省 token)
+            if ctx.monitor_rounds % 4 == 0:
+                hint = self._llm_monitor(ctx)
+        if hint:
+            ctx.monitor_hints.append(hint)
+            if ctx.stream_callback:
+                ctx.stream_callback("status", f"monitor: {hint[:60]}")
+
+    def _attach_monitor_hints(self, prompt: str, ctx: ExecutionContext) -> str:
+        """把监控提示注入主 agent 的下一轮 prompt."""
+        if not ctx.monitor_hints:
+            return prompt
+        joined = "\n".join(ctx.monitor_hints[-2:])
+        return prompt + f"\n\n【监控提示】{joined}\n请根据提示调整你的下一步(可调整计划/换方法/继续)。"
+
     def run(
         self,
         policy,
@@ -533,6 +614,7 @@ class ExecutionEngine:
                                 "· 若状态已收敛, 请直接给出 Final Answer; 否则更新状态继续。\n"
                                 "你可以在思考中更新状态, 也可以调用工具获取信息。"
                             )
+                            prompt = self._attach_monitor_hints(prompt, ctx)
                             continue
                         nudge = (
                             "\n\n注意: 你刚才只进行了思考, 没有做出下一步动作。\n"
@@ -542,6 +624,7 @@ class ExecutionEngine:
                         )
                         next_prompt = policy.next_prompt(ctx, output)
                         prompt = (next_prompt or "") + nudge
+                        prompt = self._attach_monitor_hints(prompt, ctx)
                         continue
                     ctx.steps.append(record)
                     trace.steps.append(record)
@@ -558,6 +641,9 @@ class ExecutionEngine:
 
                 ctx.steps.append(record)
                 trace.steps.append(record)
+
+                # 分支监控 agent: 旁路感知执行情况, 发现异常注入简明提示
+                self._monitor_and_inject(ctx, output)
 
                 # 动态扩展预算: 自适应思考深度, 不只简单加循环。
                 # 触发信号(任一):
@@ -584,7 +670,8 @@ class ExecutionEngine:
                 next_prompt = policy.next_prompt(ctx, output)
                 if next_prompt is None:
                     break
-                prompt = next_prompt
+                # 把分支监控 agent 的提示注入主 agent 的下一轮
+                prompt = self._attach_monitor_hints(next_prompt, ctx)
 
             if not trace.final_answer or self._is_truncated_fragment(trace.final_answer):
                 # final_answer 为空或为截断碎片(如 "We"/"The")时,
