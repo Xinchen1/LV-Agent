@@ -2218,18 +2218,69 @@ class OpenMythosAgent:
                                 retry_action, stream_callback, suppress_content=r_needs_summary
                             )
                             if r_result.success:
+                                # 后置核验: 写入类动作, 验证文件确实存在且非空
+                                verified = True
+                                verify_note = ""
+                                if retry_action.tool_name == "file_ops":
+                                    _fa = (retry_action.arguments or {}).get("action")
+                                    _fp = (retry_action.arguments or {}).get("path")
+                                    if _fa in ("write", "apply_diff") and _fp:
+                                        try:
+                                            exists = TOOLS_REGISTRY.get("file_ops").execute(
+                                                action="exists", path=_fp
+                                            )
+                                            if exists.success and exists.output.strip().lower() == "true":
+                                                verify_note = " (已核验文件存在)"
+                                            else:
+                                                verified = False
+                                        except Exception:
+                                            pass
                                 final_answer = r_answer or f"已执行: {r_result.output[:300]}"
+                                if verified:
+                                    final_answer += verify_note
                                 actions.append({
                                     'tool_name': retry_action.tool_name,
                                     'arguments': retry_action.arguments,
                                     'success': True,
                                     'output': r_result.output[:500],
                                     'error': r_result.error,
+                                    'verified': verified,
                                 })
+                            else:
+                                # 后置核验: 工具执行失败, 不能直接返回承诺文字
+                                self.logger.warning(f"promise retry tool FAILED: {r_result.error}")
+                                final_answer = f"抱歉，执行时遇到问题：{r_result.error or '未知错误'}。请告诉我具体文件路径或内容，我再试一次。"
                         except Exception as e:
                             self.logger.debug(f"promise retry tool exec failed {e}")
                     elif not self._is_promise_response(retry_answer):
                         final_answer = retry_answer
+                    else:
+                        # 后置感知: 重试后仍是空承诺(模型坚持不执行工具)
+                        # 直接按意图注入工具调用, 不再依赖模型自觉。
+                        self.logger.warning(f"promise retry STILL promise-only: {retry_answer!r}; forcing via intent classifier")
+                        injected = self._classify_intent(task)
+                        if injected and injected[2] >= 0.7:
+                            injected_tool, injected_args, _, _ = injected
+                            from .tools import ToolCall as _TC
+                            forced = _TC(tool_name=injected_tool, arguments=injected_args)
+                            try:
+                                f_needs_summary = is_continuation or self._tool_returns_listing(forced)
+                                f_result, f_answer = self._execute_tool_and_observe(
+                                    forced, stream_callback, suppress_content=f_needs_summary
+                                )
+                                if f_result.success:
+                                    final_answer = f_answer or f"已执行: {f_result.output[:300]}"
+                                    actions.append({
+                                        'tool_name': forced.tool_name,
+                                        'arguments': forced.arguments,
+                                        'success': True,
+                                        'output': f_result.output[:500],
+                                        'error': f_result.error,
+                                    })
+                                else:
+                                    final_answer = f"抱歉，执行时遇到问题：{f_result.error or '未知错误'}"
+                            except Exception as e:
+                                self.logger.debug(f"forced intent exec failed {e}")
             except Exception as e:
                 self.logger.debug(f"promise retry failed {e}")
 

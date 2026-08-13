@@ -361,3 +361,24 @@ def test_promise_detection_write_actions():
     assert not a._is_promise_response("好的，已经整理好了，文件在 lv 文件夹")
     assert not a._is_promise_response("根据搜索结果，总结如下")
     assert not a._is_promise_response("你好呀")
+
+
+def test_post_execution_verification_file_exists():
+    """写入文件后应能核验文件确实存在(后置感知)."""
+    import tempfile, os
+    from agent_project.tools import TOOLS_REGISTRY
+
+    tool = TOOLS_REGISTRY.get("file_ops")
+    td = tempfile.mkdtemp()
+    py = os.path.join(td, "verify.md")
+
+    r = tool.execute(action="write", path=py, content="# 测试\n内容")
+    assert r.success, r.error
+
+    # 核验文件存在
+    ex = tool.execute(action="exists", path=py)
+    assert ex.success and ex.output.strip().lower() == "true", f"应核验文件存在: {ex.output}"
+
+    # 写入无效路径应失败(系统会拦截)
+    r2 = tool.execute(action="write", path="/nonexistent_dir_xxx_123/xx.md", content="x")
+    assert not r2.success, "无效路径写入应失败"
