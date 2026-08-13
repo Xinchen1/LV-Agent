@@ -315,3 +315,33 @@ def test_dynamic_loop_extension():
                             config=cfg, max_steps=6)
     tr2 = eng2.run(ReActPolicy(), ctx2)
     assert ctx2.max_steps == 6, f"快速完成不应扩展, 实际 {ctx2.max_steps}"
+
+
+def test_wants_to_continue_detection():
+    """精准识别'继续/补充'意图, 排除完成/收尾误判."""
+    from agent_project.execution_engine import ExecutionEngine
+    W = ExecutionEngine._wants_to_continue
+
+    # 继续意图 → True
+    for text in [
+        "让我再搜索一下其他来源补充资料",
+        "还需要再看看 AI 的最新动态",
+        "继续搜索更多相关内容",
+        "我再多找几个例子",
+        "继续执行下一步操作",
+        "接着分析这些数据",
+        "还想看看更多来源",
+    ]:
+        assert W(text), f"应识别为继续意图: {text!r}"
+
+    # 完成/收尾 → False
+    for text in [
+        "已完成全部搜索,这就是最终结果",
+        "以上就是所有新闻,不需要了",
+        "最终答案: AI 新闻汇总完毕",
+        "还要再搜,但已经够了",
+        "根据以上搜索结果,总结如下",
+        "谢谢,不需要了",
+        "这是最终的完整答案",
+    ]:
+        assert not W(text), f"不应识别为继续意图: {text!r}"
