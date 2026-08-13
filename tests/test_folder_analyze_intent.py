@@ -155,3 +155,18 @@ def test_tool_call_parser_json_tool_calls_array():
     assert len(calls) == 1, f"应解析出 1 个工具调用, 实际 {calls}"
     assert calls[0][0] == "bash_exec"
     assert calls[0][1].get("command") == "ls"
+
+
+def test_truncated_fragment_detection():
+    """execution_engine 应识别截断碎片(final answer 为 'We'/'The' 等时兜底重建)."""
+    from agent_project.execution_engine import ExecutionEngine
+
+    assert ExecutionEngine._is_truncated_fragment("We")
+    assert ExecutionEngine._is_truncated_fragment("The")
+    assert ExecutionEngine._is_truncated_fragment("")
+    assert ExecutionEngine._is_truncated_fragment("  ")
+    assert not ExecutionEngine._is_truncated_fragment("好")
+    assert not ExecutionEngine._is_truncated_fragment("ok")
+    assert not ExecutionEngine._is_truncated_fragment("完成")
+    assert not ExecutionEngine._is_truncated_fragment("We should improve this project")
+    assert not ExecutionEngine._is_truncated_fragment("首先, 需要分析文件")
