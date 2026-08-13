@@ -345,3 +345,19 @@ def test_wants_to_continue_detection():
         "这是最终的完整答案",
     ]:
         assert not W(text), f"不应识别为继续意图: {text!r}"
+
+
+def test_promise_detection_write_actions():
+    """'我现在把XX整理成文章存到文件夹' 应识别为空承诺(说了要写入却没执行)."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+
+    # 承诺了写入但没执行 → 应识别
+    assert a._is_promise_response("好的，我现在把搜集到的AI新闻整理成文章存到文件夹里。")
+    assert a._is_promise_response("我现在把这些资料保存到文件里")
+    assert a._is_promise_response("好的，我这就把结果写入 lv 文件夹")
+
+    # 已完成/正常 → 不误判
+    assert not a._is_promise_response("好的，已经整理好了，文件在 lv 文件夹")
+    assert not a._is_promise_response("根据搜索结果，总结如下")
+    assert not a._is_promise_response("你好呀")
