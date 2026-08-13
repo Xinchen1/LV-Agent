@@ -1,0 +1,21 @@
+# Core dependencies for OpenMythos Agent with NVIDIA NIM
+openai>=1.0.0
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+pyyaml>=6.0
+pydantic>=2.5.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+rich>=13.7.0
+tqdm>=4.66.0
+numpy>=1.24.0
+tiktoken>=0.5.0
+
+# Optional but recommended
+torch>=2.1.0; platform_system != "Windows"  # CPU-friendly on macOS/Linux
+python-telegram-bot>=20.0  # Telegram support
+playwright>=1.40.0  # Browser automation
+
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.21

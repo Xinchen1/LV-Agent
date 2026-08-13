@@ -1,0 +1,171 @@
+# OpenMythos Agent 配置文件示例
+# 复制为 config.yaml 并填写您的API密钥
+
+agent:
+  # 模型后端选择
+  backend: "nim"  # "nim" 或 "openmythos"
+
+  # ═══════════════════════════════════════════════════════════════
+  # NVIDIA NIM API 配置
+  # ═══════════════════════════════════════════════════════════════
+  nim:
+    # 方式1：直接填写（注意不要提交到git）
+    # api_key: "nvapi-你的密钥"
+
+    # 方式2：使用环境变量（推荐，更安全）
+    # export NIM_API_KEY="your_key_here"
+    api_key: "${NIM_API_KEY:-}"  # 留空则使用环境变量
+
+    base_url: "https://integrate.api.nvidia.com/v1"
+    model: "google/gemma-4-31b-it"  # 可选模型见下方
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+
+  # ═══════════════════════════════════════════════════════════════
+  # OpenMythos本地模型配置（仅当backend: openmythos时使用）
+  # ═══════════════════════════════════════════════════════════════
+  model:
+    use_local: true
+    model_path: null
+    attention_type: "mla"
+    dim: 256
+    n_heads: 8
+    max_loop_iters: 8
+    n_experts: 8
+    n_shared_experts: 1
+    n_experts_per_tok: 2
+    expert_dim: 64
+    vocab_size: 32000
+
+  # Agent行为配置
+  max_outer_loops: 10
+  default_thinking_loops: 8
+  max_thinking_loops: 32
+  temperature: 0.7
+  top_k: 50
+  act_threshold: 0.7
+
+  # 自我改进配置
+  reflection:
+    enabled: true
+    frequency: 5
+    min_failures_threshold: 3
+    thinking_loops_for_reflection: 32
+    save_reflections: true
+    reflections_path: "./data/reflections"
+
+  self_improvement:
+    enabled: true
+    auto_training: false
+    training:
+      sft_epochs: 1
+      learning_rate: 1e-5
+      batch_size: 2
+      gradient_accumulation_steps: 4
+
+  # 工具配置
+  tools:
+    enabled:
+      - web_search
+      - calculator
+      - python_exec
+      - file_ops
+      - api_call
+      - browser
+      - git
+      - database
+      - telegram
+    web_search:
+      provider: "duckduckgo"
+      max_results: 5
+    python_exec:
+      timeout: 10
+      allowed_modules: ["math", "json", "datetime", "re", "collections"]
+    file_ops:
+      allowed_dirs: ["./data", "./workspace"]
+      max_file_size: 1048576
+    weather:
+      enabled: true
+      default_days: 3
+    api_call:
+      allowed_hosts: ["jsonplaceholder.typicode.com", "httpbin.org"]
+      timeout: 30
+    telegram:
+      enabled: true
+      bot_token: ""  # Telegram Bot token (from @BotFather)
+      allowed_user_ids: []  # 用户ID白名单
+      polling: true
+      webhook_url: ""
+      config_path: "./data/telegram"
+
+# 经验存储配置
+experience:
+  storage_type: "chromadb"
+  vector_db_path: "./data/experience_store"
+  embedding_model: "all-MiniLM-L6-v2"
+  max_episodes: 10000
+  auto_save: true
+  save_interval: 10
+
+# 策略管理配置
+strategies:
+  enabled: true
+  db_path: "./data/strategies"
+  min_success_rate: 0.7
+  max_strategies_per_type: 50
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "./logs/agent.log"
+  console: true
+  rich_markup: true
+
+# 规划配置
+planning:
+  enabled: true
+  default_strategy: "adaptive"
+  optimize_plans: true
+  max_subtasks: 10
+  mcts_iterations: 100
+  mcts_max_depth: 20
+  mcts_exploration: 1.41
+
+# 推理引擎配置
+reasoning:
+  enabled: true
+  default_strategy: "react"
+  multi_strategy_voting: false
+  strategies_to_try: ["react", "chain_of_thought"]
+  loop_controller_min_loops: 4
+  loop_controller_max_loops: 32
+  loop_controller_default_loops: 8
+
+# 记忆系统配置
+memory:
+  enabled: true
+  kg_storage_path: "./data/kg_store"
+  episodic_storage_path: "./data/episodic_store"
+  embedding_model: "all-MiniLM-L6-v2"
+  max_episodes: 10000
+  auto_extract_entities: true
+  context_compression: true
+  compression_max_tokens: 512
+
+# 自校正配置
+self_correction:
+  enabled: true
+  low_confidence_threshold: 0.6
+  high_error_threshold: 0.3
+  inefficiency_threshold: 0.4
+  intervention_window: 10
+  auto_retraining_threshold: 0.6
+
+# Harness 能力内核（可选接入，默认关闭）
+# 启用后所有工具调用先经过策略门（policy-as-data），不改变执行语义
+harness:
+  enabled: false
+  policy: "safe"            # safe=工作区写限制+危险命令拦截 | permissive=全放行
+  workspace_root: null       # 默认项目目录；safe 策略下写操作限定在此之内
+  audit_log: true            # 拒绝/放行记录写入 agent 日志

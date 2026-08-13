@@ -1,0 +1,39 @@
+# OpenMythos Agent - Self-Improving Deep Thinking Agent
+# Local CPU-friendly version
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "openmythos-agent"
+version = "0.1.0"
+description = "Deep-thinking agent using OpenMythos recurrent architecture"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+license = "MIT"
+homepage = "https://github.com/yourusername/openmythos-agent"
+repository = "https://github.com/yourusername/openmythos-agent"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+chromadb = "^0.4.22"
+sentence-transformers = "^2.2.2"
+numpy = "^1.24.0"
+pyyaml = "^6.0"
+tiktoken = "^0.5.0"
+requests = "^2.31.0"
+python-dotenv = "^1.0.0"
+pydantic = "^2.5.0"
+rich = "^13.7.0"
+tqdm = "^4.66.0"
+pytest = "^7.0"
+black = "^23.0"
+ruff = "^0.1.0"
+
+# Optional dependencies
+torch = { version = ">=2.1.0,<3.0", optional = true }
+
+[tool.poetry.extras]
+ml = ["chromadb", "sentence-transformers"]
+all = ["torch", "chromadb", "sentence-transformers"]
