@@ -1267,9 +1267,7 @@ li{margin:5px 0}
             f"已完成《{topic}》深度调研报告（{len(sources)} 个来源，{len(queries)} 次查询，"
             f"证据置信度 {conf_label}（{conf.get('confidence', 'N/A')}），耗时 {duration_s:.1f}s），"
             f"并保存为：\n\n{files}\n\n"
-            f"参考来源：\n{source_list}\n\n"
-            f"报告含 '## 证据与置信度' 一节, 每条关键论断带 [n] 引用标注; "
-            f"HTML 版可直接在浏览器打开阅读。"
+            f"参考来源：\n{source_list}"
         )
 
     @staticmethod

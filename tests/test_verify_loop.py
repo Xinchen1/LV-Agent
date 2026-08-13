@@ -524,3 +524,12 @@ def test_fast_path_does_not_emit_reasoning():
     assert "if kind in ('tool_call', 'tool_result', 'status', 'error')" in src, "应只透出工具/状态事件"
     assert "kind != 'content'" not in src.replace("if kind in ('tool_call', 'tool_result', 'status', 'error'):", ""), \
         "不应有'非 content 就透出'的旧逻辑"
+
+
+def test_deep_research_summary_no_meta_blurb():
+    """深度研究 summary 不应包含'证据与置信度/引用标注/HTML'等多余说明."""
+    import inspect
+    from agent_project.research_report import ResearchReportGenerator
+    src = inspect.getsource(ResearchReportGenerator._generate_summary)
+    assert "报告含 '## 证据与置信度'" not in src, "summary 不应含'证据与置信度'说明句"
+    assert "HTML 版可直接在浏览器打开阅读" not in src, "summary 不应含 HTML 说明句"
