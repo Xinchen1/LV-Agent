@@ -512,3 +512,15 @@ def test_deep_research_post_verification():
     rp2 = Path(real)
     valid2 = rp2.exists() and rp2.stat().st_size > 200 and 5 > 0
     assert valid2, "存在的非空报告应有来源时判定有效"
+
+
+def test_fast_path_does_not_emit_reasoning():
+    """fast path 不应把思考过程(reasoning)实时显示给用户, 只透出最终答案."""
+    import inspect
+    from agent_project.agent import OpenMythosAgent
+
+    src = inspect.getsource(OpenMythosAgent._run_simple)
+    # _buffer_user_cb 只透出工具/状态事件, 不透出 reasoning/content
+    assert "if kind in ('tool_call', 'tool_result', 'status', 'error')" in src, "应只透出工具/状态事件"
+    assert "kind != 'content'" not in src.replace("if kind in ('tool_call', 'tool_result', 'status', 'error'):", ""), \
+        "不应有'非 content 就透出'的旧逻辑"
