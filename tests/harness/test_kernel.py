@@ -123,3 +123,28 @@ def test_registry_executor_success_and_failure():
         run(make_effect("bad", {}))
     with pytest.raises(KeyError):
         run(make_effect("missing", {}))
+
+
+def test_workspace_escape_asks_not_denies():
+    """工作区外写(如 .zshrc)应 ASK(询问)而非直接 DENY; 系统敏感路径仍 DENY."""
+    import sys, tempfile, os
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.harness.kernel import Kernel, safe_default_policy, Decision
+    from agent_project.harness.effects import make_effect
+
+    root = tempfile.mkdtemp()
+    k = Kernel(policy=safe_default_policy(root))
+
+    # 工作区内写 → ALLOW
+    inside = os.path.join(root, "sub", "x.txt")
+    eff_inside = make_effect("file_ops", {"action": "write", "path": inside, "content": "x"})
+    assert k.evaluate(eff_inside).decision is Decision.ALLOW
+
+    # 工作区外写 → ASK (用户确认)
+    eff_out = make_effect("file_ops", {"action": "write", "path": "/Users/mac/.zshrc", "content": "x"})
+    assert k.evaluate(eff_out).decision is Decision.ASK, "工作区外写应询问而非直接拦截"
+
+    # 系统敏感路径 → DENY
+    eff_etc = make_effect("file_ops", {"action": "write", "path": "/etc/hosts", "content": "x"})
+    assert k.evaluate(eff_etc).decision is Decision.DENY

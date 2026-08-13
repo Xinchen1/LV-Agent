@@ -257,8 +257,27 @@ class ToolExecutor:
                 from .harness.effects import make_effect
                 from .harness.kernel import Decision
 
-                admission = self.harness_kernel.evaluate(make_effect(tool_name, args))
-                if admission.decision is not Decision.ALLOW:
+                effect = make_effect(tool_name, args)
+                admission = self.harness_kernel.evaluate(effect)
+                if admission.decision is Decision.ASK:
+                    # 让用户选择确认/拒绝, 而非直接拦截; 非交互环境回退为拒绝
+                    granted = False
+                    try:
+                        import sys as _sys
+                        _interactive = bool(getattr(_sys, "stdin", None) and _sys.stdin.isatty())
+                        if _interactive:
+                            granted = self.harness_kernel.ask(effect, admission.reason)
+                    except Exception as e:
+                        self.logger.warning(f"harness ask failed: {e}")
+                    if granted:
+                        # 用户同意: 放行并记住
+                        try:
+                            self.harness_kernel.allowlist_add(effect)
+                        except Exception:
+                            pass
+                    else:
+                        return False, f"SYSTEM STOP: harness blocked {tool_name}: {admission.reason}"
+                elif admission.decision is not Decision.ALLOW:
                     return False, f"SYSTEM STOP: harness blocked {tool_name}: {admission.reason}"
             except Exception as e:
                 self.logger.warning(f"harness admission failed: {e}")
