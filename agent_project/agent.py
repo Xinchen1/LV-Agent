@@ -1397,7 +1397,6 @@ class OpenMythosAgent:
                 cleaned.append(stripped)
         return cleaned
 
-    @staticmethod
     def _read_folder_markdown(self, folder: str) -> str:
         """读取文件夹下的 markdown 文件内容, 供总结时参考.
 
