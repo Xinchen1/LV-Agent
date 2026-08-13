@@ -670,7 +670,24 @@ class ExecutionEngine:
                         # (压缩状态->反思->更新), 而非强制立即行动; 但限制内省轮数防死循环。
                         is_deep = ctx.max_steps >= 8
                         think_steps = sum(1 for st in ctx.steps if not st.tool_calls and not st.final_answer)
-                        if is_deep and think_steps < 3 and self._wants_to_continue(output):
+                        wants_more = self._wants_to_continue(output)
+                        if wants_more and think_steps < 3:
+                            # 模型明确想继续(如"让我先确认/再检查") → 扩展预算并继续,
+                            # 不再要求 is_deep(低预算任务也会遇到需要多步确认的情况)。
+                            hard_limit = getattr(self.config, "max_thinking_loops", 32)
+                            if ctx.max_steps < hard_limit:
+                                ctx.max_steps = min(hard_limit, ctx.max_steps + 4)
+                                self.logger.info(
+                                    f"continue-intent loop extension: step {step_number} → max_steps {ctx.max_steps}"
+                                )
+                            next_prompt = policy.next_prompt(ctx, output)
+                            prompt = (next_prompt or "") + (
+                                "\n\n你表示想继续/确认, 请继续下一步——"
+                                "可调用工具获取信息, 或直接给出 Final Answer。"
+                            )
+                            prompt = self._attach_monitor_hints(prompt, ctx)
+                            continue
+                        if is_deep and think_steps < 3 and wants_more:
                             next_prompt = policy.next_prompt(ctx, output)
                             prompt = (next_prompt or "") + (
                                 "\n\n继续你的循环深度思考(ROUND 下一轮):\n"
