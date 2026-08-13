@@ -12,15 +12,15 @@
 
 *Deep thinking, real tools. Recurrent reasoning · tool-driven · self-learning*
 
-**Capabilities**
-- Multi-turn deep reasoning for complex problems
-- Real tools for live information
-- Continuous self-learning, smarter over time
+**Capabilities**<br>
+Multi-turn deep reasoning for complex problems<br>
+Real tools for live information<br>
+Continuous self-learning, smarter over time
 
-**Mission**
-- Open-source AI at the core
-- Great AI for everyone
-- Intelligence for all
+**Mission**<br>
+Open-source AI at the core<br>
+Great AI for everyone<br>
+Intelligence for all
 
 以开源人工智能为核心，让每一个人都能用上最好的人工智能，实现智能平权
 
