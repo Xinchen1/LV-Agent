@@ -344,8 +344,9 @@ class ToolCallParser:
         args: Dict[str, Any] = {}
         if not args_str:
             return args
-        quote_normalized = args_str.replace("`", '"').replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-        candidates = [quote_normalized, "{" + quote_normalized + "}"]
+        # 注意: 中文全角引号(“ ” ‘ ’)在 JSON 字符串内是合法字符, 不应替换成半角(会破坏 JSON)。
+        # 先尝试原样解析(最标准), 再尝试反引号替换版本(模型有时用 ` 代替 JSON 引号).
+        candidates = [args_str, "{" + args_str + "}"]
         for candidate in candidates:
             try:
                 parsed = json.loads(candidate)
@@ -359,6 +360,49 @@ class ToolCallParser:
                     return cls._sanitize_parsed_args(parsed)
             except (SyntaxError, ValueError):
                 continue
+
+        # 反引号替换版本: 模型有时用 ` 包 JSON 键值(尤其键). 仅当原样解析失败时尝试.
+        quote_normalized = args_str.replace("`", '"')
+        candidates2 = [quote_normalized, "{" + quote_normalized + "}"]
+        for candidate in candidates2:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return cls._sanitize_parsed_args(parsed)
+            except Exception:
+                pass
+            try:
+                parsed = ast.literal_eval(candidate)
+                if isinstance(parsed, dict):
+                    return cls._sanitize_parsed_args(parsed)
+            except (SyntaxError, ValueError):
+                continue
+
+        # 健壮兜底: 提取最外层 JSON 对象, 逐位置尝试解析
+        # 模型可能在 content 里内嵌未转义的引号/中文引号, 导致整块 JSON 解析失败。
+        # 这里尝试找到所有 '{' 起始的候选子串, 用 json.loads 逐个试, 取第一个能完整解析的。
+        first_brace = quote_normalized.find("{")
+        if first_brace >= 0:
+            for start in range(first_brace, len(quote_normalized)):
+                candidate = quote_normalized[start:]
+                if not candidate.startswith("{"):
+                    continue
+                # 用 json.JSONDecoder.raw_decode 从指定位置解析, 支持前置内容
+                try:
+                    from json import JSONDecoder
+                    parsed, _end = JSONDecoder().raw_decode(candidate)
+                    if isinstance(parsed, dict):
+                        return cls._sanitize_parsed_args(parsed)
+                except Exception:
+                    pass
+                # 也试 ast.literal_eval
+                try:
+                    parsed = ast.literal_eval(candidate)
+                    if isinstance(parsed, dict):
+                        return cls._sanitize_parsed_args(parsed)
+                except Exception:
+                    continue
+
         normalized = re.sub(r"\s+", " ", quote_normalized).strip()
         try:
             tokens = shlex.split(normalized)
