@@ -662,3 +662,10 @@ def test_promise_detection_continuation_words():
     assert not a._is_promise_response("好的，已经搜索完成并写入 lv 目录了")
     assert not a._is_promise_response("根据搜索结果，总结如下")
     assert not a._is_promise_response("你好")
+
+
+def test_logging_console_default_off():
+    """日志 console 默认应关闭, 避免 warn/confidence 打到 stderr 污染 UI."""
+    from agent_project.config import LoggingConfig
+    cfg = LoggingConfig()
+    assert cfg.console is False, f"console 默认应关闭, 实际 {cfg.console}"

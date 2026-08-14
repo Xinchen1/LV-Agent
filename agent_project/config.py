@@ -187,7 +187,9 @@ class SelfCorrectionConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = "./logs/agent.log"
-    console: bool = True
+    # console 默认关闭: 日志走文件(logs/agent.log), 避免 warn/confidence 等
+    # 调试信息打到 stderr 污染交互式 UI 界面。
+    console: bool = False
     rich_markup: bool = True
     output_mode: str = "auto"  # "auto" | "rich" | "plain" | "json"
 
