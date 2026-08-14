@@ -82,6 +82,13 @@ class ToolCallParser:
             # 统一使用注册名, 后续 file_ops/python_exec 特判也用注册名
             tool_name = tool.name if hasattr(tool, "name") else tool_name
             if tool_name == "file_ops":
+                # 模型常用 sub_action/operation/action_type 表达 file_ops 子操作 → 归一化为 action
+                if not args.get("action"):
+                    for alt in ("sub_action", "operation", "action_type", "op"):
+                        if args.get(alt):
+                            args["action"] = args[alt]
+                            del args[alt]
+                            break
                 action = args.get("action")
                 for key in list(args.keys()):
                     if key in cls.FILE_OPS_ACTIONS and key != "action":
