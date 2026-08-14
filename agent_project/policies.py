@@ -97,9 +97,23 @@ class ToolCallParser:
                     return
             schema = getattr(tool, "parameters", {}) or {}
             required = schema.get("required", []) if isinstance(schema, dict) else []
+            # 执行阶段(_patch_default_args)有参数别名兜底, 解析阶段需保持一致:
+            # 模型常用别名导致 required 键缺失时应放行, 由执行阶段补齐。
+            _required_alias = {
+                "glob": {"pattern": ("query",)},
+                "search_files": {"pattern": ("query",), "query": ("pattern",)},
+                "bash_exec": {"command": ("cmd", "shell_command")},
+            }
             for key in required:
+                # file_ops 的 multi_read 用 paths 列表代替 path: 此时 path 非必需
+                if tool_name == "file_ops" and key == "path" and args.get("paths"):
+                    continue
                 val = args.get(key)
                 if val is None or (isinstance(val, str) and not val.strip()):
+                    # 尝试别名: 该必填键是否有等价键已提供
+                    aliases = _required_alias.get(tool_name, {}).get(key, ())
+                    if any(args.get(a) for a in aliases):
+                        continue
                     return
             calls.append((tool_name, args))
 

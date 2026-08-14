@@ -224,17 +224,27 @@ class ToolExecutor:
 
     @staticmethod
     def _patch_default_args(tool_name: str, args: Dict[str, Any]) -> None:
-        """轻量参数兜底: 补缺省必填参数, 避免空调用 TypeError(如 glob:{} / search_files:{})."""
+        """轻量参数兜底: 补缺省必填参数, 避免空调用 TypeError(如 glob:{} / search_files:{}).
+
+        同时把模型常用别名参数迁移到规范键(command/cmd、pattern/query), 否则执行会因缺键失败。
+        """
         if not isinstance(args, dict):
             return
         if tool_name == "glob":
-            pat = args.get("pattern") or args.get("query")
+            # 迁移 query -> pattern
+            if "pattern" not in args or not isinstance(args.get("pattern"), str) or not args["pattern"].strip():
+                if args.get("query"):
+                    args["pattern"] = args["query"]
+            pat = args.get("pattern")
             if not isinstance(pat, str) or not pat.strip():
                 args["pattern"] = "**"
             if not args.get("path"):
                 args["path"] = "."
         elif tool_name == "search_files":
-            pat = args.get("pattern") or args.get("query")
+            if "pattern" not in args or not isinstance(args.get("pattern"), str) or not args["pattern"].strip():
+                if args.get("query"):
+                    args["pattern"] = args["query"]
+            pat = args.get("pattern")
             if not isinstance(pat, str) or not pat.strip():
                 args["pattern"] = ""
             if not args.get("path"):
@@ -243,7 +253,11 @@ class ToolExecutor:
             if not isinstance(args.get("path"), str) or not args.get("path", "").strip():
                 args["path"] = "."
         elif tool_name == "bash_exec":
-            cmd = args.get("command") or args.get("cmd")
+            # 迁移 cmd -> command
+            if not args.get("command"):
+                if args.get("cmd"):
+                    args["command"] = args["cmd"]
+            cmd = args.get("command")
             if not isinstance(cmd, str):
                 args["command"] = str(cmd or "")
 
