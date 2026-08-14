@@ -124,6 +124,9 @@ class ExecutionContext:
     call_counts: Dict[str, int] = field(default_factory=dict)
     observations: List[str] = field(default_factory=list)
 
+    # 动态扩展状态: 连续无进展步数(达到阈值则停止并提示失败, 替代硬上限)
+    no_progress_streak: int = 0
+
     # 分支监控 agent 状态(旁路感知主 agent 执行)
     monitor_enabled: bool = True
     monitor_hints: List[str] = field(default_factory=list)  # 注入给主 agent 的简明提示
@@ -674,12 +677,17 @@ class ExecutionEngine:
                         if wants_more and think_steps < 3:
                             # 模型明确想继续(如"让我先确认/再检查") → 扩展预算并继续,
                             # 不再要求 is_deep(低预算任务也会遇到需要多步确认的情况)。
-                            hard_limit = getattr(self.config, "max_thinking_loops", 32)
-                            if ctx.max_steps < hard_limit:
-                                ctx.max_steps = min(hard_limit, ctx.max_steps + 4)
+                            safety_cap = max(
+                                int(getattr(self.config, "max_thinking_loops", 32)) * 4,
+                                64,
+                            )
+                            if ctx.max_steps < safety_cap:
+                                ctx.max_steps = min(safety_cap, ctx.max_steps + 4)
                                 self.logger.info(
                                     f"continue-intent loop extension: step {step_number} → max_steps {ctx.max_steps}"
                                 )
+                                if ctx.stream_callback:
+                                    ctx.stream_callback("status", f"↑ loop {ctx.max_steps} (增加思考预算)")
                             next_prompt = policy.next_prompt(ctx, output)
                             prompt = (next_prompt or "") + (
                                 "\n\n你表示想继续/确认, 请继续下一步——"
@@ -724,6 +732,23 @@ class ExecutionEngine:
                 ctx.steps.append(record)
                 trace.steps.append(record)
 
+                # 连续无进展追踪: 每一步工具执行后即时评估(不是只在扩展时才看),
+                # 这样持续失败/重复/打转会累积计数, 达到阈值即停止并提示失败。
+                # 判断标准: 该步是否产出真实进展(有成功工具结果 & 排除去重拦截/错误)。
+                if parsed.tool_calls and not self._has_real_progress(ctx):
+                    ctx.no_progress_streak += 1
+                    if ctx.no_progress_streak >= 3:
+                        self.logger.warning(
+                            f"loop stopped after {ctx.no_progress_streak} consecutive no-progress steps (step {step_number})"
+                        )
+                        if ctx.stream_callback:
+                            ctx.stream_callback(
+                                "status", f"连续 {ctx.no_progress_streak} 步无进展, 已停止(请检查工具/参数或换个思路)"
+                            )
+                        break
+                elif parsed.tool_calls:
+                    ctx.no_progress_streak = 0
+
                 # 分支监控 agent: 旁路感知执行情况, 发现异常注入简明提示
                 self._monitor_and_inject(ctx, output)
 
@@ -732,21 +757,30 @@ class ExecutionEngine:
                 #   A. 接近上限(step >= max_steps)且模型仍产出新工具调用(有进展)
                 #   B. 模型明确表达"继续/还要/补充/再多搜"意图(继续信号, 更主动)
                 # 必须在 convergence.should_stop 之前执行, 否则到上限会被先判定停止。
+                # 注意: 不再用 max_thinking_loops 作为硬上限截断——只要模型持续产出
+                # 新工具调用且有真实进展就继续扩展; 取而代之的是"连续无进展"约束:
+                # 连续 N 步没有真实进展(失败/重复/打转)才停止, 避免无限烧预算。
                 if step_number >= ctx.max_steps or self._wants_to_continue(output):
-                    hard_limit = getattr(self.config, "max_thinking_loops", 32)
+                    # 安全上限: 仅防止极端死循环(如模型反复输出相同内容), 正常任务远达不到
+                    safety_cap = max(
+                        int(getattr(self.config, "max_thinking_loops", 32)) * 4,
+                        64,
+                    )
                     wants_more = self._wants_to_continue(output)
-                    if ctx.max_steps < hard_limit and (parsed.tool_calls or wants_more):
+                    if ctx.max_steps < safety_cap and (parsed.tool_calls or wants_more):
                         # 进展质量感知: 最近几步工具是否真在产出新信息?
                         # 若连续失败/原地打转, 即使有工具调用也不扩展(避免烧预算)。
                         if parsed.tool_calls and not self._has_real_progress(ctx):
+                            ctx.no_progress_streak += 1
                             self.logger.info(
                                 f"loop extension SKIPPED: step {step_number}, no real progress "
-                                f"(recent tools failing/repeating)"
+                                f"(streak={ctx.no_progress_streak}, recent tools failing/repeating)"
                             )
                             if ctx.stream_callback:
-                                ctx.stream_callback("status", "no real progress — not extending")
+                                ctx.stream_callback("status", f"no real progress ({ctx.no_progress_streak}) — not extending")
                         else:
-                            new_max = min(hard_limit, ctx.max_steps + 4)
+                            ctx.no_progress_streak = 0
+                            new_max = min(safety_cap, ctx.max_steps + 4)
                             reason = "explicit continue intent" if wants_more and not parsed.tool_calls \
                                      else "still producing tool calls (real progress)"
                             self.logger.info(
@@ -755,7 +789,7 @@ class ExecutionEngine:
                             )
                             ctx.max_steps = new_max
                             if ctx.stream_callback:
-                                ctx.stream_callback("status", f"extending loops → up to {new_max} (still progressing)")
+                                ctx.stream_callback("status", f"↑ loop {new_max} (增加思考预算, 仍在推进)")
 
                 if self.convergence.should_stop(ctx, parsed, step_number):
                     break
