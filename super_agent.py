@@ -1428,13 +1428,7 @@ class SuperAgentCLI:
                     code_mode=getattr(self, 'code_mode', False),
                     mode=getattr(self, 'output_mode', None),
                 )
-                content_streamed = result.pop('_content_streamed', False)
-                final_answer = result.get('final_answer', '')
-                if not content_streamed and final_answer:
-                    print(f"\n{_clean_content_text(final_answer)}")
-                print(f"\n{self.format_result(result)}")
-                # 深度研究报告: 完成后自动打开 HTML
-                self._maybe_open_report(result)
+                self._finish_result(result)
             except KeyboardInterrupt:
                 # ESC 中断任务: 回到输入循环, 不退出
                 print(_style(" 任务已中断, 可以继续输入新的指令。", "2"))
@@ -1463,12 +1457,7 @@ class SuperAgentCLI:
                     code_mode=getattr(self, 'code_mode', False),
                     mode=getattr(self, 'output_mode', None),
                 )
-                content_streamed = result.pop('_content_streamed', False)
-                final_answer = result.get('final_answer', '')
-                if not content_streamed and final_answer:
-                    print(f"\n{_clean_content_text(final_answer)}")
-                print(f"\n{self.format_result(result)}")
-                self._maybe_open_report(result)
+                self._finish_result(result)
             except KeyboardInterrupt:
                 print(_style(" 任务批处理已中断 (ESC)", "2"))
                 break
@@ -1501,18 +1490,22 @@ class SuperAgentCLI:
                 code_mode=getattr(self, 'code_mode', False),
                 mode=getattr(self, 'output_mode', None),
             )
-            content_streamed = result.pop('_content_streamed', False)
-            final_answer = result.get('final_answer', '')
-            if not content_streamed and final_answer:
-                print(f"\n{_clean_content_text(final_answer)}")
-            print(f"\n{self.format_result(result)}")
-            self._maybe_open_report(result)
+            self._finish_result(result)
             return 0
         except Exception as e:
             import traceback
             print(f"\033[31mfailed: {e}\033[0m")
             console.print(traceback.format_exc())
             return 1
+
+    def _finish_result(self, result: Dict[str, Any]) -> None:
+        """统一收尾: 打印未流式答案 + 元信息 + 自动打开报告."""
+        content_streamed = result.pop('_content_streamed', False)
+        final_answer = result.get('final_answer', '')
+        if not content_streamed and final_answer:
+            print(f"\n{_clean_content_text(final_answer)}")
+        print(f"\n{self.format_result(result)}")
+        self._maybe_open_report(result)
 
     def list_tools(self):
         try:
