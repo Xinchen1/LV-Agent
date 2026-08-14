@@ -13,6 +13,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from . import BaseTool
+from . import ToolResult as _ToolResult
+
 
 class WebContentFetcher:
     """Fetch and clean webpage content for LLM consumption."""
@@ -181,3 +184,44 @@ class WebContentFetcher:
             "youtube.com", "bilibili.com/video", "vimeo.com",
         )
         return not any(d in url for d in blocked)
+
+
+class ReadWebTool(BaseTool):
+    """read_web(url) → 打开网页提取正文(供 LLM 消费).
+
+    fast path 的 system prompt 教模型用 read_web 打开网页; 这里让它成为真实注册的工具,
+    包装 WebContentFetcher(轻量 requests 抓取 + 文本清理), 不依赖 Playwright。
+    """
+
+    name = "read_web"
+    description = "Fetch a webpage and extract its readable text content. Use for reading articles/docs/pages."
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "Full URL to fetch (http/https).",
+            },
+        },
+        "required": ["url"],
+    }
+
+    def __init__(self):
+        from . import TOOLS_REGISTRY, ToolResult
+        self._fetcher = WebContentFetcher()
+
+    def execute(self, url: str) -> Any:
+        from . import ToolResult
+        if not url or not isinstance(url, str):
+            return ToolResult(success=False, output="", error="url 参数 required for read_web")
+        try:
+            text = self._fetcher.fetch(url)
+            if not text:
+                return ToolResult(
+                    success=False, output="",
+                    error=f"无法提取 {url} 的正文(可能需 JS 渲染或页面无文本)",
+                )
+            return ToolResult(success=True, output=text, metadata={"url": url})
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"read_web failed: {e}")
