@@ -940,3 +940,44 @@ def test_patch_default_args_migrates_aliases():
     a3 = {"query": "TODO"}
     te._patch_default_args("search_files", a3)
     assert a3.get("pattern") == "TODO", f"query 应迁移到 pattern: {a3}"
+
+
+def test_search_cache_semantic_approximation():
+    """语义近似缓存: 同义词/口语化/词序变化应命中; 无关主题应 miss.
+
+    这是比精确 _key 更强的第二层: "人工智能新闻"≈"AI新闻",
+    "AI今天有什么新闻"≈"AI新闻", 而 "NBA赛事" 与 "AI新闻" 无关。
+    """
+    from agent_project.tools.search_cache import SearchCache
+    c = SearchCache(disk_path=None)
+    c.set("AI 新闻", [{"title": "AI新闻1", "url": "http://a"}])
+    c.set("天气 北京", [{"title": "北京天气"}])
+
+    should_hit = [
+        "人工智能新闻",
+        "AI今天有什么新闻",
+        "最新的AI新闻",
+        "AI新闻 今天",
+    ]
+    should_miss = [
+        "苹果AI",
+        "NBA赛事",
+        "足球比分",
+        "股市行情",
+    ]
+    for q in should_hit:
+        r = c.get(q)
+        assert r, f"语义近似应命中: {q!r}"
+    for q in should_miss:
+        r = c.get(q)
+        assert r is None, f"无关主题不应命中: {q!r}"
+
+
+def test_search_cache_semantic_similarity_metric():
+    """Jaccard 相似度: 共享 n-gram 越多分越高."""
+    from agent_project.tools.search_cache import SearchCache
+    a = SearchCache._semantic_ngrams("AI新闻")
+    b = SearchCache._semantic_ngrams("人工智能新闻")
+    c = SearchCache._semantic_ngrams("足球比赛")
+    assert SearchCache._similarity(a, b) > 0.3, f"相关查询相似度应较高: {SearchCache._similarity(a,b):.2f}"
+    assert SearchCache._similarity(a, c) < 0.2, f"无关查询相似度应很低: {SearchCache._similarity(a,c):.2f}"
