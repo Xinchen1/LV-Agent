@@ -3968,21 +3968,43 @@ class OpenMythosAgent:
     def _resolve_pronoun_to_entity(self, task: str, recent_text: str) -> Optional[str]:
         """把代词(这个/那个/它等)解析为最近提到的具体路径或项目名。"""
         # 1. 优先找完整文件/文件夹路径(最近提到优先)
+        # 支持绝对路径 + 相对路径(../xxx、./xxx、IDE/super-ide), 相对路径结合 cwd 解析成绝对路径
+        # (?<!\.) 防止 ./ 从 ../ 的第二个点处开始匹配(正则回溯误匹配出 ./IDE/...)
         path_patterns = [
             r"(/Users/[^\s\n\"'<>|]+)",
             r"(~/[^\s\n\"'<>|]+)",
             r"(/home/[^\s\n\"'<>|]+)",
             r"(/Volumes/[^\s\n\"'<>|]+)",
+            r"(\.\./[^\s\n\"'<>|]+)",
+            r"(?<!\.)(\./[^\s\n\"'<>|]+)",
         ]
         paths = []
         for pat in path_patterns:
             for m in re.finditer(pat, recent_text):
-                p = m.group(1).strip().strip(".,;:!?")
+                p = m.group(1).strip()
+                # 只去掉尾部标点(用 rstrip), 避免把相对路径前导的 .. 剥掉
+                p = p.rstrip(".,;:!?，。、")
                 if len(p) > 2:
                     paths.append(p)
         # 取最近一个(文本中越靠后越近)
         if paths:
             target_path = paths[-1]
+            # 相对路径(../、./)结合当前工作目录解析成绝对路径, 供后续工具直接使用
+            if target_path.startswith(("../", "./")):
+                try:
+                    target_path = str((Path.cwd() / target_path).resolve())
+                except Exception:
+                    pass
+            # 若相对 cwd 解析出的路径不存在(如 ../IDE/super-ide 相对 agent 目录),
+            # 尝试常见根目录(Downloads/Desktop/Documents)组合, 找到真实存在的位置。
+            if target_path.startswith(("../", "./")) and not Path(target_path).exists():
+                rel = Path(target_path)
+                for root in [Path.home() / "Downloads", Path.home() / "Desktop",
+                             Path.home() / "Documents", Path.cwd().parent]:
+                    cand = root / rel
+                    if cand.exists():
+                        target_path = str(cand.resolve())
+                        break
             # 去掉尾部的压缩包或具体文件,保留项目目录(如果目标是目录)
             path_obj = Path(target_path)
             if path_obj.is_file():
@@ -3993,14 +4015,87 @@ class OpenMythosAgent:
                 count=1,
             )
 
-        # 2. 没有路径,则退到项目名/主题名
+        # 1.5 实体名是目录: 从历史中定位该目录的实际路径(大小写不敏感 + 名字包含匹配),
+        #    避免"分析它"把 super-ide 解析成裸名字后 agent 去错误目录搜索。
         target = self._extract_most_recent_entity(recent_text)
         if target:
+            located = self._locate_project_dir(target)
+            if located:
+                return self._PRONOUN_SUB_RE.sub(f"'{located}'", task, count=1)
             return self._PRONOUN_SUB_RE.sub(
                 f"'{target}'",
                 task,
                 count=1,
             )
+        return None
+
+    def _locate_project_dir(self, name: str) -> Optional[str]:
+        """在常见根目录下定位名字匹配的项目/文件夹(大小写/连字符归一).
+
+        返回首个存在的目录绝对路径; 找不到返回 None。
+        搜索范围: 各根目录的直接子目录 + 直接子目录的一级子目录(两级),
+        足够覆盖 Downloads/IDE/super-ide 这类嵌套, 又不至于全盘扫描。
+        """
+        if not name:
+            return None
+        name_norm = re.sub(r"[\s\-_]+", "", name.lower())
+        if not name_norm:
+            return None
+        roots = [Path.cwd(), Path.cwd().parent, Path.home(),
+                 Path.home() / "Desktop", Path.home() / "Downloads",
+                 Path.home() / "Documents"]
+        seen_roots = set()
+        scanned_dirs = set()
+        for root in roots:
+            try:
+                r = root.resolve()
+            except Exception:
+                continue
+            if r in seen_roots or not r.is_dir():
+                continue
+            seen_roots.add(r)
+            try:
+                children = [c for c in r.iterdir() if c.is_dir()]
+            except Exception:
+                continue
+
+            def _norm_dir(d) -> str:
+                return re.sub(r"[\s\-_]+", "", d.name.lower())
+
+            # 第一层: 先精确匹配(完整相等), 再退化到子串匹配(仅当名字足够长避免误匹配 super-ide-build)
+            for child in children:
+                cn = _norm_dir(child)
+                if cn == name_norm:
+                    return str(child.resolve())
+            for child in children:
+                cn = _norm_dir(child)
+                if len(name_norm) >= 4 and cn and cn.endswith(name_norm):
+                    return str(child.resolve())
+                if len(name_norm) >= 6 and cn and name_norm in cn:
+                    return str(child.resolve())
+            # 第二层: 直接子目录的一级子目录(限制数量防扫描过深), 同样先精确后子串
+            for child in children[:40]:
+                try:
+                    cid = child.resolve()
+                except Exception:
+                    continue
+                if cid in scanned_dirs:
+                    continue
+                scanned_dirs.add(cid)
+                try:
+                    grand = [g for g in cid.iterdir() if g.is_dir()]
+                except Exception:
+                    continue
+                for g in grand[:40]:
+                    gn = _norm_dir(g)
+                    if gn == name_norm:
+                        return str(g.resolve())
+                for g in grand[:40]:
+                    gn = _norm_dir(g)
+                    if len(name_norm) >= 4 and gn and gn.endswith(name_norm):
+                        return str(g.resolve())
+                    if len(name_norm) >= 6 and gn and name_norm in gn:
+                        return str(g.resolve())
         return None
 
     _CN_STOPWORDS = {

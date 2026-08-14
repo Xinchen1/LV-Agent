@@ -731,10 +731,26 @@ class ExecutionEngine:
                 # 把分支监控 agent 的提示注入主 agent 的下一轮
                 prompt = self._attach_monitor_hints(next_prompt, ctx)
 
-            if not trace.final_answer or self._is_truncated_fragment(trace.final_answer):
-                # final_answer 为空或为截断碎片(如 "We"/"The")时,
-                # 基于已有观察重新生成完整答案, 避免残缺回答直接返回给用户
-                trace.final_answer = self._force_final_answer(ctx)
+            # 项目/代码分析任务: 最终答案若为空/截断/过短(如只提一个文件)则强制重生成完整分析。
+            # 覆盖用户场景: 模型调 project_context 拿到结构后只回一句"docs/goai/作品简介"就结束。
+            _analysis_needed = bool(
+                re.search(r"(分析|架构|剖析|调研|概述|概览|报告|报告|overview|analy[sz]e|architectur|structure|analyze)", ctx.task, re.IGNORECASE)
+            )
+            _answer = (trace.final_answer or "").strip()
+            _short_answer = _analysis_needed and 0 < len(_answer) < 120
+            if (not trace.final_answer or self._is_truncated_fragment(trace.final_answer) or _short_answer) and ctx.observations:
+                # 基于已有观察重新生成完整答案, 避免残缺/过短回答直接返回给用户
+                hint = ""
+                if _analysis_needed:
+                    hint = (
+                        "\n\n这是对目标项目/代码的完整分析, 请覆盖以下结构:\n"
+                        "- 项目定位与核心模块(按实际观察到的结构)\n"
+                        "- 每个关键目录/文件的职责(读到的内容)\n"
+                        "- 技术栈/架构特点(从结构推断)\n"
+                        "- 核心逻辑与亮点(基于读取的文件内容)\n"
+                        "给出结构化 Markdown 分析, 不要只说一句话。"
+                    )
+                trace.final_answer = self._force_final_answer(ctx, extra=hint)
                 trace.success = bool(trace.final_answer)
 
         except Exception as e:
@@ -850,7 +866,7 @@ class ExecutionEngine:
             ctx.executed_calls[key] = obs
         return results + duplicate_results
 
-    def _force_final_answer(self, ctx: ExecutionContext) -> str:
+    def _force_final_answer(self, ctx: ExecutionContext, extra: str = "") -> str:
         if not ctx.observations:
             if ctx.steps:
                 return ctx.steps[-1].reasoning or "No result produced."
@@ -864,7 +880,9 @@ class ExecutionEngine:
             f"## Tool Results:\n{recent}\n\n"
             "## Final Answer:\n"
         )
-        answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, 2048)
+        if extra:
+            prompt = prompt.rstrip() + extra + "\n"
+        answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, 3072)
         cleaned = self._clean_final_text(answer or "")
         # 二次兜底: 生成仍为空/截断时, 用最近一步思考或观察作为答案
         if self._is_truncated_fragment(cleaned):
