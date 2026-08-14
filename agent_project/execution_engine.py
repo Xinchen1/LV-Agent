@@ -587,9 +587,6 @@ class ExecutionEngine:
         try:
             calls = ToolCallParser.parse_all(backfill)
             if not calls:
-                # 兼容函数式 "web_search(query=xxx)"
-                calls = ToolCallParser.parse_all(backfill)
-            if not calls:
                 return None
             tool_name, args = calls[0]
             from .tools import TOOLS_REGISTRY
