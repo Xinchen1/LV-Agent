@@ -838,3 +838,48 @@ def test_loop_stops_after_consecutive_no_progress():
     assert len(tr.tools_used) < 12, f"连续无进展应提前停止, 实际执行了 {len(tr.tools_used)} 次"
     assert any(k == "status" and "无进展" in str(t) for k, t in status_msgs), f"应有停止提示: {status_msgs}"
 
+
+
+def test_analysis_task_short_answer_forced_full_report():
+    """分析任务中模型给过短答案(只提一句)时, 应强制基于工具结果重生成完整分析.
+
+    回归: 用户"分析 super ide, 输出分析报告"场景——模型调 project_context 拿到
+    结构后只回一句"docs/goai/作品简介"就结束。
+    """
+    import sys, logging
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY, BaseTool, ToolResult
+
+    class FakeProj(BaseTool):
+        name = "project_context"
+        description = "fake"
+        parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+        def execute(self, **kw):
+            return ToolResult(success=True, output="Project: super-ide\napps/desktop (Electron)\napps/web (Vue 3)\ndocs/ARCHITECTURE-v2.0.md")
+
+    TOOLS_REGISTRY._tools["project_context"] = FakeProj()
+    cfg = AgentConfig()
+
+    class FB:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c == 1:
+                return '[TOOL:project_context]\n{"path": "/x"}'
+            if "项目定位" in prompt:  # 兜底重生成 → 完整分析
+                return "## 项目分析\n\nsuper-ide 是一个多端 IDE:\n- apps/desktop: Electron\n- apps/web: Vue 3\n- docs: 架构文档\n\n通过 conductor 协调各端。"
+            return "Final Answer: docs/goai/作品简介。"
+
+    eng = ExecutionEngine(model_backend=FB(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="分析 /Users/mac/Downloads/IDE/super-ide, 输出分析报告",
+                           available_tools=TOOLS_REGISTRY.get_tools_dict(), config=cfg, max_steps=8)
+    ctx.monitor_enabled = False
+    tr = eng.run(ReActPolicy(), ctx)
+    assert len(tr.final_answer or "") > 50, f"分析场景应强制重生成完整报告, 实际 {len(tr.final_answer or '')} 字符"
+    assert "apps/desktop" in (tr.final_answer or ""), "报告应覆盖实际观察到的项目结构"
+    assert "作品简介" not in (tr.final_answer or ""), "过短的一句话答案应被替换"

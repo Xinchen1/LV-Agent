@@ -412,3 +412,57 @@ def test_tool_parser_bare_quotes_in_content():
     # 标准 JSON 仍正常
     ok = ToolCallParser.parse_all('{"action": "write", "path": "lv/a.md", "content": "测试"}')
     assert ok
+
+
+def test_pronoun_resolves_relative_path_to_absolute():
+    """'分析它' 中 '它' 应解析历史里的相对路径(../IDE/super-ide)为绝对路径."""
+    import os
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    os.chdir("/Users/mac/Downloads/Obsidian Vault")
+
+    a.conversation_history = [
+        {"user": "分析super ide", "assistant": "已用 project_context 查看 ../IDE/super-ide, 结构如下: docs/goai/作品简介。"},
+    ]
+    recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
+    r = a._resolve_pronoun_to_entity("要你 分析它,输出分析报告", recent)
+    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应解析出绝对路径: {r!r}"
+    assert "-build" not in r, f"不应匹配到 super-ide-build: {r!r}"
+
+
+def test_pronoun_resolves_absolute_path():
+    """历史里是绝对路径时直接使用."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a.conversation_history = [
+        {"user": "分析super ide", "assistant": "project_context path=/Users/mac/Downloads/IDE/super-ide OK"},
+    ]
+    recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
+    r = a._resolve_pronoun_to_entity("分析它", recent)
+    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应使用绝对路径: {r!r}"
+
+
+def test_pronoun_resolves_entity_name_via_dir_locate():
+    """历史只有实体名时, 应通过 _locate_project_dir 定位真实目录."""
+    import os
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    os.chdir("/Users/mac/Downloads/Obsidian Vault")
+    a.conversation_history = [
+        {"user": "分析super ide", "assistant": "用 project_context 查看了 super-ide"},
+    ]
+    recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
+    r = a._resolve_pronoun_to_entity("要你 分析它", recent)
+    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应定位到真实目录: {r!r}"
+
+
+def test_resolved_analysis_task_not_simple():
+    """指代解析后的 '分析 <路径>,输出分析报告' 应走主循环(非 fast path)."""
+    from agent_project.agent import OpenMythosAgent
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    resolved = "要你 分析 '/Users/mac/Downloads/IDE/super-ide', 输出分析报告"
+    assert not a._is_simple_query(resolved), "含'分析'+路径+报告的任务不应走 fast path"
