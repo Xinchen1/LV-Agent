@@ -734,10 +734,10 @@ class ExecutionEngine:
             # 项目/代码分析任务: 最终答案若为空/截断/过短(如只提一个文件)则强制重生成完整分析。
             # 覆盖用户场景: 模型调 project_context 拿到结构后只回一句"docs/goai/作品简介"就结束。
             _analysis_needed = bool(
-                re.search(r"(分析|架构|剖析|调研|概述|概览|报告|报告|overview|analy[sz]e|architectur|structure|analyze)", ctx.task, re.IGNORECASE)
+                re.search(r"(分析|架构|剖析|调研|概述|概览|报告|overview|analy[sz]e|architectur|structure|analyze)", ctx.task, re.IGNORECASE)
             )
             _answer = (trace.final_answer or "").strip()
-            _short_answer = _analysis_needed and 0 < len(_answer) < 120
+            _short_answer = _analysis_needed and 0 < len(_answer) < 200
             if (not trace.final_answer or self._is_truncated_fragment(trace.final_answer) or _short_answer) and ctx.observations:
                 # 基于已有观察重新生成完整答案, 避免残缺/过短回答直接返回给用户
                 hint = ""
@@ -750,7 +750,13 @@ class ExecutionEngine:
                         "- 核心逻辑与亮点(基于读取的文件内容)\n"
                         "给出结构化 Markdown 分析, 不要只说一句话。"
                     )
-                trace.final_answer = self._force_final_answer(ctx, extra=hint)
+                trace.final_answer = self._force_final_answer(ctx, extra=hint, max_obs=12)
+                # 二次审核: 分析报告若仍过短/敷衍, 基于全部有效观察再强制一次
+                if _analysis_needed:
+                    _again = (trace.final_answer or "").strip()
+                    if not _again or self._is_truncated_fragment(_again) or len(_again) < 120:
+                        self.logger.info("analysis report still too short; forcing with full observations")
+                        trace.final_answer = self._force_final_answer(ctx, extra=hint, max_obs=16)
                 trace.success = bool(trace.final_answer)
 
         except Exception as e:
@@ -866,13 +872,22 @@ class ExecutionEngine:
             ctx.executed_calls[key] = obs
         return results + duplicate_results
 
-    def _force_final_answer(self, ctx: ExecutionContext, extra: str = "") -> str:
+    def _force_final_answer(self, ctx: ExecutionContext, extra: str = "", max_obs: int = 3) -> str:
+        """基于观察重生成完整答案.
+
+        max_obs: 喂给模型的观察条数上限。分析/报告任务应传较大的值(如 12),
+        避免只取最后几条(最后几条常是 git log/目录列表, 丢失前面读到的文档内容)。
+        """
         if not ctx.observations:
             if ctx.steps:
                 return ctx.steps[-1].reasoning or "No result produced."
             return "No result produced."
 
-        recent = "\n\n".join(ctx.observations[-3:])
+        # 过滤掉 SYSTEM STOP 去重拦截(不提供新信息, 且会占掉观察配额)
+        useful = [o for o in ctx.observations if "SYSTEM STOP" not in o and "already executed" not in o]
+        if not useful:
+            useful = ctx.observations
+        recent = "\n\n".join(useful[-max_obs:])
         prompt = (
             "Based ONLY on the tool results below, provide a complete final answer to the task.\n"
             "Do NOT include <think> tags, reasoning traces, or tool-call tags.\n\n"
