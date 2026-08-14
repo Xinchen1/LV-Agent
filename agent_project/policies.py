@@ -1173,6 +1173,13 @@ class SuperAgentPolicy(ThinkingPolicy):
         prompt = "\n".join(lines)
         reflection = self.model.generate(prompt, n_loops=1, temperature=0.4, max_tokens=2048)
         cleaned = ReActPolicy._strip_think_tags(reflection or "")
+        # 反思是"计划文本", 不应混入工具调用标签(模型偶尔会在反思里也写工具调用格式):
+        # 清理 <tool_calls>/<invoke>/<parameter> 等残留, 避免把无效调用当普通文本展示给用户。
+        cleaned = re.sub(r"<tool_calls>.*?</tool_calls>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<invoke\s+[^>]*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<parameter[^>]*>.*?</parameter>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<[\w_]+\s+[^>]*/>", "", cleaned)
+        cleaned = cleaned.strip()
         if ctx.stream_callback:
             ctx.stream_callback("tool_result", "[reflection] " + cleaned[:300])
         return cleaned

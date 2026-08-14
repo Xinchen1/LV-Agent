@@ -3961,9 +3961,10 @@ class OpenMythosAgent:
                     return str(child.resolve())
             for child in children:
                 cn = _norm_dir(child)
-                if len(name_norm) >= 4 and cn and cn.endswith(name_norm):
+                if len(name_norm) >= 4 and cn and cn.endswith(name_norm) and len(cn) - len(name_norm) <= 8:
                     return str(child.resolve())
-                if len(name_norm) >= 6 and cn and name_norm in cn:
+                # 子串匹配需长度相近(长度差≤6): 避免 super-ide 误匹配 SuperIDE-GOAI-...(不同项目)
+                if len(name_norm) >= 6 and cn and name_norm in cn and 0 <= len(cn) - len(name_norm) <= 6:
                     return str(child.resolve())
             # 第二层: 直接子目录的一级子目录(限制数量防扫描过深), 同样先精确后子串
             for child in children[:40]:
@@ -3984,9 +3985,9 @@ class OpenMythosAgent:
                         return str(g.resolve())
                 for g in grand[:40]:
                     gn = _norm_dir(g)
-                    if len(name_norm) >= 4 and gn and gn.endswith(name_norm):
+                    if len(name_norm) >= 4 and gn and gn.endswith(name_norm) and len(gn) - len(name_norm) <= 8:
                         return str(g.resolve())
-                    if len(name_norm) >= 6 and gn and name_norm in gn:
+                    if len(name_norm) >= 6 and gn and name_norm in gn and 0 <= len(gn) - len(name_norm) <= 6:
                         return str(g.resolve())
         return None
 
