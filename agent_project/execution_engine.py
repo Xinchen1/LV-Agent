@@ -656,71 +656,43 @@ class ExecutionEngine:
                     observations=[],
                 )
 
-                if parsed.done or not parsed.tool_calls:
-                    if parsed.final_answer:
-                        record.final_answer = parsed.final_answer
-                        trace.final_answer = parsed.final_answer
-                        trace.success = True
-                        ctx.steps.append(record)
-                        trace.steps.append(record)
-                        break
-                    # 只输出了思考/计划, 既没有工具调用也没有最终答案(如模型光说不做)
-                    # -> 注入催促, 让它在预算内真正行动或作答, 而不是静默结束返回思考文字
-                    if not parsed.done and step_number < ctx.max_steps:
-                        ctx.steps.append(record)
-                        trace.steps.append(record)
-                        # OpenMythos 循环深度: 复杂任务(预算≥8)允许模型继续内省
-                        # (压缩状态->反思->更新), 而非强制立即行动; 但限制内省轮数防死循环。
-                        is_deep = ctx.max_steps >= 8
-                        think_steps = sum(1 for st in ctx.steps if not st.tool_calls and not st.final_answer)
-                        wants_more = self._wants_to_continue(output)
-                        if wants_more and think_steps < 3:
-                            # 模型明确想继续(如"让我先确认/再检查") → 扩展预算并继续,
-                            # 不再要求 is_deep(低预算任务也会遇到需要多步确认的情况)。
-                            safety_cap = max(
-                                int(getattr(self.config, "max_thinking_loops", 32)) * 4,
-                                64,
-                            )
-                            if ctx.max_steps < safety_cap:
-                                ctx.max_steps = min(safety_cap, ctx.max_steps + 4)
-                                self.logger.info(
-                                    f"continue-intent loop extension: step {step_number} → max_steps {ctx.max_steps}"
-                                )
-                                if ctx.stream_callback:
-                                    ctx.stream_callback("status", f"↑ loop {ctx.max_steps} (增加思考预算)")
-                            next_prompt = policy.next_prompt(ctx, output)
-                            prompt = (next_prompt or "") + (
-                                "\n\n你表示想继续/确认, 请继续下一步——"
-                                "可调用工具获取信息, 或直接给出 Final Answer。"
-                            )
-                            prompt = self._attach_monitor_hints(prompt, ctx)
-                            continue
-                        if is_deep and think_steps < 3 and wants_more:
-                            next_prompt = policy.next_prompt(ctx, output)
-                            prompt = (next_prompt or "") + (
-                                "\n\n继续你的循环深度思考(ROUND 下一轮):\n"
-                                "· 压缩当前理解为一行\"思维状态\"\n"
-                                "· 从新视角(因果/反事实/类比)审视或验证\n"
-                                "· 若状态已收敛, 请直接给出 Final Answer; 否则更新状态继续。\n"
-                                "你可以在思考中更新状态, 也可以调用工具获取信息。"
-                            )
-                            prompt = self._attach_monitor_hints(prompt, ctx)
-                            continue
-                        nudge = (
-                            "\n\n注意: 你刚才只进行了思考, 没有做出下一步动作。\n"
-                            "· 若任务需要查文件/搜索/执行, 必须立即输出: Action: [TOOL:工具名] {参数} [/TOOL]\n"
-                            "· 若已能回答, 必须输出: Final Answer: <完整答案>\n"
-                            "不要重复思考, 直接行动或作答。"
-                        )
-                        next_prompt = policy.next_prompt(ctx, output)
-                        prompt = (next_prompt or "") + nudge
-                        prompt = self._attach_monitor_hints(prompt, ctx)
-                        continue
+                # ---- 阶段 1: 有最终答案 → 完成 ----
+                if parsed.final_answer:
+                    record.final_answer = parsed.final_answer
+                    trace.final_answer = parsed.final_answer
+                    trace.success = True
                     ctx.steps.append(record)
                     trace.steps.append(record)
                     break
 
-                # Execute tools
+                # ---- 阶段 2: 无动作(既无工具调用也无答案) ----
+                if not parsed.tool_calls:
+                    ctx.steps.append(record)
+                    trace.steps.append(record)
+                    if step_number >= ctx.max_steps:
+                        break  # 预算已耗尽, 交给下方 force_final_answer 兜底
+                    wants_more = self._wants_to_continue(output)
+                    if wants_more:
+                        # 模型明确想继续内省 → 扩展预算并放行
+                        if self._extend_loops(ctx):
+                            self._emit_status(ctx, f"↑ loop {ctx.max_steps} (增加思考预算)")
+                        prompt = self._attach_monitor_hints(
+                            (policy.next_prompt(ctx, output) or "")
+                            + "\n\n你表示想继续/确认, 请继续下一步——可调用工具, 或直接给出 Final Answer。",
+                            ctx,
+                        )
+                        continue
+                    # 无明确继续意图 → 催促行动
+                    prompt = self._attach_monitor_hints(
+                        (policy.next_prompt(ctx, output) or "")
+                        + "\n\n注意: 你刚才只进行了思考, 没有做出下一步动作。\n"
+                          "· 需要查文件/搜索/执行则立即输出: [TOOL:工具名] {参数}\n"
+                          "· 已能回答则输出: Final Answer: <完整答案>\n不要重复思考, 直接行动或作答。",
+                        ctx,
+                    )
+                    continue
+
+                # ---- 阶段 3: 执行工具 ----
                 exec_results = self._execute_tool_calls(parsed.tool_calls, ctx)
                 for call, obs, ok in exec_results:
                     record.observations.append(obs)
@@ -732,64 +704,23 @@ class ExecutionEngine:
                 ctx.steps.append(record)
                 trace.steps.append(record)
 
-                # 连续无进展追踪: 每一步工具执行后即时评估(不是只在扩展时才看),
-                # 这样持续失败/重复/打转会累积计数, 达到阈值即停止并提示失败。
-                # 判断标准: 该步是否产出真实进展(有成功工具结果 & 排除去重拦截/错误)。
-                if parsed.tool_calls and not self._has_real_progress(ctx):
+                # ---- 阶段 4: 无进展约束 + 动态扩展 + 收敛 ----
+                if not self._has_real_progress(ctx):
                     ctx.no_progress_streak += 1
                     if ctx.no_progress_streak >= 3:
                         self.logger.warning(
                             f"loop stopped after {ctx.no_progress_streak} consecutive no-progress steps (step {step_number})"
                         )
-                        if ctx.stream_callback:
-                            ctx.stream_callback(
-                                "status", f"连续 {ctx.no_progress_streak} 步无进展, 已停止(请检查工具/参数或换个思路)"
-                            )
+                        self._emit_status(ctx, f"连续 {ctx.no_progress_streak} 步无进展, 已停止(请检查工具/参数或换个思路)")
                         break
-                elif parsed.tool_calls:
+                else:
                     ctx.no_progress_streak = 0
 
-                # 分支监控 agent: 旁路感知执行情况, 发现异常注入简明提示
                 self._monitor_and_inject(ctx, output)
 
-                # 动态扩展预算: 自适应思考深度, 不只简单加循环。
-                # 触发信号(任一) + 必须有真实进展(工具成功率/新信息):
-                #   A. 接近上限(step >= max_steps)且模型仍产出新工具调用(有进展)
-                #   B. 模型明确表达"继续/还要/补充/再多搜"意图(继续信号, 更主动)
-                # 必须在 convergence.should_stop 之前执行, 否则到上限会被先判定停止。
-                # 注意: 不再用 max_thinking_loops 作为硬上限截断——只要模型持续产出
-                # 新工具调用且有真实进展就继续扩展; 取而代之的是"连续无进展"约束:
-                # 连续 N 步没有真实进展(失败/重复/打转)才停止, 避免无限烧预算。
-                if step_number >= ctx.max_steps or self._wants_to_continue(output):
-                    # 安全上限: 仅防止极端死循环(如模型反复输出相同内容), 正常任务远达不到
-                    safety_cap = max(
-                        int(getattr(self.config, "max_thinking_loops", 32)) * 4,
-                        64,
-                    )
-                    wants_more = self._wants_to_continue(output)
-                    if ctx.max_steps < safety_cap and (parsed.tool_calls or wants_more):
-                        # 进展质量感知: 最近几步工具是否真在产出新信息?
-                        # 若连续失败/原地打转, 即使有工具调用也不扩展(避免烧预算)。
-                        if parsed.tool_calls and not self._has_real_progress(ctx):
-                            ctx.no_progress_streak += 1
-                            self.logger.info(
-                                f"loop extension SKIPPED: step {step_number}, no real progress "
-                                f"(streak={ctx.no_progress_streak}, recent tools failing/repeating)"
-                            )
-                            if ctx.stream_callback:
-                                ctx.stream_callback("status", f"no real progress ({ctx.no_progress_streak}) — not extending")
-                        else:
-                            ctx.no_progress_streak = 0
-                            new_max = min(safety_cap, ctx.max_steps + 4)
-                            reason = "explicit continue intent" if wants_more and not parsed.tool_calls \
-                                     else "still producing tool calls (real progress)"
-                            self.logger.info(
-                                f"dynamic loop extension: step {step_number} → max_steps {ctx.max_steps} → {new_max} "
-                                f"({reason})"
-                            )
-                            ctx.max_steps = new_max
-                            if ctx.stream_callback:
-                                ctx.stream_callback("status", f"↑ loop {new_max} (增加思考预算, 仍在推进)")
+                if step_number >= ctx.max_steps:
+                    if self._extend_loops(ctx):
+                        self._emit_status(ctx, f"↑ loop {ctx.max_steps} (增加思考预算, 仍在推进)")
 
                 if self.convergence.should_stop(ctx, parsed, step_number):
                     break
@@ -832,6 +763,21 @@ class ExecutionEngine:
             prompt, ctx, getattr(self.config, "temperature", 0.7), max_tokens
         )
         return text
+
+    def _extend_loops(self, ctx: ExecutionContext) -> bool:
+        """在安全上限内扩展 loop 预算. 返回是否真的扩展了.
+
+        极简设计: 不再用 max_thinking_loops 作为硬上限截断——只要模型持续产出
+        新工具调用且有真实进展就继续扩展; safety_cap 仅防极端死循环。
+        """
+        safety_cap = max(
+            int(getattr(self.config, "max_thinking_loops", 32)) * 4,
+            64,
+        )
+        if ctx.max_steps >= safety_cap:
+            return False
+        ctx.max_steps = min(safety_cap, ctx.max_steps + 4)
+        return True
 
     def _streaming_generate(self, prompt: str, ctx: ExecutionContext, temperature: float, max_tokens: int) -> Tuple[str, bool]:
         """调用后端生成; 提供 stream_callback 时透传后端做 token 级实时流式.
