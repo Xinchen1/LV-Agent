@@ -183,6 +183,7 @@ def register_builtin_tools() -> None:
     from .grep_tool import GrepTool, GlobTool  # noqa: F401
     from .project_context import ProjectContextTool  # noqa: F401
     from .weather import WeatherTool  # noqa: F401
+    from .web_fetcher import ReadWebTool  # noqa: F401
 
     _defaults = [
         WebSearchTool(),
@@ -199,6 +200,7 @@ def register_builtin_tools() -> None:
         ProjectContextTool(),
         WeatherTool(),
         GitHubSearchTool(),
+        ReadWebTool(),
     ]
     for t in _defaults:
         if t.name not in TOOLS_REGISTRY._tools:
@@ -221,6 +223,7 @@ from .telegram_bot import TelegramBotTool, create_telegram_bot  # noqa: E402
 from .bash_exec import BashExecTool  # noqa: E402
 from .grep_tool import GrepTool, GlobTool  # noqa: E402,F401
 from .weather import WeatherTool  # noqa: E402,F401
+from .web_fetcher import ReadWebTool  # noqa: E402,F401
 from .mcp_setup import McpConfiguratorTool  # noqa: E402,F401
 from .discovery import auto_register_tools  # noqa: E402
 

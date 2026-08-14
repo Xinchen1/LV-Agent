@@ -1846,8 +1846,6 @@ class OpenMythosAgent:
             "- python_exec(code, lang, timeout=30) → 执行 python/bash/python_file 代码",
             "- bash_exec(command, timeout=120) → 执行任意 shell 命令(含 git clone/install/运行)",
             "- git(command, repository) → git 操作: clone/init/status/add/commit/push/pull 等",
-            "- plan(text, mode) → 记录计划或思考(mode=read/write)",
-            "- ask_user(question) → 不清楚要求时向用户提问",
             "",
             f"当前工作目录: {os.getcwd()} (文件操作用相对该目录的路径, 不要凭空编造绝对路径)",
             "",
@@ -4543,42 +4541,3 @@ class OpenMythosAgent:
         if isinstance(ans, str) and ans.strip():
             return ans.strip()
         return "任务未完成，未获得结果。"
-
-    def interactive(self):
-        """交互式REPL"""
-        console = Console() if (_HAS_RICH_PROMPT and Console is not None) else None
-
-        header = "\n" + "="*60 + "\nLv Super Agent - Interactive Mode\nType 'quit' or 'exit' to end\n" + "="*60 + "\n"
-        if console:
-            console.print(header)
-        else:
-            print(header)
-
-        while True:
-            try:
-                if Prompt is not None and console is not None:
-                    task = Prompt.ask("[dim]You[/dim]", console=console).strip()
-                else:
-                    # Fallback for environments without rich.prompt
-                    task = input("You: ").strip()
-
-                if task.lower() in ['quit', 'exit', 'q']:
-                    print("Goodbye!")
-                    break
-
-                if not task:
-                    continue
-
-                print("\n" + _style("thinking...\n", "2"))
-
-                start = datetime.now()
-                result = self.run(task)
-                elapsed = (datetime.now() - start).total_seconds()
-
-                print("\n" + _style(f"result: {result.get('observations', [{}])[-1].get('output', 'No output')}", "2"))
-                print(_style(f"   loops: {result['outer_loops']}, success: {result['success']}, time: {elapsed:.2f}s\n", "2"))
-
-            except KeyboardInterrupt:
-                print("\n\nInterrupted. Type 'quit' to exit.\n")
-            except Exception as e:
-                print("\n" + _style(f"error: {e}\n", "2"))
