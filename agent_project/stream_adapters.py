@@ -462,7 +462,8 @@ class RichStreamAdapter(StreamAdapter):
             summary = summary[: width - 1] + "…"
         # 设计方案: 状态前缀(✓成功 / ✗错误 / ◐策略)
         if is_error:
-            prefix, color = "✗", "31"
+            # 浅黄错误提示(替代刺眼红), 与块状错误一致
+            prefix, color = "✗", "38;5;229"
         elif is_policy:
             prefix, color = "◐", "33"
         else:
@@ -482,12 +483,13 @@ class RichStreamAdapter(StreamAdapter):
             # 策略提示(安全拦截/权限拒绝): 黄色边框+内容, 不是真正的错误
             border_fg, name_fg, text_fg, mark = "33", "33", "37", "◐"
         elif is_error:
-            border_fg, name_fg, text_fg, mark = "31", "31", "31", "✗"
+            # 浅黄错误提示(替代刺眼红): 边框/工具名/文本统一浅黄, 保留 ✗ 标记
+            border_fg, name_fg, text_fg, mark = "38;5;229", "38;5;229", "38;5;229", "✗"
         else:
             border_fg, name_fg, text_fg, mark = "2", "34", "37", "✓"
         border = "─" * width
         # 状态前缀 + 工具名
-        print(f" \033[{border_fg}m╭─ \033[{border_fg}m{mark}\033[0m \033[1;{name_fg}m{name}\033[{border_fg}m {border}\033[0m")
+        print(f" \033[{border_fg}m╭─ \033[{border_fg}m{mark}\033[0m \033[{border_fg}m{name}\033[{border_fg}m {border}\033[0m")
         shown = lines[:max_lines]
         more = len(lines) - len(shown)
         # search/replace diff 标记着色: SEARCH 红, REPLACE 绿, 分隔线暗
