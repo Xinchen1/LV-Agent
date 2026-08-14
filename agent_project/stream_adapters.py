@@ -357,7 +357,24 @@ class RichStreamAdapter(StreamAdapter):
         spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         spinner = spinner_frames[int(elapsed * 10) % len(spinner_frames)]
         meta = f"{elapsed:.1f}s · {self._fmt_tokens(self._total_tokens)} tokens"
+        # 工具执行/结果处理时: 用细绿色进度条替代 spinner, 直观提示"正在处理"
+        # 避免长任务(如扫描大量文件)时用户误以为卡住。
+        if self._current_action in ("tool", "result"):
+            bar = self._thin_green_bar(elapsed)
+            return f"\033[32m{bar}\033[0m \033[2m{' · '.join(parts)} · {meta}\033[0m"
         return f"\033[2m{spinner} {' · '.join(parts)} · {meta}\033[0m"
+
+    @staticmethod
+    def _thin_green_bar(elapsed: float, width: int = 24) -> str:
+        """细绿色进度条: 一条细线 + 移动的绿色亮点, 表示正在处理."""
+        # 亮点从左到右循环移动
+        pos = int(elapsed * 4) % width
+        track = ["─"] * width
+        track[pos] = "●"
+        # 亮点后加渐变淡绿尾迹(细)
+        for i in range(1, min(4, width - pos)):
+            track[pos + i] = "·"
+        return "".join(track)
 
     def _fold_reasoning(self) -> list[str]:
         text = clean_runtime_text("".join(self._reasoning_buffer))
