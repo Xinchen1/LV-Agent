@@ -171,34 +171,28 @@ def _render_portrait(width_chars: Optional[int] = None) -> str:
         pct = sorted_px[int(len(sorted_px) * 0.65)]
         thresh = int(max(thresh, pct) * 0.92)
 
-        # Block ramp per 4-pixel column: ▀ top-half, ▄ bottom-half, █ full.
+        # Braille dots: each dot is 1 pixel, so the mosaic blocks are ~3x smaller
+        # than the chunky ▀▄█ blocks. White background stays blank (more white).
         lines = []
         for y in range(0, target_h, 4):
             line = ""
             for x in range(0, target_w, 2):
-                row_top = []
-                row_bot = []
-                for dx in range(2):
-                    t = pixels[(y + 0) * target_w + (x + dx)]
-                    m1 = pixels[(y + 1) * target_w + (x + dx)]
-                    m2 = pixels[(y + 2) * target_w + (x + dx)]
-                    b = pixels[(y + 3) * target_w + (x + dx)]
-                    row_top.append((t + m1) // 2)
-                    row_bot.append((m2 + b) // 2)
-                avg_top = sum(row_top) // 2
-                avg_bot = sum(row_bot) // 2
-                # White background -> space (inherits terminal bg), more white area.
-                if avg_top >= thresh and avg_bot >= thresh:
+                byte_val = 0
+                block_sum = 0
+                for dy in range(4):
+                    for dx in range(2):
+                        px = pixels[(y + dy) * target_w + (x + dx)]
+                        block_sum += px
+                        if px < thresh:
+                            bit = dy + dx * 3 if dy < 3 else 6 + dx
+                            byte_val |= 1 << bit
+                if byte_val == 0:
+                    # All-white 2x4 block -> blank space (inherits terminal bg).
                     line += " "
                     continue
-                # Compose the 2x2-block glyph: upper+lower halves per column.
-                g = 0
-                if avg_top < thresh: g |= 0x01
-                if avg_bot < thresh: g |= 0x02
-                glyph = {0x01: "▀", 0x02: "▄", 0x03: "█"}[g]
-                # Brighter gray for strokes so the portrait feels lighter overall.
-                gray = 236 + min(19, (255 - min(avg_top, avg_bot)) * 20 // 255)
-                line += f"\033[38;5;{gray}m{glyph}\033[0m"
+                avg = block_sum // 8
+                gray = 236 + min(19, (255 - avg) * 20 // 255)
+                line += f"\033[38;5;{gray}m{chr(0x2800 + byte_val)}\033[0m"
             lines.append(line)
         return "\n".join(lines)
     except Exception:
