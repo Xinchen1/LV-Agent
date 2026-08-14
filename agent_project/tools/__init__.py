@@ -198,6 +198,7 @@ def register_builtin_tools() -> None:
         GlobTool(),
         ProjectContextTool(),
         WeatherTool(),
+        GitHubSearchTool(),
     ]
     for t in _defaults:
         if t.name not in TOOLS_REGISTRY._tools:
