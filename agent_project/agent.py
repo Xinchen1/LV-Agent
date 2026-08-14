@@ -1738,7 +1738,7 @@ class OpenMythosAgent:
         # 核心关键词(中文+英文)
         analysis_keywords = [
             '分析', '总结', 'summarize', 'analyze', '阅读', 'read', 'check', '检查',
-            '项目', 'project', '文件夹', 'folder', '目录', 'directory', '目录',
+            '项目', 'project', '文件夹', 'folder', '目录', 'directory',
             '文件', 'file', '代码', 'code', '源码', 'source', '構造', '结构', 'overview',
             '查看', 'show', 'list', '列', '览', '介绍', 'intro', 'explore',
         ]
@@ -1747,8 +1747,8 @@ class OpenMythosAgent:
         deep_keywords = [
             '分析', '分析文件', '分析项目', '总结', '概览', 'overview', '结构',
             '检查', '检查文件', '核对', 'verify', 'compare', '对比', '比较',
-            '读取', '读取文件', '查看文件', '浏览', 'browse', 'inspect', '检查',
-            'list', '列', '览', '显示', 'show', '列出', 'list',
+            '读取', '读取文件', '查看文件', '浏览', 'browse', 'inspect',
+            'list', '列', '览', '显示', 'show', '列出',
         ]
 
         # 路径/文件相关关键词
@@ -1786,7 +1786,7 @@ class OpenMythosAgent:
 
         # 3. 项目/文件夹 + 查看/分析 关键词 → 文件分析
         if any(kw in task_lower for kw in ['项目', 'folder', 'directory']):
-            if any(kw in task_lower for kw in ['分析', '分析', '查看', '浏览', '查看', 'list', '列','览']):
+            if any(kw in task_lower for kw in ['分析', '查看', '浏览', 'list', '列', '览']):
                 return True
 
         # 4. 简单文件/目录查询(小于 30 字符)→ 文件分析
@@ -2404,21 +2404,11 @@ class OpenMythosAgent:
         """
         if not raw_output:
             return 0.5
-        # 优先从 think 块内提取
-        m = re.search(r'<think(?:ing)?>(.*?)</think(?:ing)?>', raw_output, flags=re.DOTALL | re.IGNORECASE)
-        searchable = m.group(1) if m else raw_output
-        cm = re.search(r'(?:置信度|confidence)\s*[:：]\s*(0?\.\d{1,2})', searchable, re.IGNORECASE)
+        # 置信度通常写在 think 内; 直接全局搜索一次即可(think 内也属于 raw_output)。
+        cm = re.search(r'(?:置信度|confidence)\s*[:：]\s*(0?\.\d{1,2})', raw_output, re.IGNORECASE)
         if cm:
             try:
                 val = float(cm.group(1))
-                return max(0.0, min(1.0, val))
-            except ValueError:
-                pass
-        # 兜底: 全局搜索(模型可能把置信度写在 think 外但被 clean 剥离)
-        cm2 = re.search(r'(?:置信度|confidence)\s*[:：]\s*(0?\.\d{1,2})', raw_output, re.IGNORECASE)
-        if cm2:
-            try:
-                val = float(cm2.group(1))
                 return max(0.0, min(1.0, val))
             except ValueError:
                 pass
