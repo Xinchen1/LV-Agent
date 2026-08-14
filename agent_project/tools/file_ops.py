@@ -737,11 +737,35 @@ class FileOpsTool(BaseTool):
                     regex = re.compile(pat)
                 except re.error:
                     regex = re.compile(re.escape(pat))
+                # 目录 -> 递归搜索文件; 单文件 -> 直接搜索
+                files_to_scan = []
+                if p.is_dir():
+                    try:
+                        for root, dirs, fnames in os.walk(p):
+                            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "target", "dist", "build", ".cache")]
+                            for fn in fnames:
+                                files_to_scan.append(str(Path(root) / fn))
+                    except Exception:
+                        files_to_scan = []
+                else:
+                    files_to_scan = [str(p)]
                 matches = []
-                for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                    if regex.search(line):
-                        matches.append(f"{i}:{line}")
-                return ToolResult(success=True, output="\n".join(matches) or "(no matches)", metadata={"matches": len(matches), "fallback": "python"})
+                limit = int(payload.get("limit") or payload.get("max_results") or 200)
+                for fp in files_to_scan:
+                    if len(matches) >= limit:
+                        break
+                    try:
+                        with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                            for i, line in enumerate(f, 1):
+                                if regex.search(line):
+                                    matches.append(f"{fp}:{i}:{line.rstrip()}")
+                                    if len(matches) >= limit:
+                                        break
+                    except Exception:
+                        continue
+                if not matches:
+                    return ToolResult(success=True, output=f"(no matches for '{pat}' in {path})", metadata={"matches": 0, "fallback": "python"})
+                return ToolResult(success=True, output="\n".join(matches), metadata={"matches": len(matches), "fallback": "python"})
             if action == "analyze":
                 if not p.exists():
                     return ToolResult(success=False, output="", error=f"Path not found: {path}")
