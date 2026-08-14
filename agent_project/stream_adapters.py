@@ -526,6 +526,14 @@ class RichStreamAdapter(StreamAdapter):
             self._set_action("thinking")
             self._start_thinking()
         self._update_thinking(force=True)
+        # thinking 面板已停止/已开始输出内容后, 关键状态(loop 扩展/无进展停止等)
+        # 不再显示——这里将其作为独立可见行持久化输出, 避免用户看不到"增加 loop"等提示。
+        # 仅当 thinking 动画已停止(_live 已清理)时才直接 print, 避免破坏 Live 渲染。
+        t = (text or "").strip()
+        if self._live is None and t and (
+            "↑ loop" in t or "无进展" in t or "增加思考预算" in t or "still progressing" in t
+        ):
+            print(f" \033[90m• {t}\033[0m", flush=True)
 
     def emit_reasoning(self, text: str) -> None:
         if not self.show_thinking or self._has_content:

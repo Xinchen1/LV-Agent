@@ -88,7 +88,10 @@ def safe_default_policy(workspace_root: str = ".") -> List[Rule]:
     root = _norm(workspace_root.rstrip("/"))
     rules = [
         # Destructive shell patterns
-        # 注意: rm -rf ~/.npm/_cacache 这类"具体缓存子路径"放行, 只拦整家目录(~ 后接空白/结尾)
+        # 注意: 检测匹配"命令本身"而非任意含该词的字符串。
+        # 序列化参数形如 {"command": "rm -rf /"}, 词边界 \brm\b 在 "rm" 前匹配正常;
+        # 但 `--format` / `echo "format"` / `*.format` 等合法用法里的 format 会误伤,
+        # 所以磁盘类规则用"命令位置"(词边界 + 命令名白名单), 不匹配裸 format。
         Rule(
             Decision.DENY,
             EffectClass.EXEC,
@@ -98,13 +101,15 @@ def safe_default_policy(workspace_root: str = ".") -> List[Rule]:
         Rule(
             Decision.DENY,
             EffectClass.EXEC,
-            pattern=r"\bmkfs\b|\bdd\b.*of=/dev|\\bshred\\b|\bformat\b",
+            # 精确命令名白名单(独立破坏命令), 不含 format/dd(太易误伤正常参数/词)。
+            pattern=r"\b(?:mkfs(?:\.\w+)?|mke2fs|shred|diskutil|fdisk|sfdisk|newfs|zap|wipefs)\b",
             reason="disk destruction or secure wipe",
         ),
         Rule(
             Decision.DENY,
             EffectClass.EXEC,
-            pattern=r"(?:\bdd\b|\bcat\b|\becho\b)[^|;]*>\s*/dev/sd[a-z]|>\s*/dev/sd[a-z]",
+            # 块设备覆写: `dd if=... of=/dev/sdX` / `> /dev/sdX`(写设备, 非只读读取)。
+            pattern=r"\bdd\b[^|;&]*of=/dev/sd[a-z]|(?:^|[;&|]\s*)[^|;&]*>\s*/dev/sd[a-z]",
             reason="block-device write",
         ),
         # Dangerous remote code execution patterns
