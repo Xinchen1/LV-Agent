@@ -266,6 +266,12 @@ class ToolCallParser:
                     args = payload.get("args") or payload.get("arguments") or payload.get("parameters", {})
                     if not isinstance(args, dict):
                         args = {}
+                    # 参数平铺在顶层(无 args/arguments/parameters 包装)时不要抢解析:
+                    # 那样会丢参数(如 {"action":"web_search","query":"x"} 的 query),
+                    # 应让 5c/5d 处理。仅当确有 args 包装时才在此消费。
+                    if not args and any(k in payload for k in
+                                        ("query", "command", "code", "path", "pattern", "url", "content", "prompt")):
+                        break
                     if action_name == "python_exec":
                         add_call(action_name, cls._extract_python_exec_code(args.get("code", "")))
                     else:
