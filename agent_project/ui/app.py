@@ -72,7 +72,13 @@ class CLIApp:
         r.blank()
 
         minimal = not r.theme.supports_color or not sys.stdout.isatty()
-        banner = render_banner(r, portrait_width=34, show_minimal=minimal)
+        # 自适应头像宽度: 终端越宽, 头像越大, 像素点越多(更细腻)
+        _pw = 34
+        if cols >= 150:
+            _pw = 52
+        elif cols >= 120:
+            _pw = 44
+        banner = render_banner(r, portrait_width=_pw, show_minimal=minimal)
         r.print(banner)
 
         r.blank()
