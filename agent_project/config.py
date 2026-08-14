@@ -438,11 +438,24 @@ def load_config(config_path: str = "config.yaml") -> AgentConfig:
         return default_config
 
     with open(path, 'r') as f:
-        raw_config = yaml.safe_load(f)
+        raw_config = yaml.safe_load(f) or {}
 
     raw_config = _substitute_env_vars(raw_config)
 
-    agent_config = raw_config.get('agent', {})
+    # 兼容两种 config.yaml 布局:
+    #   A) agent: 包装式 —— 全部 agent 设置(backend/deepseek/... ) 在 `agent:` 键下
+    #   B) 顶层平铺式 —— backend/openai/deepseek/openrouter/anthropic/openmythos
+    #      及模型/循环等参数直接写在顶层(仓库自带 config.yaml 就是这种)。
+    # 若存在 `agent:` 键则优先使用; 否则把顶层除独立 section 之外的键当作 agent 配置,
+    # 避免仓库自带的平铺 config.yaml 被静默忽略(此前 bug: backend/deepseek 全丢)。
+    agent_config = raw_config.get('agent')
+    if agent_config is None:
+        _section_keys = {'experience', 'strategies', 'logging', 'tools', 'mcp', 'display'}
+        agent_config = {k: v for k, v in raw_config.items() if k not in _section_keys}
+    elif not isinstance(agent_config, dict):
+        agent_config = {}
+    else:
+        agent_config = dict(agent_config)
 
     top_level = {
         'experience': raw_config.get('experience', {}),
