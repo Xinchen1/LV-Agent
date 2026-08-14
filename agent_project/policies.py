@@ -999,7 +999,13 @@ Rules:
         else:
             thought = output.strip()
 
-        thought = self._strip_think_tags(thought)
+        # reasoning 应保留 <think> 标签内部内容(供后续兜底/内省使用),
+        # 而不是剥掉后留空。仅去掉 think 标签本身, 保留其文本。
+        think_m = re.search(r"<think(?:ing)?>(.*?)</think(?:ing)?>", thought, re.DOTALL | re.IGNORECASE)
+        if think_m:
+            thought = think_m.group(1).strip()
+        else:
+            thought = self._strip_think_tags(thought)
 
         if tool_calls:
             requests = [ToolCallRequest(tool_name=n, arguments=a) for n, a in tool_calls]

@@ -737,8 +737,19 @@ class ExecutionEngine:
                 re.search(r"(分析|架构|剖析|调研|概述|概览|报告|overview|analy[sz]e|architectur|structure|analyze)", ctx.task, re.IGNORECASE)
             )
             _answer = (trace.final_answer or "").strip()
-            _short_answer = _analysis_needed and 0 < len(_answer) < 200
-            if (not trace.final_answer or self._is_truncated_fragment(trace.final_answer) or _short_answer) and ctx.observations:
+            # 敷衍判定: 长度很短(如只提一个文件名/一句概述) 且 不含结论性/结构化内容。
+            # 避免误伤"这是分析结论"这类合理的短结论——用"实质内容"而非单纯长度判断。
+            _has_substance = bool(
+                _answer and (
+                    len(_answer) >= 200
+                    or re.search(r"(?:结论|综上|核心|架构|模块|要点|结构|亮点|总结|整体)", _answer)
+                )
+            )
+            _short_answer = _analysis_needed and 0 < len(_answer) < 200 and not _has_substance
+            # 兜底条件: 有观察 或 至少走过多步(模型全程只思考没调工具时 observations 为空,
+            # 但应基于已有思考/任务重生成答案, 不能空手而归)。
+            _can_regenerate = bool(ctx.observations or ctx.steps)
+            if (not trace.final_answer or self._is_truncated_fragment(trace.final_answer) or _short_answer) and _can_regenerate:
                 # 基于已有观察重新生成完整答案, 避免残缺/过短回答直接返回给用户
                 hint = ""
                 if _analysis_needed:
@@ -878,6 +889,24 @@ class ExecutionEngine:
         max_obs: 喂给模型的观察条数上限。分析/报告任务应传较大的值(如 12),
         避免只取最后几条(最后几条常是 git log/目录列表, 丢失前面读到的文档内容)。
         """
+        # 无观察但有思考记录(模型全程只思考没调工具): 用思考内容兜底
+        if not ctx.observations and ctx.steps:
+            reasonings = [st.reasoning for st in ctx.steps if st.reasoning]
+            if reasonings:
+                recent = "\n\n".join(r[-500:] for r in reasonings[-3:])
+                prompt = (
+                    "根据你对以下任务的思考过程, 给出最终回答。\n"
+                    "不要包含 <think> 标签或推理痕迹, 直接给出答案。\n\n"
+                    f"## Task:\n{ctx.task}\n\n"
+                    f"## 你的思考:\n{recent}\n\n"
+                    "## Final Answer:\n"
+                )
+                if extra:
+                    prompt = prompt.rstrip() + extra + "\n"
+                answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, 2048)
+                cleaned = self._clean_final_text(answer or "")
+                if cleaned and not self._is_truncated_fragment(cleaned):
+                    return cleaned
         if not ctx.observations:
             if ctx.steps:
                 return ctx.steps[-1].reasoning or "No result produced."
