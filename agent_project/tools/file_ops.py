@@ -650,21 +650,36 @@ class FileOpsTool(BaseTool):
 
         return self._json_to_result(data)
 
+    _fallback_notified = False  # 类级: 本进程内只提示一次 fallback 模式
+
+    def _notify_fallback_once(self, reason: str) -> None:
+        """首次进入 Python fallback 时打印一行可见提示, 避免刷屏."""
+        if FileOpsTool._fallback_notified:
+            return
+        FileOpsTool._fallback_notified = True
+        try:
+            print(_style(f"  file_ops: Python fallback mode ({reason}) — 部分操作稍慢但功能完整", "33"), flush=True)
+        except Exception:
+            pass
+
     def _call_rust_fast(self, payload: Dict[str, Any], timeout: float = 120.0) -> ToolResult:
         """Use persistent process pool when available, else fall back to one-shot,
         and finally to a pure-Python fallback if the Rust binary is incompatible."""
         # Skip Rust entirely when the binary has a wrong CPU architecture.
         if not RUST_AVAILABLE:
+            self._notify_fallback_once("rust binary unavailable")
             return self._python_fallback(payload)
         if self._pool._available:
             data = self._pool.call(payload, timeout=timeout)
             if data is not None:
                 return self._json_to_result(data)
+            self._notify_fallback_once("rust process pool failed")
         result = self._call_rust(payload, timeout=timeout)
         # Last resort: Python fallback if Rust failed at runtime.
         if not result.success:
             fb = self._python_fallback(payload)
             if fb.success:
+                self._notify_fallback_once("rust runtime failure")
                 return fb
         return result
 
@@ -748,15 +763,92 @@ class FileOpsTool(BaseTool):
                 return self._python_apply_diff(p, payload)
             if action == "verify":
                 return self._python_verify(p)
+            if action == "find":
+                return self._python_find(p, payload)
+            if action == "multi_read":
+                return self._python_multi_read(payload)
+            if action == "diff":
+                return ToolResult(success=False, output="",
+                                  error="diff 需 Rust 二进制(可改用 bash_exec: diff <file1> <file2>)")
+            if action == "backup":
+                return self._python_backup(p)
             # Unsupported action in fallback
             return ToolResult(
                 success=False, output="",
                 error=f"Action '{action}' requires the Rust binary (incompatible/missing on this machine). "
                       f"Install Rust and run `cargo build --release` in the rust_file_ops/ directory, "
-                      f"or use a supported action: read, write, list, exists, grep, analyze."
+                      f"or use a supported action: read, write, list, exists, grep, analyze, find, multi_read, backup."
             )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Python fallback error: {e}")
+
+    def _python_find(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
+        """纯 Python find: 按文件名模式(glob)递归查找, 列出匹配文件.
+
+        与 Rust 实现对齐的常见用法: pattern='package.json' / '**/*.md' / '*.py'。
+        限制: 目录下文件过多时可能较慢(纯 Python 递归), 正常项目规模可用。
+        """
+        import fnmatch
+        if not p.exists():
+            return ToolResult(success=False, output="", error=f"Path not found: {p}")
+        pattern = payload.get("pattern") or "*"
+        base_pattern = pattern
+        if "/" in pattern or "**" in pattern:
+            base_pattern = pattern.split("/")[-1] or "*"
+        limit = int(payload.get("limit") or payload.get("max_results") or 100)
+        matches = []
+        try:
+            for root, dirs, files in os.walk(p):
+                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "target", "dist", "build", ".obsidian", ".cache")]
+                for fname in files:
+                    if fnmatch.fnmatch(fname, base_pattern):
+                        matches.append(str(Path(root) / fname))
+                    if len(matches) >= limit:
+                        break
+                if len(matches) >= limit:
+                    break
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"find failed: {e}")
+        if not matches:
+            return ToolResult(success=True, output=f"(no matches for '{pattern}' in {p})", metadata={"count": 0, "fallback": "python"})
+        out = f"Found {len(matches)} file(s) in {p} matching '{pattern}':\n" + "\n".join(matches)
+        return ToolResult(success=True, output=out, metadata={"count": len(matches), "fallback": "python"})
+
+    def _python_multi_read(self, payload: Dict[str, Any]) -> ToolResult:
+        """纯 Python multi_read: 并行读取多个文件, 合并输出."""
+        paths = payload.get("paths") or []
+        if isinstance(paths, str):
+            paths = [paths]
+        if not paths:
+            return ToolResult(success=False, output="", error="paths 参数 required for multi_read")
+        results = []
+        for fp in paths:
+            fp_path = Path(str(fp))
+            if not fp_path.exists():
+                results.append(f"--- {fp} [ERROR: not found] ---")
+                continue
+            try:
+                text = fp_path.read_text(encoding="utf-8", errors="replace")
+                results.append(f"--- {fp} ---\n{text}")
+            except Exception as e:
+                results.append(f"--- {fp} [ERROR: {e}] ---")
+        return ToolResult(success=True, output="\n\n".join(results), metadata={"files": len(paths), "fallback": "python"})
+
+    def _python_backup(self, p: Path) -> ToolResult:
+        """纯 Python backup: 复制文件/目录到带时间戳的 .bak 副本."""
+        import shutil
+        if not p.exists():
+            return ToolResult(success=False, output="", error=f"Path not found: {p}")
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_path = Path(str(p) + f".{stamp}.bak")
+        try:
+            if p.is_dir():
+                shutil.copytree(p, backup_path)
+            else:
+                shutil.copy2(p, backup_path)
+            return ToolResult(success=True, output=f"Backup saved to {backup_path}", metadata={"backup": str(backup_path), "fallback": "python"})
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"backup failed: {e}")
 
     def _python_apply_diff(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
         """纯 Python 的 apply_diff: 支持 SEARCH/REPLACE 块, 精确+行级匹配, 失败给最近行提示."""
