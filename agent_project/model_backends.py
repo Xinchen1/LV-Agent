@@ -1111,6 +1111,70 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         """
         return None
 
+    def generate_native(
+        self,
+        prompt: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        n_loops: int = 1,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """原生 Function Calling: 返回结构化 {content, tool_calls}.
+
+        相比文本协议(generate + 正则解析), 这是确定性路径:
+        - 传 tools 给 API, 模型返回结构化的 tool_calls(name + arguments JSON)
+        - 无需猜测格式, 无需 1300 行解析器
+        - 无工具调用时返回纯 content
+
+        Returns:
+            {"content": str, "tool_calls": [{"name": str, "arguments": dict}]}
+            可能无 tool_calls 键或为空列表.
+        """
+        try:
+            messages = [
+                {"role": "system", "content": self._build_system_prompt(n_loops)},
+                {"role": "user", "content": prompt},
+            ]
+            payload: Dict[str, Any] = dict(
+                model=self.model,
+                messages=messages,
+                temperature=temperature or self.temperature,
+                top_p=self.top_p,
+                max_tokens=max_tokens or self.max_tokens,
+                timeout=self.timeout,
+            )
+            if tools:
+                payload["tools"] = tools
+            payload.update(kwargs)
+
+            completion = self.client.chat.completions.create(**payload)
+            message = completion.choices[0].message
+            content = getattr(message, "content", None) or ""
+            reasoning = getattr(message, "reasoning_content", None) or ""
+            if not content and reasoning:
+                content = reasoning
+
+            tool_calls = []
+            raw_tcs = getattr(message, "tool_calls", None) or []
+            for tc in raw_tcs:
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                name = getattr(fn, "name", "") or ""
+                args_raw = getattr(fn, "arguments", "{}") or "{}"
+                arguments = {}
+                try:
+                    arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw or {})
+                except Exception:
+                    arguments = {"_raw": args_raw}
+                tool_calls.append({"name": name, "arguments": arguments})
+
+            return {"content": content, "tool_calls": tool_calls}
+        except Exception as e:
+            # 失败时降级: 返回空 tool_calls, 由调用方回退文本协议
+            raise RuntimeError(f"generate_native failed: {e}") from e
+
 
 class DeepSeekBackend(OpenAIBackend):
     """
