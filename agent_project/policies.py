@@ -1265,26 +1265,6 @@ class VerifyPolicy(ThinkingPolicy):
     def next_prompt(self, ctx: ExecutionContext, last_output: str) -> Optional[str]:
         return self.inner.next_prompt(ctx, last_output)
 
-    def verify(self, answer: str, ctx: ExecutionContext) -> str:
-        prompt = f"""Task: {ctx.task}
-
-Proposed answer: {answer}
-
-Verify this answer step by step.
-Check for: correctness, completeness, edge cases, logical consistency.
-
-If the answer is correct, output: "VERIFIED: <reasoned answer>"
-If incorrect, output: "REJECTED: <corrected answer>"
-
-Reasoning:"""
-        verification = self.model.generate(prompt, n_loops=1, temperature=0.3, max_tokens=1024)
-        if "VERIFIED:" in verification:
-            return verification.split("VERIFIED:", 1)[1].strip()
-        if "REJECTED:" in verification:
-            return verification.split("REJECTED:", 1)[1].strip()
-        return answer
-
-
 # ---------------------------------------------------------------------------
 # Direct policy (single-shot, replaces legacy _run_traditional when no tools)
 # ---------------------------------------------------------------------------

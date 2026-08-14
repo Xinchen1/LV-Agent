@@ -296,9 +296,7 @@ class ReasoningEngine:
             return VerifyPolicy()
         if strategy == ReasoningStrategy.ZERO_SHOT:
             return DirectPolicy()
-        # 搜索型策略在 reason() 中单独分发; 这里返回内部使用的 ReAct policy
-        if strategy in (ReasoningStrategy.TREE_OF_THOUGHTS, ReasoningStrategy.MONTE_CARLO, ReasoningStrategy.SELF_CONSISTENCY):
-            return ReActPolicy()
+        # 其余策略(含搜索型 TOT/MCTS/SC, 它们在 reason() 中单独分发)统一用 ReAct
         return ReActPolicy()
 
     def _clone_ctx(self, ctx: ExecutionContext) -> ExecutionContext:
