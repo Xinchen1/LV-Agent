@@ -291,7 +291,13 @@ class SuperAgentCLI:
         print(_style(line, "2"))
 
         print()
-        portrait = _render_portrait(width_chars=34)  # crisp braille portrait, 17 rows to match the text block
+        # 自适应头像宽度: 终端越宽, 头像越大, 像素点越多(更细腻)
+        _pw = 34
+        if cols >= 150:
+            _pw = 52
+        elif cols >= 120:
+            _pw = 44
+        portrait = _render_portrait(width_chars=_pw)
         right_lines = [
             "",
             _style("Lv agent", "1", "38;5;188"),
