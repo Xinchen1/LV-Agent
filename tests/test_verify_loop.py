@@ -883,3 +883,60 @@ def test_analysis_task_short_answer_forced_full_report():
     assert len(tr.final_answer or "") > 50, f"分析场景应强制重生成完整报告, 实际 {len(tr.final_answer or '')} 字符"
     assert "apps/desktop" in (tr.final_answer or ""), "报告应覆盖实际观察到的项目结构"
     assert "作品简介" not in (tr.final_answer or ""), "过短的一句话答案应被替换"
+
+
+def test_multi_read_paths_not_blocked_by_required_path():
+    """multi_read 用 paths 列表(无 path)不应被 required=['action','path'] 校验拒绝.
+
+    回归: 模型输出 [TOOL:file_ops] {"action":"multi_read","paths":[...]} 时,
+    之前 add_call 因 path 缺失返回空, 工具调用被当文本。
+    """
+    from agent_project.policies import ToolCallParser
+
+    out = '[TOOL:file_ops] {"action": "multi_read", "paths": ["../a.md", "../b.md"]} [/TOOL]'
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个调用: {calls}"
+    assert calls[0][0] == "file_ops"
+    assert calls[0][1]["action"] == "multi_read"
+    assert len(calls[0][1]["paths"]) == 2
+
+    # 带前缀文本(用户实际场景)
+    out2 = "让我并行读取\n\n[TOOL:file_ops] {\"action\": \"multi_read\", \"paths\": [\"a.md\", \"b.md\"]} [/TOOL]"
+    calls2 = ToolCallParser.parse_all(out2)
+    assert calls2 and calls2[0][0] == "file_ops"
+
+
+def test_glob_query_alias_not_blocked():
+    """glob 用 query 代替 pattern 不应被 required=['pattern'] 校验拒绝."""
+    from agent_project.policies import ToolCallParser
+
+    out = '[TOOL:glob] {"query": "**/*.md"} [/TOOL]'
+    calls = ToolCallParser.parse_all(out)
+    assert calls and calls[0][0] == "glob", f"应解析出 glob: {calls}"
+
+
+def test_bash_cmd_alias_not_blocked():
+    """bash_exec 用 cmd 代替 command 不应被 required=['command'] 校验拒绝."""
+    from agent_project.policies import ToolCallParser
+
+    out = '[TOOL:bash_exec] {"cmd": "ls -la"} [/TOOL]'
+    calls = ToolCallParser.parse_all(out)
+    assert calls and calls[0][0] == "bash_exec", f"应解析出 bash_exec: {calls}"
+
+
+def test_patch_default_args_migrates_aliases():
+    """执行阶段应将别名迁移到规范键: query->pattern, cmd->command."""
+    from agent_project.execution_engine import ToolExecutor
+    te = ToolExecutor()
+
+    a1 = {"query": "**/*.md"}
+    te._patch_default_args("glob", a1)
+    assert a1.get("pattern") == "**/*.md", f"query 应迁移到 pattern: {a1}"
+
+    a2 = {"cmd": "ls -la"}
+    te._patch_default_args("bash_exec", a2)
+    assert a2.get("command") == "ls -la", f"cmd 应迁移到 command: {a2}"
+
+    a3 = {"query": "TODO"}
+    te._patch_default_args("search_files", a3)
+    assert a3.get("pattern") == "TODO", f"query 应迁移到 pattern: {a3}"
