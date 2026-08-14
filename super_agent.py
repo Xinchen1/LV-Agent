@@ -75,11 +75,6 @@ _EMOJI_RE = re.compile(
 )
 
 
-def _clean_runtime_text(text: str) -> str:
-    text = _EMOJI_RE.sub("", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def _clean_content_text(text: str) -> str:
     return _EMOJI_RE.sub("", text)
 
@@ -215,13 +210,12 @@ class SuperAgentCLI:
         self._session_start = time.time()  # 会话开始时间(供状态栏时长)
         self._input_history: list = []    # 输入历史(上下箭头翻页)
         self._history_idx: int = -1       # 当前历史索引(-1 = 新输入)
-        self.plan_mode: bool = False      # Plan 模式(先计划后执行)
         self._drafts: list = []           # Ctrl+S 暂存的草稿栈(设计文档)
         self._setup_command_completion()
 
     _COMMANDS = [
         "/deep", "/research", "/model", "/config", "/theme", "/code", "/status",
-        "/tools", "/plan", "/sessions", "/dashboard", "/drafts", "/compress", "/harness", "/mcp", "/tg",
+        "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/harness", "/mcp", "/tg",
         "/learn", "/memskill", "/help", "/exit",
     ]
 
@@ -1134,15 +1128,6 @@ class SuperAgentCLI:
                 parts.append(f"...(另有 {len(matches)-8} 个匹配未展开)")
             return "\n\n".join(parts)
 
-        def _repl(m):
-            ref = m.group(1).strip()
-            # 文件名含空格(如 "AI Agent安全使用指南.md"): 若当前片段不含扩展名,
-            # 尝试贪婪匹配到下一个空格前的扩展名
-            if "." not in ref and " " in ref:
-                # 检查后续是否有扩展名模式可吞并
-                return _expand_one(ref)
-            return _expand_one(ref)
-
         # 展开 @引用。展开结果先存占位, 全部展开完再还原, 避免内容里的 @ 被二次处理。
         expanded_cache: list = []
 
@@ -1300,13 +1285,6 @@ class SuperAgentCLI:
                     print(f"  · {_style(name, '1', '188')} {_style(desc, '2')}")
                 continue
 
-            elif user_input.lower() == '/plan':
-                # 设计方案: Plan 模式(先输出方案再执行) - 简单实现为提示用户输入任务
-                self.plan_mode = not getattr(self, 'plan_mode', False)
-                state = "on (先计划后执行)" if self.plan_mode else "off"
-                print(f" plan mode: {state}")
-                continue
-
             elif user_input.lower() == '/sessions':
                 # 设计方案: 会话选择器 - 显示最近会话文件
                 import glob as _g
@@ -1378,7 +1356,7 @@ class SuperAgentCLI:
                 print(" /status - show module health status")
                 print(" /tools - list available tools")
                 print(" /theme <light|dark|minimal> - switch theme")
-                print(" /plan - toggle plan mode (plan first, then execute)")
+
                 print(" /sessions - show recent sessions")
                 print(" /dashboard - show agent dashboard")
                 print(" /mcp - configure/test an MCP server")

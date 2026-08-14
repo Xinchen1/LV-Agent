@@ -49,17 +49,6 @@ class OpenMythosAgent:
     - 自我反思和改进
     """
 
-    # 特殊token(用于结构化输出)
-    SPECIAL_TOKENS = {
-        'THINK_START': '[THINK]',
-        'THINK_END': '[/THINK]',
-        'ACT_START': '[ACT]',
-        'OBS_START': '[OBS]',
-        'OBS_END': '[/OBS]',
-        'REFLECT_START': '[REFLECT]',
-        'REFLECT_END': '[/REFLECT]',
-    }
-
     def __init__(self, config: AgentConfig):
         self.config = config
 
@@ -1015,19 +1004,6 @@ class OpenMythosAgent:
 
         # 中等长度(16-40字符)且无明确动作关键词,视为简单问题 → fast
         return True
-
-    _INTENT_RULES = (
-        # (意图类别, 触发关键词, 工具名, 参数构造器或None, 置信度)
-        # 顺序敏感: 排前面的先匹配
-        ("weather", ("天气", "气温", "温度", "降水", "下雨", "weather", "rain", "temperature"), "weather", None, 0.9),
-        ("calc", ("计算", "等于", "多少", "相加", "相乘", "相加", "求值", "calculate", "math", "compute", "eval"), "calculator", None, 0.85),
-        ("web_search", ("搜索", "查一下", "查下", "查询", "找找", "最新消息", "新闻", "资讯", "search", "news", "stock", "股价", "财报", "look up", "find out"), "web_search", None, 0.8),
-        ("create_file", ("新建", "创建", "写一篇", "写一篇文章", "创建文件", "新建文件", "保存为", "保存到文件", "输出到文件", "写个文件", "create file", "write file", "new file"), "file_ops", None, 0.9),
-        ("read_file", ("读取", "打开文件", "读一下", "查看文件", "看下文件", "read file", "open file", "看看这个文件"), "file_ops", None, 0.85),
-        ("python", ("python", "运行代码", "执行代码", "写代码", "跑一下", "脚本", "写个程序", "run code", "execute python"), "python_exec", None, 0.85),
-        ("bash", ("shell", "终端", "命令行", "bash", "运行命令", "执行命令", "install ", "pip install", "npm install", "git clone"), "bash_exec", None, 0.85),
-        ("glob", ("找到文件", "查找文件", "找一下.*文件", "文件在哪里", "定位.*文件", "which file", "find the file", "where is"), "glob", None, 0.8),
-    )
 
     def _classify_intent(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
         """启发式意图分类器.
@@ -2215,10 +2191,7 @@ class OpenMythosAgent:
                             if summary and not self._is_truncated_answer(summary):
                                 final_answer = summary
                         elif not tool_result2.success:
-                            if self._skip_tool_retry(retry_action, tool_result2):
-                                final_answer = self._tool_failure_fallback(task, tool_result2)
-                            else:
-                                final_answer = self._tool_failure_fallback(task, tool_result2)
+                            final_answer = self._tool_failure_fallback(task, tool_result2)
                     else:
                         final_answer = self._tool_failure_fallback(task, tool_result)
         else:
@@ -2931,12 +2904,6 @@ class OpenMythosAgent:
 
         return StreamRouter(user_callback, reasoning_parts, content_parts)
 
-    def _simulate_stream_tokens(self, text: str, chunk_size: int = 4):
-        """把完整文本切分为小块,模拟流式输出效果."""
-        for i in range(0, len(text), chunk_size):
-            yield text[i:i + chunk_size]
-            time.sleep(0.005)
-
     # ============ 核心Agent循环 ============
 
     def run(
@@ -3456,54 +3423,6 @@ class OpenMythosAgent:
 
         return trajectory
 
-    def _run_traditional(self, task: str, n_loops: int, similar_cases, mode: str) -> Dict[str, Any]:
-        """Legacy compatibility wrapper around the unified ExecutionEngine.
-
-        The old duplicate think-act-observe loop has been removed. This method
-        now delegates to DirectPolicy via ExecutionEngine so there is a single
-        loop implementation across all deep paths.
-        """
-        extra_context = ""
-        if similar_cases:
-            extra_context = "## Similar past cases:\n" + "\n".join(str(c) for c in similar_cases[:3])
-
-        ctx = ExecutionContext(
-            task=task,
-            available_tools=TOOLS_REGISTRY.get_tools_dict(),
-            config=self.config,
-            max_steps=n_loops,
-            code_mode=False,
-            extra_context=extra_context,
-        )
-        engine = ExecutionEngine(
-            model_backend=self.backend,
-            config=self.config,
-            harness_kernel=self._harness_kernel,
-            per_turn_cache=self._tool_result_cache,
-        )
-        trace = engine.run(DirectPolicy(), ctx)
-        return {
-            'task': task,
-            'thoughts': [s.reasoning for s in trace.steps],
-            'actions': [
-                {'tool_name': c.tool_name, 'arguments': c.arguments}
-                for s in trace.steps for c in s.tool_calls
-            ],
-            'observations': [{'success': True, 'output': o, 'error': None} for o in trace.observations],
-            'thinking_steps': len(trace.steps),
-            'outer_loops': len(trace.steps),
-            'final_reward': trace.quality_score,
-            'success': trace.success,
-            'final_answer': trace.final_answer or "",
-            'metadata': {
-                'mode': mode,
-                'started_at': datetime.now().isoformat(),
-                'strategy': 'direct',
-                'duration_ms': trace.duration_ms,
-                **trace.metadata,
-            },
-        }
-
     # ============ 辅助方法 ============
 
     def _decide_thinking_loops(self, task: str, mode: str) -> int:
@@ -3835,23 +3754,6 @@ class OpenMythosAgent:
 
         return lessons
 
-    def _get_lessons_context(self, task: str, k: int = 4) -> str:
-        """检索与当前任务相关的教训,并格式化为 prompt 上下文."""
-        if not self.experience_buffer:
-            return ""
-        try:
-            lessons = self.experience_buffer.get_lessons(task, k=k)
-            if not lessons:
-                return ""
-            lines = ["## Learned Lessons (apply these rules to avoid past failures):"]
-            for lesson in lessons:
-                marker = "DO" if lesson.success else "DO NOT"
-                lines.append(f"- [{marker}] {lesson.condition}: {lesson.action}")
-            return "\n".join(lines)
-        except Exception as e:
-            self.logger.warning(f"lessons failed {e}")
-            return ""
-
     def _load_history(self) -> List[Dict[str, str]]:
         """从磁盘加载跨会话短期对话历史."""
         try:
@@ -4167,77 +4069,6 @@ class OpenMythosAgent:
             except Exception as e:
                 self.logger.debug(f"session memory persist failed: {e}")
 
-    def _build_prompt(self, task: str, similar_cases: List[Experience]) -> str:
-        """构建初始prompt(不含历史)"""
-        tools_desc = TOOLS_REGISTRY.get_prompt_description()
-
-        prompt_parts = [
-            "You are a deep-thinking AI agent with access to tools.",
-            "\n## Available Tools:",
-            tools_desc,
-            "\n## Instructions:",
-            "1. Think deeply about the task using your full reasoning capacity.",
-            "2. When you need external information or actions, output a tool call using EXACTLY one of these formats:",
-            "   JSON: [TOOL:tool_name] {\"param1\": \"value1\", \"param2\": \"value2\"} [/TOOL]",
-            "   key=value: [TOOL:tool_name] param1=\"value1\" param2=\"value2\" [/TOOL]",
-            "   Example: [TOOL:file_ops] {\"action\": \"list\", \"path\": \"~/Desktop\"} [/TOOL]",
-            "3. Continue thinking after receiving observations.",
-            "4. Provide your final answer in plain text.",
-            "5. When the user asks to create/write/save a new article or file, call file_ops(action='write', path='<path>', content='<full content>') and then verify by reading it back. Do NOT just list the directory.",
-            "6. When finished, wrap up with a plain-language summary (explain like to a friend, no jargon) so anyone can understand what was done and what was learned.",
-            "\n## Task:",
-            task
-        ]
-
-        if similar_cases:
-            prompt_parts.append("\n## Similar Successful Examples:")
-            for i, case in enumerate(similar_cases[:2], 1):
-                prompt_parts.append(f"\nExample {i}:")
-                prompt_parts.append(f"Task: {case.task}")
-                if case.trajectory.get('actions'):
-                    prompt_parts.append(f"Actions: {case.trajectory['actions']}")
-
-        return "\n".join(prompt_parts)
-
-    def _build_context_prompt(self, task: str, history: List[str]) -> str:
-        """
-        构建包含对话历史的完整prompt.
-        注意:对于支持 OpenAI function calling 的后端,工具信息通过 tools 参数传递,
-        因此这里只提供简洁上下文;对于文本模式后端,包含完整工具描述.
-        """
-        # 检查后端类型 - 如果是 OpenAIBackend,使用简洁 prompt
-        if hasattr(self.backend, '__class__') and self.backend.__class__.__name__ == 'OpenAIBackend':
-            # Function calling 模式:工具通过参数传递,prompt 只需任务和对话
-            parts = [
-                "You are a helpful AI assistant.",
-                "\n## Task:",
-                task,
-                "\n## Conversation:"
-            ]
-            for entry in history[-10:]:
-                parts.append(entry)
-            parts.append("\nAgent:")
-            return "\n".join(parts)
-        else:
-            # 文本模式:需要工具描述在 prompt 中
-            parts = [
-                "You are a deep-thinking AI agent with access to tools.",
-                "\n## Available Tools:",
-                TOOLS_REGISTRY.get_prompt_description(),
-                "\n## Instructions:",
-                "1. Think deeply before acting.",
-                "2. CRITICAL: Always call tools — never just describe what you'd do instead.",
-                "3. Output tool calls using EXACTLY: [TOOL:tool_name] {\"arg\": \"value\"} [/TOOL]",
-                "   Example: [TOOL:file_ops] {\"action\": \"list\", \"path\": \"~/Desktop\"} [/TOOL]",
-                "\n## Task:",
-                task,
-                "\n## Conversation:"
-            ]
-            for entry in history[-10:]:
-                parts.append(entry)
-            parts.append("\nAgent:")
-            return "\n".join(parts)
-
     _TOOL_ALIASES = {
         # LLM 常写错的工具名 → 合法工具名
         "search": "web_search", "websearch": "web_search", "web-search": "web_search",
@@ -4524,54 +4355,6 @@ class OpenMythosAgent:
             "Output only the corrected tool call, e.g.:\n"
             '[TOOL:file_ops] {"action": "list", "path": "~/Desktop"} [/TOOL]'
         )
-
-    def _is_task_complete(self, tool_result: ToolResult, task: str) -> bool:
-        """
-        Determine if task is complete based on tool result and task type.
-        Returns True if the execution indicates successful completion.
-        """
-        if not tool_result.success:
-            return False
-        
-        task_lower = task.lower()
-        output_lower = tool_result.output.lower() if tool_result.output else ""
-        
-        # Weather queries: any weather data is a complete result
-        if any(kw in task_lower for kw in ['weather', 'forecast']):
-            return True
-        
-        # Calculation: output should contain a numeric result
-        if any(kw in task_lower for kw in ['calculate', 'compute', 'math', 'evaluate']):
-            return any(char.isdigit() for char in tool_result.output)
-        
-        # File / directory queries (list / read): 输出包含实际内容即可视为完成
-        if any(kw in task_lower for kw in ['file', 'folder', 'directory', '文件夹', '目录', '桌面', 'desktop', 'list', '列出', '查看', 'read']):
-            # 如果输出包含文件名、路径片段或明确数量描述，即视为任务已完成
-            output_stripped = tool_result.output.strip() if tool_result.output else ""
-            if len(output_stripped) > 5:
-                # 对“几个文件夹”类问题：如果输出中有数字 + 文件夹相关词，或直接列出了内容
-                if any(ind in output_lower for ind in ['folder', 'file', '目录', '文件', 'desktop', '桌面', '.']) or any(char.isdigit() for char in output_stripped):
-                    return True
-                # 只要有实际内容返回（非错误），对文件任务也算完成（避免无限循环）
-                return True
-            return False
-        
-        # Search tasks: should have meaningful results
-        if any(kw in task_lower for kw in ['search', 'find', 'lookup']):
-            return (len(tool_result.output.strip()) > 20 and 
-                   any(kw in output_lower for kw in ['found', 'result', 'search']))
-        
-        # API calls: success indicators
-        if any(kw in task_lower for kw in ['api', 'call', 'request']):
-            return ('success' in output_lower or '200' in output_lower or 'ok' in output_lower)
-        
-        # General heuristic: substantial output with success markers
-        result_indicators = ['result', 'answer', 'complete', 'success', 'found', 'value']
-        if len(tool_result.output) > 50 and any(ind in output_lower for ind in result_indicators):
-            return True
-        
-        # Default: if tool succeeded and has output, assume complete
-        return bool(tool_result.output and len(tool_result.output.strip()) > 0)
 
     def _compute_reward(self, trajectory: Dict) -> float:
         """计算奖励"""
