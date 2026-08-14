@@ -803,10 +803,56 @@ class ExecutionEngine:
         max_tokens = 8192 if ctx.code_mode else 2048
         if step_number == 1 and len(prompt) > 8000:
             max_tokens = 4096
+        # 原生 Function Calling 优先: 后端若支持 generate_native, 直接拿结构化 tool_calls,
+        # 转成文本协议格式交给下游解析(复用现有逻辑), 避免模型"猜格式"导致的解析失败。
+        native = self._generate_native(prompt, ctx, step_number)
+        if native is not None:
+            return native
         text, _streamed = self._streaming_generate(
             prompt, ctx, getattr(self.config, "temperature", 0.7), max_tokens
         )
         return text
+
+    def _generate_native(self, prompt: str, ctx: ExecutionContext, step_number: int) -> Optional[str]:
+        """尝试原生 Function Calling; 不支持/失败时返回 None 回退文本协议."""
+        backend = getattr(self, "model", None)
+        if backend is None or not hasattr(backend, "generate_native"):
+            return None
+        if not ctx.available_tools:
+            return None
+        try:
+            from .tools import TOOLS_REGISTRY
+            tools = TOOLS_REGISTRY.get_openai_tools()
+            if not tools:
+                return None
+            max_tokens = 8192 if ctx.code_mode else 2048
+            result = backend.generate_native(
+                prompt,
+                tools=tools,
+                n_loops=1,
+                temperature=getattr(self.config, "temperature", 0.7),
+                max_tokens=max_tokens,
+            )
+            tcs = result.get("tool_calls") or []
+            if tcs:
+                parts = []
+                for tc in tcs:
+                    name = tc.get("name", "")
+                    args = tc.get("arguments", {})
+                    parts.append(f"[TOOL:{name}] {json.dumps(args, ensure_ascii=False)} [/TOOL]")
+                if parts:
+                    # 有工具调用: 返回文本协议格式, 由 parse_output 复用现有解析
+                    reasoning = (result.get("content") or "").strip()
+                    if reasoning:
+                        return reasoning + "\n" + " ".join(parts)
+                    return " ".join(parts)
+            content = (result.get("content") or "").strip()
+            if content:
+                return content
+            return None
+        except Exception as e:
+            self.logger.debug(f"native FC unavailable, falling back: {e}")
+            return None
 
     def _extend_loops(self, ctx: ExecutionContext) -> bool:
         """在安全上限内扩展 loop 预算. 返回是否真的扩展了.
