@@ -148,3 +148,45 @@ def test_workspace_escape_asks_not_denies():
     # 系统敏感路径 → DENY
     eff_etc = make_effect("file_ops", {"action": "write", "path": "/etc/hosts", "content": "x"})
     assert k.evaluate(eff_etc).decision is Decision.DENY
+
+
+def test_no_false_positive_on_common_git_commands():
+    """常规 git 命令(--format/--oneline 等)不得被误判为磁盘破坏.
+
+    回归: `git log --format=...` 曾因 \bformat\b 被误拦为 disk destruction。
+    """
+    k = Kernel(policy=safe_default_policy())
+    safe_cmds = [
+        "git log --format=\"%h %s\" -10",
+        "git log --oneline -25 && echo \"---STOP\"",
+        "echo \"format disk\"",
+        "find . -name \"*.format\"",
+        "python3 -c \"print(format(3.14))\"",
+        "df -h",
+        "git status --short",
+        "cat /dev/sda > /tmp/backup.img",
+        "rm -rf ./node_modules",
+    ]
+    for cmd in safe_cmds:
+        eff = make_effect("bash_exec", {"command": cmd})
+        adm = k.evaluate(eff)
+        assert adm.decision is Decision.ALLOW, f"应放行合法命令: {cmd!r} -> {adm.reason}"
+
+
+def test_destructive_commands_still_denied():
+    """真正破坏性命令仍应被拦截."""
+    k = Kernel(policy=safe_default_policy())
+    bad_cmds = [
+        "rm -rf /",
+        "rm -rf ~ ",
+        "rm -rf *",
+        "sudo rm /etc/passwd",
+        "mkfs.ext4 /dev/sdb1",
+        "shred /dev/sda",
+        "dd if=x of=/dev/sda",
+        "echo x > /dev/sda",
+    ]
+    for cmd in bad_cmds:
+        eff = make_effect("bash_exec", {"command": cmd})
+        adm = k.evaluate(eff)
+        assert adm.decision is Decision.DENY, f"应拦截破坏命令: {cmd!r}"
