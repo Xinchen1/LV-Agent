@@ -125,6 +125,45 @@ class ToolCallParser:
             else:
                 add_call(tool_name, cls._parse_args(args_str))
 
+        # Format 1c: [TOOL:name] 独占一行, JSON 参数在下一行(可跨行)
+        # fast-path 的 system prompt 明确教模型用这种格式:
+        #   [TOOL:tool_name]
+        #   {JSON arguments}
+        # 若参数在同一行已被 Format 1b 捕获, 这里只处理参数在后续行的情形。
+        _collected_1b_keys = set(
+            f"{n}|{cls._format_args(a)}" for n, a in calls
+        )
+        for match in re.finditer(
+            r"\[TOOL:([^\]]+)\][ \t]*\n[ \t]*(\{)",
+            text, re.IGNORECASE,
+        ):
+            tool_name = match.group(1).strip()
+            if tool_name.lower() not in valid_lower:
+                continue
+            # 从 JSON 起始的 '{' 处用平衡括号解析出完整对象(允许跨行)
+            brace_start = match.end() - 1
+            end = cls._match_brace(text, brace_start)
+            if end < 0:
+                continue
+            raw_json = text[brace_start:end + 1]
+            args = None
+            try:
+                parsed = cls._normalize_json_keys(json.loads(raw_json))
+                if isinstance(parsed, dict):
+                    args = cls._sanitize_parsed_args(parsed)
+            except Exception:
+                args = cls._parse_json_with_bare_quotes(raw_json)
+            if not isinstance(args, dict) or not args:
+                continue
+            _key = f"{tool_name.lower()}|{cls._format_args(args)}"
+            if _key in _collected_1b_keys:
+                continue
+            _collected_1b_keys.add(_key)
+            if tool_name.lower() == "python_exec":
+                add_call(tool_name, cls._extract_python_exec_code(str(args.get("code", ""))))
+            else:
+                add_call(tool_name, args)
+
         # Format 2: XML <tool_call>
         for match in re.finditer(
             r"<tool_call>\s*<function=(.+?)>(.*?)</function>\s*</tool_call>", text, re.DOTALL | re.IGNORECASE
@@ -335,6 +374,38 @@ class ToolCallParser:
             except TypeError:
                 continue
         return unique
+
+    @classmethod
+    def _match_brace(cls, text: str, start: int) -> int:
+        """返回从 text[start] 的 '{' 起配对的 '}' 的下标, 失败返回 -1.
+
+        逐字符扫描, 正确处理字符串内的花括号(含转义), 支持嵌套对象/数组。
+        """
+        if start < 0 or start >= len(text) or text[start] != "{":
+            return -1
+        depth = 0
+        in_str = False
+        i = start
+        while i < len(text):
+            c = text[i]
+            if c == '"':
+                if not in_str:
+                    in_str = True
+                else:
+                    # 转义引号不翻转
+                    if i > 0 and text[i - 1] == "\\":
+                        pass
+                    else:
+                        in_str = False
+            elif not in_str:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            i += 1
+        return -1
 
     @classmethod
     def _extract_python_exec_code(cls, args_str: str) -> Dict[str, str]:
@@ -709,6 +780,12 @@ class ToolCallParser:
 
     @classmethod
     def strip_tool_calls(cls, text: str) -> str:
+        # 跨行格式必须先处理: [TOOL:name] 独占一行, JSON 参数在后续行 → 一并剔除
+        # (与 parse_all 的 Format 1c 保持一致, 避免工具调用残留进最终答案)
+        text = re.sub(
+            r"\[TOOL:[^\]]+\][ \t]*\n[ \t]*\{.*?\n?[ \t]*\}[^\n]*",
+            "", text, flags=re.DOTALL | re.IGNORECASE,
+        )
         text = re.sub(r"\[TOOL:[^\]]+\].*?\[/TOOL\]", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"^[ \t]*\[TOOL:[^\]]+\][ \t]*.*?[ \t]*$", "", text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<tool_call>\s*<function=.+?>.*?</function>\s*</tool_call>", "", text, flags=re.DOTALL | re.IGNORECASE)

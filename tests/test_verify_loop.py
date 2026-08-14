@@ -685,3 +685,156 @@ def test_github_search_registered_and_signature():
     # 参数 schema 描述应覆盖模型常用形式
     desc = t.parameters
     assert "repositories" in str(desc["properties"]["kind"].get("enum", []))
+
+
+def test_tool_parser_multiline_tool_json():
+    """跨行 [TOOL:name]\\n{json} 格式(fast-path prompt 教的格式)必须能解析出工具调用.
+
+    回归: 模型输出 '先检查目录。[TOOL:bash_exec]\\n{"command": "cd ..."}' 时,
+    之前解析返回 [], 导致 loop 认为无工具调用而停止。
+    """
+    from agent_project.policies import ToolCallParser
+
+    # 用户实际场景: 带前缀 + 跨行 JSON
+    out = '先检查目录。[TOOL:bash_exec]\n{"command": "cd /Users/mac/Downloads/IDE/super-ide && pwd && ls -la | head -50"}'
+    calls = ToolCallParser.parse_all(out)
+    assert len(calls) == 1, f"应解析出 1 个工具调用, 实际: {calls}"
+    assert calls[0][0] == "bash_exec"
+    assert "cd /Users/mac/Downloads/IDE/super-ide" in calls[0][1]["command"]
+
+    # 无前缀 + 跨行
+    out2 = '[TOOL:web_search]\n{"query": "AI 新闻"}'
+    calls2 = ToolCallParser.parse_all(out2)
+    assert calls2 and calls2[0][0] == "web_search" and calls2[0][1]["query"] == "AI 新闻"
+
+    # python_exec 跨行
+    out3 = '[TOOL:python_exec]\n{"code": "print(1)"}'
+    calls3 = ToolCallParser.parse_all(out3)
+    assert calls3 and calls3[0][0] == "python_exec"
+
+    # 多行 JSON(美化排版)
+    out4 = '[TOOL:bash_exec]\n{\n  "command": "ls",\n  "timeout": 30\n}'
+    calls4 = ToolCallParser.parse_all(out4)
+    assert calls4 and calls4[0][0] == "bash_exec" and calls4[0][1]["command"] == "ls"
+
+    # 跨行 + 文本环绕
+    out5 = '先看看目录\n[TOOL:bash_exec]\n{"command": "ls -la"}\n然后回答'
+    calls5 = ToolCallParser.parse_all(out5)
+    assert calls5 and calls5[0][0] == "bash_exec"
+
+
+def test_strip_tool_calls_multiline():
+    """strip_tool_calls 应一并剔除跨行工具调用及其 JSON 参数."""
+    from agent_project.policies import ToolCallParser
+
+    cleaned = ToolCallParser.strip_tool_calls('先检查目录。[TOOL:bash_exec]\n{"command": "ls"}')
+    assert "bash_exec" not in cleaned and "ls" not in cleaned
+    assert cleaned.strip() == "先检查目录。"
+
+    cleaned2 = ToolCallParser.strip_tool_calls('这是思考\n[TOOL:web_search]\n{"query": "AI"}\n结论')
+    assert "web_search" not in cleaned2 and "AI" not in cleaned2
+    assert "结论" in cleaned2
+
+    # 纯文本不受影响
+    assert ToolCallParser.strip_tool_calls("普通文本") == "普通文本"
+
+
+def _install_fake_web_search(behavior):
+    """把 registry 里的 web_search 临时替换成假工具, 避免测试联网/依赖真实结果.
+
+    behavior: "ok" -> 每次都成功(有结果); "fail" -> 每次都失败.
+    """
+    import sys
+    sys.path.insert(0, ".")
+    sys.path.insert(0, "agent_project")
+    from agent_project.tools import TOOLS_REGISTRY, BaseTool, ToolResult
+
+    class FakeWebSearch(BaseTool):
+        name = "web_search"
+        description = "fake web search"
+        parameters = {"type": "object", "properties": {"query": {"type": "string"}}}
+
+        def __init__(self, behavior):
+            self._behavior = behavior
+            self.calls = 0
+
+        def execute(self, **kwargs):
+            self.calls += 1
+            if self._behavior == "ok":
+                return ToolResult(success=True, output='[{"title": "result", "url": "http://x"}]')
+            return ToolResult(success=False, output="", error="Tool error: fake search failed")
+
+    fake = FakeWebSearch(behavior)
+    TOOLS_REGISTRY._tools["web_search"] = fake
+    return fake
+
+
+def test_loop_extension_shows_status_and_no_hard_cap():
+    """动态扩展应显示'增加 loop'状态, 且不再受 max_thinking_loops 硬上限截断."""
+    import logging
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+    from agent_project.tools import ToolResult  # noqa: F401
+
+    cfg = AgentConfig()
+    cfg.max_thinking_loops = 6  # 故意设很小的初始硬上限
+    fake = _install_fake_web_search("ok")
+
+    # 模型持续产出新工具调用(10 次)且都有真实进展 → 预算应突破 max_thinking_loops=6
+    class FB_Progress:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c <= 10:
+                return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
+            return '{"final_answer": "done"}'
+
+    status_msgs = []
+    eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                           config=cfg, max_steps=4)
+    ctx.monitor_enabled = False
+    ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
+    tr = eng.run(ReActPolicy(), ctx)
+    assert len(tr.tools_used) == 10, f"应执行全部 10 次工具调用, 实际 {len(tr.tools_used)}"
+    # 预算应突破 6(原硬上限), 证明不再被 max_thinking_loops 截断
+    assert ctx.max_steps > 6, f"预算应突破硬上限 6, 实际 {ctx.max_steps}"
+    # 应显示"增加 loop"状态提示
+    assert any(k == "status" and "loop" in str(t) for k, t in status_msgs), f"应有增加 loop 状态: {status_msgs}"
+
+
+def test_loop_stops_after_consecutive_no_progress():
+    """连续无进展(工具反复失败)≥3 步时, loop 应停止并提示失败(不无限烧预算)."""
+    import logging
+    from agent_project.execution_engine import ExecutionContext, ExecutionEngine
+    from agent_project.policies import ReActPolicy
+    from agent_project.config import AgentConfig
+    from agent_project.tools import TOOLS_REGISTRY
+
+    cfg = AgentConfig()
+    cfg.max_thinking_loops = 32  # 硬上限很大, 但连续无进展应先行停止
+    fake = _install_fake_web_search("fail")
+
+    class FB_Fail:
+        def __init__(self): self.c = 0
+        def generate(self, prompt, **kw):
+            self.c += 1
+            if self.c <= 12:
+                return '{"action": "web_search", "args": {"query": "fail"}}'
+            return '{"final_answer": "done"}'
+
+    status_msgs = []
+    eng = ExecutionEngine(model_backend=FB_Fail(), config=cfg)
+    eng.logger = logging.getLogger("test")
+    ctx = ExecutionContext(task="搜", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                           config=cfg, max_steps=30)
+    ctx.monitor_enabled = False
+    ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
+    tr = eng.run(ReActPolicy(), ctx)
+    # 连续无进展约束应生效: 工具调用远少于 12 次(在无进展3次后停止)
+    assert len(tr.tools_used) < 12, f"连续无进展应提前停止, 实际执行了 {len(tr.tools_used)} 次"
+    assert any(k == "status" and "无进展" in str(t) for k, t in status_msgs), f"应有停止提示: {status_msgs}"
+
