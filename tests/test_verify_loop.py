@@ -669,3 +669,19 @@ def test_logging_console_default_off():
     from agent_project.config import LoggingConfig
     cfg = LoggingConfig()
     assert cfg.console is False, f"console 默认应关闭, 实际 {cfg.console}"
+
+
+def test_github_search_registered_and_signature():
+    """github_search 应注册且 execute 接受 sort/order 等模型常用参数."""
+    from agent_project.tools import TOOLS_REGISTRY
+    assert "github_search" in TOOLS_REGISTRY.list_tools(), "github_search 应默认注册"
+    t = TOOLS_REGISTRY.get("github_search")
+    import inspect
+    sig = inspect.signature(t.execute)
+    params = sig.parameters
+    assert "sort" in params, "应接受 sort 参数"
+    assert "order" in params, "应接受 order 参数"
+    assert "per_page" in params, "应接受 per_page 参数"
+    # 参数 schema 描述应覆盖模型常用形式
+    desc = t.parameters
+    assert "repositories" in str(desc["properties"]["kind"].get("enum", []))
