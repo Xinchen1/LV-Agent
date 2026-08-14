@@ -75,7 +75,18 @@ fi
 RUST_BIN="$PROJECT_DIR/rust_file_ops/target/release/rust_file_ops"
 if [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v cargo >/dev/null 2>&1; then
     echo "building rust_file_ops (fast file ops + auto syntax verification)..."
-    ( cd "$PROJECT_DIR/rust_file_ops" && cargo build --release >/dev/null 2>&1 && echo "✓ rust_file_ops ready" ) || echo "⚠ rust build failed; using Python fallback"
+    # 编译输出写入临时日志; 失败时展示 cargo 报错, 方便用户排查(而非静默吞掉)
+    RUST_BUILD_LOG="${TMPDIR:-/tmp}/rust_file_ops_build.log"
+    if ( cd "$PROJECT_DIR/rust_file_ops" && cargo build --release >"$RUST_BUILD_LOG" 2>&1 ); then
+        echo "✓ rust_file_ops ready"
+    else
+        echo "⚠ rust build failed — using Python fallback. Build log: $RUST_BUILD_LOG"
+        echo "  (last lines:)"
+        tail -5 "$RUST_BUILD_LOG" 2>/dev/null | sed 's/^/    /'
+    fi
+elif [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ]; then
+    echo "⚠ rust_file_ops not built and cargo not found — using Python fallback (slower file ops)."
+    echo "  Install Rust (https://rustup.rs) to enable fast file ops."
 fi
 
 # Run the agent from the user's current directory, preserving cwd.
