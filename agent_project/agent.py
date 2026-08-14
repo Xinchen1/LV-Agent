@@ -1956,19 +1956,46 @@ class OpenMythosAgent:
         elif len(task) > 40 or '?' in task or '？' in task:
             fast_max_tokens = 2048
 
+        # 原生 Function Calling 优先: 后端支持时直接拿结构化 tool_calls,
+        # 转成文本协议格式供后续 _parse_output_for_action 复用, 避免模型猜格式。
+        raw_answer = None
         try:
-            raw_answer = self.backend.generate(
-                prompt,
-                n_loops=1,
-                temperature=self.config.temperature,
-                max_tokens=fast_max_tokens,
-                stream_callback=internal_callback,
-                token_callback=token_callback
-            )
+            if hasattr(self.backend, "generate_native"):
+                native = self.backend.generate_native(
+                    prompt,
+                    tools=TOOLS_REGISTRY.get_openai_tools(),
+                    n_loops=1,
+                    temperature=self.config.temperature,
+                    max_tokens=fast_max_tokens,
+                )
+                tcs = native.get("tool_calls") or []
+                if tcs:
+                    parts = []
+                    for tc in tcs:
+                        name = tc.get("name", "")
+                        args = tc.get("arguments", {})
+                        parts.append(f"[TOOL:{name}] {json.dumps(args, ensure_ascii=False)} [/TOOL]")
+                    reasoning = (native.get("content") or "").strip()
+                    raw_answer = (reasoning + "\n" if reasoning else "") + " ".join(parts)
+                elif (native.get("content") or "").strip():
+                    raw_answer = native["content"].strip()
         except Exception as e:
-            # 稳定性: 后端调用失败(重试耗尽/非连接错误)不让整轮崩溃, 降级为友好提示
-            self.logger.error(f"fast generate failed: {type(e).__name__}: {e}")
-            raw_answer = f"抱歉, 生成暂时失败({type(e).__name__}), 请稍后重试。"
+            self.logger.debug(f"fast native FC unavailable, falling back: {e}")
+            raw_answer = None
+        if raw_answer is None:
+            try:
+                raw_answer = self.backend.generate(
+                    prompt,
+                    n_loops=1,
+                    temperature=self.config.temperature,
+                    max_tokens=fast_max_tokens,
+                    stream_callback=internal_callback,
+                    token_callback=token_callback
+                )
+            except Exception as e:
+                # 稳定性: 后端调用失败(重试耗尽/非连接错误)不让整轮崩溃, 降级为友好提示
+                self.logger.error(f"fast generate failed: {type(e).__name__}: {e}")
+                raw_answer = f"抱歉, 生成暂时失败({type(e).__name__}), 请稍后重试。"
 
         # 动态 token 统计：从后端读取真实使用量
         tokens_used = getattr(self.backend, "last_total_tokens", None)
