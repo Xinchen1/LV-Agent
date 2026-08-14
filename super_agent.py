@@ -168,8 +168,8 @@ def _render_portrait(width_chars: Optional[int] = None) -> str:
         # the paper reads as white.
         thresh = _otsu_threshold(pixels, len(pixels))
         sorted_px = sorted(pixels)
-        pct = sorted_px[int(len(sorted_px) * 0.55)]
-        thresh = int(max(thresh, pct) * 0.9)
+        pct = sorted_px[int(len(sorted_px) * 0.65)]
+        thresh = int(max(thresh, pct) * 0.92)
 
         # Block ramp per 4-pixel column: ▀ top-half, ▄ bottom-half, █ full.
         lines = []
@@ -196,7 +196,8 @@ def _render_portrait(width_chars: Optional[int] = None) -> str:
                 if avg_top < thresh: g |= 0x01
                 if avg_bot < thresh: g |= 0x02
                 glyph = {0x01: "▀", 0x02: "▄", 0x03: "█"}[g]
-                gray = 232 + min(23, (255 - min(avg_top, avg_bot)) * 24 // 255)
+                # Brighter gray for strokes so the portrait feels lighter overall.
+                gray = 236 + min(19, (255 - min(avg_top, avg_bot)) * 20 // 255)
                 line += f"\033[38;5;{gray}m{glyph}\033[0m"
             lines.append(line)
         return "\n".join(lines)
