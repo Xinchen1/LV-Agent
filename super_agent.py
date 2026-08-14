@@ -831,6 +831,8 @@ class SuperAgentCLI:
         # 累计会话 token(供状态栏上下文占用条)
         if total_tokens:
             self._session_tokens += int(total_tokens)
+        # 自动压缩: 上下文达到 80% 时自动整理, 避免占满窗口后被模型截断/降质
+        self._maybe_auto_compress()
         return result
 
     def _start_idle_watchdog(self, idle_threshold: float = 90.0, cooldown_s: float = 300.0):
@@ -861,13 +863,57 @@ class SuperAgentCLI:
 
         threading.Thread(target=_watch, daemon=True, name="idle-watchdog").start()
 
+    def _maybe_auto_compress(self) -> None:
+        """上下文达到 80% 阈值时自动压缩(替代用户手动 /compress).
+
+        - 每轮任务后检查: session_tokens / max_context >= 0.80 时触发
+        - 压缩工作记忆到 60%, 重置计数器
+        - 带冷却: 压缩后短时间内不重复触发, 避免每轮都压
+        """
+        try:
+            if not self._max_context_tokens:
+                return
+            pct = self._session_tokens / self._max_context_tokens
+            if pct < 0.80:
+                return
+            # 冷却: 距上次自动压缩 < 30s 或任务运行中, 跳过(避免打扰)
+            now = time.time()
+            if now - getattr(self, '_last_auto_compress_at', 0) < 30:
+                return
+            if not (self.agent and hasattr(self.agent, 'context_engine') and self.agent.context_engine):
+                return
+            ce = self.agent.context_engine
+            wm = ce.working_memory
+            from agent_project.context_engine import _estimate_tokens
+            current_tok = _estimate_tokens(" ".join(e.content for e in wm.events))
+            if current_tok < 500:
+                return
+            target = max(200, int(current_tok * 0.6))
+            summary = ce.compressor.compress_events(wm.events, target)
+            if summary:
+                from agent_project.context_engine import WorkingMemoryEvent
+                wm.events = [WorkingMemoryEvent(
+                    role="system",
+                    content="[已自动压缩] " + summary,
+                    event_type="message",
+                )]
+                self._session_tokens = _estimate_tokens(summary)
+                self._last_auto_compress_at = now
+                print(_style(
+                    f"  ↳ 上下文 {pct*100:.0f}% 已达阈值, 已自动压缩: {current_tok} → {_estimate_tokens(summary)} token",
+                    "38;5;220",
+                ), flush=True)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"auto compress failed: {e}")
+
     def _footer_line(self, width: int = 0) -> str:
         """底部状态栏: 目录 + 上下文占用条 + 命令(基于 ui.StatusBar)."""
         sb = self._status_bar_instance()
         line = sb.render(used_tokens=self._session_tokens, width=width)
-        # 上下文溢出提示: >=95% 时在行尾追加红色提示(设计文档: 状态栏变红 + /compress 建议)
-        if self._max_context_tokens and self._session_tokens / self._max_context_tokens >= 0.95:
-            warn = _style("  ⚠️ context near limit · type /compress", "38;5;220")
+        # 上下文提示: >=80% 时在行尾追加提示(与自动压缩阈值一致)
+        if self._max_context_tokens and self._session_tokens / self._max_context_tokens >= 0.80:
+            warn = _style("  ⚠️ context " + str(int(self._session_tokens / self._max_context_tokens * 100)) + "% · auto-compressing", "38;5;220")
             return line + warn
         return line
 
@@ -1164,7 +1210,7 @@ class SuperAgentCLI:
         if self._input_history:
             print(f"  输入历史: {len(self._input_history)} 条 | 草稿: {len(self._drafts)} 个")
         pct = int(self._session_tokens / self._max_context_tokens * 100) if self._max_context_tokens else 0
-        print(f"  上下文占用: {pct}%" + (" ⚠️ 请 /compress" if pct >= 95 else ""))
+        print(f"  上下文占用: {pct}%" + (" ⚠️ 已自动压缩" if pct >= 80 else ""))
         print(_style("──────────────────", "2"))
 
     def run_interactive(self):
