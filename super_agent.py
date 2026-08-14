@@ -211,6 +211,7 @@ class SuperAgentCLI:
         self._input_history: list = []    # 输入历史(上下箭头翻页)
         self._history_idx: int = -1       # 当前历史索引(-1 = 新输入)
         self._drafts: list = []           # Ctrl+S 暂存的草稿栈(设计文档)
+        self._last_input_pasted = False  # 上轮输入是否经历 bracketed paste(用于显示粘贴确认)
         self._setup_command_completion()
 
     _COMMANDS = [
@@ -911,6 +912,7 @@ class SuperAgentCLI:
 
         buf = bytearray()
         in_paste = False
+        pasted = False  # 本次输入是否经历过 bracketed paste
         echoed = 0  # 已回显的字节数
         try:
             while True:
@@ -930,6 +932,7 @@ class SuperAgentCLI:
                         # 尝试匹配 ESC[200~ / ESC[201~
                         if chunk[i:i+6] == b"\x1b[200~":
                             in_paste = True
+                            pasted = True
                             i += 6
                             continue
                         if chunk[i:i+6] == b"\x1b[201~":
@@ -959,12 +962,15 @@ class SuperAgentCLI:
                         i += 1
                         continue
                     if in_paste:
-                        # 粘贴内容: 原样累积(含换行), 不提交不回显
+                        # 粘贴内容: 原样累积(含换行); 不回显(等提交后统一显示),
+                        # 同时推进 echoed, 避免后续普通输入误触发回显
                         buf += chunk[i:i+1]
+                        echoed = len(buf)
                         i += 1
                         continue
-                    # 普通输入
+                    # 普通输入(粘贴模式下的换行已由 in_paste 分支累积, 不在此提交)
                     if b == 0x0a or b == 0x0d:  # 回车提交
+                        self._last_input_pasted = pasted
                         sys.stdout.write("\r\n")
                         sys.stdout.flush()
                         return bytes(buf).decode("utf-8", errors="replace").strip()
@@ -974,8 +980,9 @@ class SuperAgentCLI:
                                 buf.pop()
                             if buf:
                                 buf.pop()
+                            # 清行重绘(而非逐格  ), 保证多字节/粘贴内容删除干净
                             echoed = len(buf)
-                            sys.stdout.write("\b \b")
+                            sys.stdout.write("\r\x1b[K" + self._prompt_prefix() + bytes(buf).decode("utf-8", errors="replace"))
                             sys.stdout.flush()
                     elif b == 0x03:  # Ctrl+C
                         sys.stdout.write("\r\n")
@@ -1022,6 +1029,7 @@ class SuperAgentCLI:
             except Exception:
                 pass
 
+        self._last_input_pasted = pasted
         return bytes(buf).decode("utf-8", errors="replace").strip()
 
     def _prompt_prefix(self) -> str:
@@ -1093,12 +1101,11 @@ class SuperAgentCLI:
         sys.stdout.write("\r\n")
         sys.stdout.flush()
         value = value.strip()
-        # 多行粘贴确认: 若内容含换行, 回显总行数/总字符, 让用户确认已完整复制
-        if value:
+        # 粘贴确认: 经历过 bracketed paste 或多行内容时, 回显统计, 让用户确认已完整复制
+        if value and getattr(self, '_last_input_pasted', False):
             line_count = len(value.splitlines())
             char_count = len(value)
-            if line_count > 1 or char_count > 200:
-                print(_style(f"  ↳ 已接收 {line_count} 行 · {char_count} 字符", "2"), flush=True)
+            print(_style(f"  ↳ 已粘贴 {line_count} 行 · {char_count} 字符", "2"), flush=True)
         return value
 
     def _expand_file_refs(self, text: str) -> str:
