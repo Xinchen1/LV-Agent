@@ -108,6 +108,143 @@ class SearchCache:
         q = "".join(sorted(q))
         return hashlib.sha256(q.encode()).hexdigest()[:32]
 
+    # ------------------------------------------------------------------
+    # 语义近似匹配(提升命中率的第二层, 不引入外部依赖)
+    # ------------------------------------------------------------------
+    # 保留核心词的字符 2-gram 集合作为轻量语义指纹: 比停用词表健壮,
+    # 对同义词/口语化/词序变化都能近似匹配("人工智能新闻"≈"AI新闻")。
+    _STOP = frozenset("的了我你他她它是和与及在在了有就都还一个也这那要会到说给让为被从向把对以于等最更很非常一些已经正在将很")
+    # 常见中英等价词(聚焦核心主题词): 让 "AI新闻"≈"人工智能新闻"、"app"≈"应用" 等可近似匹配。
+    _ZH_EN_EQUIV = {
+        "ai": "人工智能", "人工智能": "ai",
+        "app": "应用", "应用": "app",
+        "api": "接口", "接口": "api",
+        "ai智能": "ai",
+    }
+
+    @classmethod
+    def _semantic_ngrams(cls, query: str) -> frozenset:
+        """生成查询的语义指纹: 英文 token + 中文核心字 n-gram + 中英等价词归一.
+
+        - 英文: 小写 token + 相邻 2-gram, 并归一常见等价词(ai↔人工智能)
+        - 中文: 去掉单字停用词后取相邻 2-gram("人工智能"→{人智,智能})
+        这样 "AI新闻" 与 "人工智能新闻" 共享 {智能,新闻} 等, 可近似匹配。
+        """
+        q = query.lower().strip()
+        ngrams = set()
+        import re as _re
+        # 中英等价词先归一: "人工智能"->"ai"(统一到英文 token), "应用"->"app"
+        normalized = q
+        for zh, en in cls._ZH_EN_EQUIV.items():
+            normalized = normalized.replace(zh, en)
+        # 英文 token(含归一后的)
+        en_words = _re.findall(r"[a-z0-9]+", normalized)
+        for w in en_words:
+            if len(w) >= 2:
+                ngrams.add("e:" + w)
+        for i in range(len(en_words) - 1):
+            ngrams.add("e:" + en_words[i] + "_" + en_words[i + 1])
+        # 中文: 先剔除常见口语虚词(词级), 再取相邻 2-gram
+        _zh_noise = ("今天", "昨天", "明天", "什么", "怎么", "为什么", "有没有",
+                     "一下", "最近", "现在", "关于", "有关", "方面", "内容", "最新",
+                     "呢", "吗", "呀", "啊", "哦", "嗯", "的", "了", "和", "与")
+        zh = "".join(ch for ch in normalized if "\u4e00" <= ch <= "\u9fff" and ch not in cls._STOP)
+        for w in _zh_noise:
+            zh = zh.replace(w, "")
+        if len(zh) >= 2:
+            for i in range(len(zh) - 1):
+                ngrams.add("z:" + zh[i:i + 2])
+        elif zh:
+            ngrams.add("z:" + zh)
+        return frozenset(ngrams)
+
+    @staticmethod
+    def _similarity(a: frozenset, b: frozenset) -> float:
+        """Jaccard 相似度(带公共核心的偏置, 避免短查询误判)."""
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        if union == 0:
+            return 0.0
+        return inter / union
+
+    def find_similar(self, query: str, threshold: float = 0.6, max_scan: int = 60) -> Optional[CacheEntry]:
+        """在缓存中找语义近似(非精确)的条目.
+
+        先精确键命中(零开销), 再遍历最近条目做 n-gram 相似度。
+        threshold 0.6 表示核心语义重叠 60% 即视为同一查询。
+        返回最相似的未过期条目; 无则 None。
+        """
+        # 1. 精确键(已有逻辑)
+        exact = self._memory.get(self._key(query))
+        if exact is None and self.disk_path:
+            exact = self._load_from_disk(self._key(query))
+            if exact:
+                self._memory[self._key(query)] = exact
+        if exact and not exact.is_expired():
+            return exact
+        if exact and exact.is_expired():
+            return None  # 精确命中但过期 -> 直接 miss, 不再近似(避免用过期结果)
+
+        # 2. 语义近似: 遍历内存 + 磁盘条目
+        q_grams = self._semantic_ngrams(query)
+        if not q_grams:
+            return None
+        best = None
+        best_score = threshold
+        now = time.time()
+        scanned = 0
+        # 内存优先(最近插入的语义更可能相关)
+        candidates = list(self._memory.values())
+        if self.disk_path and len(candidates) < max_scan:
+            try:
+                for fp in sorted(self.disk_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                    if len(candidates) >= max_scan:
+                        break
+                    entry = self._load_from_disk(fp.stem)
+                    if entry:
+                        candidates.append(entry)
+            except Exception:
+                pass
+        for entry in candidates:
+            scanned += 1
+            if scanned > max_scan:
+                break
+            if entry.is_expired():
+                continue
+            c_grams = self._semantic_ngrams(entry.query)
+            score = self._similarity(q_grams, c_grams)
+            if score > best_score:
+                best_score = score
+                best = entry
+        return best
+
+    def get(self, query: str, threshold: float = 0.6) -> Optional[List[Dict[str, Any]]]:
+        """增强版 get: 精确键 优先, 语义近似 兜底.
+
+        threshold: 语义命中的最小相似度(默认 0.6).
+        """
+        # 精确键(原逻辑)
+        key = self._key(query)
+        entry = self._memory.get(key)
+        if entry is None and self.disk_path:
+            entry = self._load_from_disk(key)
+            if entry:
+                self._memory[key] = entry
+        if entry is not None and not entry.is_expired():
+            return entry.results
+        if entry is not None and entry.is_expired():
+            # 精确键过期: 仍尝试语义近似(可能命中别的相关缓存)
+            pass
+        # 语义近似兜底
+        sim = self.find_similar(query, threshold=threshold)
+        if sim is not None:
+            # 把近似命中的结果按新 query 缓存(加快下次精确命中)
+            self.set(query, sim.results)
+            return sim.results
+        return None
+
     def _enforce_memory_limit(self) -> None:
         if len(self._memory) <= self.max_memory_entries:
             return
