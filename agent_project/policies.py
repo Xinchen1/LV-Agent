@@ -68,7 +68,17 @@ class ToolCallParser:
             if tool is None:
                 tool = registry.get(tool_name.strip().lower())
             if tool is None:
-                return
+                # 别名纠错: LLM 常用 run_code/search/file 等别名, 映射到合法工具
+                _alias_map = {
+                    "run_code": "python_exec", "code": "python_exec",
+                    "search": "web_search", "calc": "calculator", "file": "file_ops",
+                    "shell": "bash_exec", "terminal": "bash_exec", "grep": "search_files",
+                }
+                _canon = _alias_map.get(tool_name.strip().lower())
+                if _canon:
+                    tool = registry.get(_canon)
+                if tool is None:
+                    return
             # 统一使用注册名, 后续 file_ops/python_exec 特判也用注册名
             tool_name = tool.name if hasattr(tool, "name") else tool_name
             if tool_name == "file_ops":
