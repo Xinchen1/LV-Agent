@@ -45,6 +45,7 @@ from agent_project.stream_adapters import (
     JsonStreamAdapter,
     RichStreamAdapter,
     select_stream_adapter,
+    render_markdown_rich,
 )
 from agent_project.terminal import style as _style
 from agent_project.terminal import token as _token, set_theme as _set_theme, active_theme as _active_theme
@@ -1556,7 +1557,8 @@ class SuperAgentCLI:
         content_streamed = result.pop('_content_streamed', False)
         final_answer = result.get('final_answer', '')
         if not content_streamed and final_answer:
-            print(f"\n{_clean_content_text(final_answer)}")
+            # 兜底路径也走 markdown 高亮, 与流式输出一致(而不是纯文本)
+            print("\n" + render_markdown_rich(_clean_content_text(final_answer)))
         print(f"\n{self.format_result(result)}")
         self._maybe_open_report(result)
 
