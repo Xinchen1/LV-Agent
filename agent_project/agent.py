@@ -4655,31 +4655,3 @@ class OpenMythosAgent:
         pass
 
     # ============ 推理接口 ============
-
-    def chat(self, task: str, **kwargs) -> str:
-        """
-        简化的单轮接口:输入任务,返回结果字符串。
-        优先返回 trajectory.final_answer(反思/整理后的最终回答),否则回落到最后一次观察。
-        """
-        result = self.run(task, **kwargs)
-
-        # 1) 优先:完整推理路径在 trajectory.final_answer 中给出了整理后的自然语言回答
-        fa = result.get('final_answer') or None
-        if isinstance(fa, str) and fa.strip():
-            return fa.strip()
-
-        # 2) 其次:最后一个 observation 的 output 字段
-        if result.get('observations'):
-            last = result['observations'][-1]
-            if isinstance(last, dict):
-                out = last.get('output')
-                if isinstance(out, str) and out.strip():
-                    return out.strip()
-            elif isinstance(last, (str, int, float)):
-                return str(last).strip()
-
-        # 3) 兜底:result['answer'](simple 路径使用)或提示无结果
-        ans = result.get('answer')
-        if isinstance(ans, str) and ans.strip():
-            return ans.strip()
-        return "任务未完成，未获得结果。"
