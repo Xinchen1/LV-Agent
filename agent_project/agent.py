@@ -1938,7 +1938,8 @@ class OpenMythosAgent:
             "Available tools:",
             "- web_search(query, max_results=5) → 联网搜索最新信息(天气/新闻/股价/资料/产品/公司)",
             "- read_web(url) → 打开网页提取正文",
-            "- file_ops(action, path, ...) → action ∈ [read, write, list, exists, grep, analyze]",
+            "- file_ops(action, path, ...) → action ∈ [read, write, list, exists, grep, analyze, fast_read]",
+            "- fast_read: 长文档(访谈/报告/文章/大文件)先向量化入库, 再按语义查询取相关片段, 不全文塞入",
             "- glob(pattern, path='.', max_results=100) → 按文件名模式定向查找文件(如 **/*.py)",
             "- search_files(pattern, path, ...) → 在文件中搜索文本内容(grep)",
             "- python_exec(code, lang, timeout=30) → 执行 python/bash/python_file 代码",
@@ -1969,6 +1970,7 @@ class OpenMythosAgent:
             "- DOWNLOADING CODE / CLONING REPOS: 用户说'下载源码/克隆仓库/git下载'时, 直接用 git(command='clone', repository='https://github.com/OWNER/REPO.git') 或 bash_exec('git clone ... 目标目录'); 不要用 api_call 只查信息。先确认目标目录存在, 再真正执行 clone, 完成后汇报实际结果。",
             "- READING FOLDERS: 当用户说'阅读/读/查看 某个文件夹'时, 必须 list 后再 read 其中的文件内容, 然后基于内容回答。绝不能只 list 目录就回复。",
             "- READING A FILE: 用户说'看/读/打开/查看 X文件/我的XX'时, 先确定文件路径(用 glob 或 file_ops 定向查找, 不要全盘 find), 然后 read 文件内容并基于内容回答。绝不能只列出路径不读内容。",
+            "- LONG DOCUMENTS: 长文档(访谈/报告/长文章, 通常>5KB或>100行)用 fast_read 而非 read: 先 fast_read 向量化, 再用 query 提取用户关心的相关片段, 避免全文塞爆上下文。短文件(<5KB)用普通 read。",
             "- FINDING FILES: 用 glob(pattern, path) 定向查找, 不要用 bash find 全盘扫描(会刷屏权限错误)。只在用户明确要求全盘搜索时才用 bash find, 并加 2>/dev/null 屏蔽权限报错。",
             "- CREATING FILES/ARTICLES: 用户说'新建/创建/写一篇/保存一篇文章/把XX放进去'时, 必须直接调用 file_ops(action='write', path='<当前目录/文件名.md>', content='<完整内容>') 真正创建文件。写完用 file_ops(action='read', path=...) 验证内容已写入。绝不能只 list 目录或只说'好的'而不实际 write。",
             "- MODIFYING FILES: 用户说'给XX加功能/改一下/修改/更新/优化XX'时, 必须先 read 目标文件, 然后直接调用 file_ops(action='apply_diff', path=..., diff='<<<<<<< SEARCH\n原文\n=======\n新文\n>>>>>>> REPLACE') 或 file_ops(action='write', path=..., content='完整新内容') 真正修改文件。修改后 read 验证。绝不能只描述'应该怎么改'而不实际执行修改。",
@@ -3636,6 +3638,13 @@ class OpenMythosAgent:
         if not has_suffix and not re.search(r'[a-zA-Z_\-0-9]+', task):
             return None
 
+        # 排除文档阅读意图: "看下 X 文章/笔记/报告/这篇/那篇" 是读文档, 不是定位文件
+        # (否则会误触发全盘 find, 如"看下agent研究这篇文章")
+        doc_markers = ["文章", "笔记", "报告", "这篇", "那篇", "文档", "资料", "研究", "总结",
+                       "article", "note", "report", "doc", "paper"]
+        if any(m in task for m in doc_markers) and not has_location_marker and not has_explicit_location_target:
+            return None
+
         # 排除明显的"搜索信息/新闻/资料"意图: 这些应走 web_search, 而非 find 文件
         # (如"查ai新闻""搜一下最新的资讯""查查天气"等)
         info_search_markers = ["新闻", "资讯", "消息", "动态", "最新", "信息", "资料", "教程",
@@ -3704,35 +3713,31 @@ class OpenMythosAgent:
         if not target_name or len(target_name) < 2:
             return None
 
-        import shlex
-        safe_root = shlex.quote(root)
-        # Treat spaces/hyphens/underscores as wildcards so "claude code" matches "claude-code" and "claude_code".
-        search_name = target_name.replace(" ", "*").replace("-", "*").replace("_", "*")
-        # Escape single quotes for shell single-quoted string.
-        escaped_name = search_name.replace("'", "'\"'\"'")
-        cmd = f"find {safe_root} -maxdepth 4 -iname '*{escaped_name}*' -print | head -40"
-
-        self._status(stream_callback, f"locating '{target_name}' in {root}")
-        bash_tool = TOOLS_REGISTRY.get("bash_exec")
-        if bash_tool is None:
-            return None
+        # 用 glob 定向查找替代全盘 find: 限定在 cwd 和指定 root, 不触发权限错误/慢扫描
+        # (find 全盘会误扫 Photos 库等产生 Operation not permitted)
+        search_pattern = f"**/*{target_name}*"
+        self._status(stream_callback, f"locating '{target_name}' under {root}")
         try:
-            tool_result = bash_tool.execute(command=cmd)
-            output = tool_result.output or tool_result.error or ""
-            # bash_exec returns '(no output)' when stdout is empty; treat it as empty.
-            if output.strip().lower() == "(no output)":
-                output = ""
-            # If nothing found in the specific location, quickly widen to home directory.
-            if not output.strip() and root != str(Path.home()):
-                home_cmd = f"find {shlex.quote(str(Path.home()))} -maxdepth 4 -iname '*{escaped_name}*' -print | head -40"
-                tool_result = bash_tool.execute(command=home_cmd)
-                output = tool_result.output or tool_result.error or ""
-                if output.strip().lower() == "(no output)":
-                    output = ""
-                if output.strip():
-                    output = f"(expanded search from {root} to home)\n{output}"
-            if not output.strip():
-                output = f"No results found for '{target_name}' under {root} or home directory."
+            from .tools import GlobTool
+            glob_tool = GlobTool()
+            roots = []
+            if root != str(Path.home()):
+                roots.append(root)
+            roots.append(str(Path.cwd()))  # 优先当前工作目录(Obsidian Vault 等)
+            if Path.home().exists() and str(Path.home()) not in roots:
+                roots.append(str(Path.home()))
+            output_parts = []
+            for r in roots:
+                try:
+                    res = glob_tool.execute(pattern=search_pattern, path=r, max_results=40)
+                    if res.success and res.output:
+                        output_parts.append(f"[{r}]\n{res.output}")
+                except Exception:
+                    continue
+            if not output_parts:
+                output = f"No results found for '{target_name}'."
+            else:
+                output = "\n\n".join(output_parts)
             final = f"Found matches for '{target_name}':\n{output}"
             return {
                 "final_answer": final,
@@ -3741,7 +3746,7 @@ class OpenMythosAgent:
                 "thinking_steps": 1,
                 "metadata": {"duration_ms": 0},
             }
-        except Exception as e:
+        except Exception:
             return None
 
     def _get_memory_context(self, task: str, max_pages: int = 3, mode: str = "normal") -> str:
@@ -4346,6 +4351,17 @@ class OpenMythosAgent:
                 if "action" not in args:
                     args = dict(args)
                     args["action"] = "list" if os.path.isdir(args["path"]) else "read"
+
+                # 长文档自动向量化: 对大文件(>5KB)的 read 自动升级为 fast_read,
+                # 语义检索相关片段而不是全文塞爆上下文(机器理解优先)。
+                if args.get("action") in ("read", None) and isinstance(args.get("path"), str):
+                    try:
+                        from pathlib import Path as _P2
+                        _fp = _P2(args["path"]).expanduser()
+                        if _fp.is_file() and _fp.stat().st_size > 5120:
+                            args["action"] = "fast_read"
+                    except Exception:
+                        pass
 
             # 通用参数修复: 常见缺省/类型错误在执行前自动补齐, 减少无效调用
             args = self._repair_tool_arguments(tool_call.tool_name, args)
