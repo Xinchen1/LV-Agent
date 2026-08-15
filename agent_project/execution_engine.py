@@ -876,6 +876,11 @@ class ExecutionEngine:
         )
         if ctx.max_steps >= safety_cap:
             return False
+        # 扩展次数上限: 最多扩展 3 次(每次 +4), 避免无限膨胀烧 token
+        max_extends = getattr(self.config, "loop_extension_limit", 3)
+        if getattr(ctx, "_loop_extends", 0) >= max_extends:
+            return False
+        ctx._loop_extends = getattr(ctx, "_loop_extends", 0) + 1
         ctx.max_steps = min(safety_cap, ctx.max_steps + 4)
         return True
 
@@ -1097,16 +1102,22 @@ class ExecutionEngine:
             "search more", "keep going", "continue", "let me continue",
             "more results", "dig deeper", "further", "one more",
         )
-        # 通用模式: "再/继续/接着" + 任意动作(高置信)
+        # 排除"描述现状"("我已经搜了/已经查过了/已有结果")—— 陈述而非主动继续
+        _state_desc = ("我已经", "我已", "已经搜索", "已经查", "已经找到", "已经看了",
+                       "我已经找", "已经研究", "i already", "i've already", "already searched",
+                       "already found", "we already", "已经完成")
+        for s in _state_desc:
+            if s in t.lower():
+                return False
+        # 通用模式: "再/继续/接着" + 具体动作(至少2字符) → 高置信继续意图
         _generic_continue = re.compile(
-            r"(?:再|继续|接着|再多|再来)\s*[^。！？!?\n]{0,12}?(?:看|查|找|搜|试|做|写|读|执行|补充|分析|研究|探索|搜索|更新|深入)",
+            r"(?:再|继续|接着|再多|再来)\s*[^。！？!?\n]{0,20}?(?:看|查|找|搜|试|做|写|读|执行|补充|分析|研究|探索|搜索|更新|深入)",
             re.IGNORECASE,
         )
         if _generic_continue.search(t) and not any(d in t.lower() for d in ("但已经", "不过已经", "已经够了", "不需要", "不用继续")):
             return True
         for c in _continue:
             if c in t.lower():
-                # 若命中但紧跟完成词(如"还要再搜, 但已经够了") → 排除
                 if any(d in t.lower() for d in ("但已经", "不过已经", "已经够了", "不需要")):
                     return False
                 return True
