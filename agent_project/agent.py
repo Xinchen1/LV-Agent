@@ -3399,7 +3399,12 @@ class OpenMythosAgent:
                 stream_callback=stream_callback,
                 token_callback=token_callback,
                 code_mode=code_mode,
-                extra_context=plan_context or "",
+                # 兜底路径也要有记忆/历史/计划, 否则 DirectPolicy 单轮"失忆"
+                extra_context="\n".join(x for x in [
+                    plan_context or "",
+                    (("## Recent Conversation:\n" + history_context) if history_context else ""),
+                    (("## Relevant Memory:\n" + memory_context) if memory_context else ""),
+                ] if x),
                 history_context=history_context,
             )
             engine = ExecutionEngine(
