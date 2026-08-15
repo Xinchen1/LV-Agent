@@ -1036,6 +1036,28 @@ class OpenMythosAgent:
             if fname:
                 return ("file_ops", {"action": "list", "path": fname}, 0.9, "detected folder-read intent")
 
+        # -0.4) 保存/写入意图优先 → file_ops write(必须在"分析X文件夹"之前,
+        #       否则"保存到 lv 文件夹"会被"分析"正则误判为 list)
+        if any(k in tl for k in ("保存到", "存到", "保存成", "写进", "写入", "保存", "写成", "整理成",
+                                  "新建", "创建", "写一篇", "保存为", "输出到文件")):
+            fname = None
+            m = re.search(r"(?:保存到|存到|写进|写入|保存成|输出到|整理成|保存为)\s*[“\"']?([^，。！？\s]+)", t)
+            if m:
+                cand = m.group(1)
+                if re.search(r"\.(?:md|txt|py|json|yaml|yml|csv|html)$", cand):
+                    fname = cand
+                else:
+                    fname = cand.rstrip("文件夹目录") + "/"
+            if fname is None:
+                m2 = re.search(r"([\w\u4e00-\u9fff\-\.]{1,40}\.(?:md|txt|py|json|yaml|yml|csv|html))", t)
+                if m2:
+                    fname = m2.group(1)
+            args = {}
+            if fname:
+                fname = re.sub(r"^(帮|请|麻烦|把|将|存|保存)", "", fname)
+                args["path"] = fname.strip()
+            return ("file_ops", args, 0.9, "detected file-creation intent")
+
         # -0.5) 分析 X 文件夹/项目/代码库: 提取名称, 转 file_ops list(然后自动读内容)
         if any(k in tl for k in ("分析", "剖析", "解析", "analyze")) and any(
             k in tl for k in ("文件夹", "目录", "项目", "代码库", "仓库", "repo", "folder", "dir", "project")
@@ -1098,7 +1120,9 @@ class OpenMythosAgent:
             return ("weather", args, 0.9, "detected weather intent")
 
         # 3) 创建文件/文章意图 → file_ops write
-        if any(k in tl for k in ("新建", "创建", "写一篇", "写一篇文章", "创建文章", "新建文章", "保存为", "输出到文件", "写个文件", "新建文件", "创建文件")):
+        if any(k in tl for k in ("新建", "创建", "写一篇", "写一篇文章", "创建文章", "新建文章",
+                                  "保存为", "输出到文件", "写个文件", "新建文件", "创建文件",
+                                  "保存到", "存到", "保存成", "写进", "写入", "保存", "写成", "整理成")):
             # 尝试从任务中提取文件名(带扩展名)
             # 优先: "叫/为/名字是/标题是/叫 名字.md" 形式
             fname = None
