@@ -1388,16 +1388,46 @@ class OpenMythosAgent:
             return True
         return False
 
-    @staticmethod
-    def _tool_failure_fallback(task: str, tool_result: Any) -> str:
-        """工具调用失败时的自然语言兜底回复, 避免把原始错误直接甩给用户."""
+    def _tool_failure_fallback(self, task: str, tool_result: Any) -> str:
+        """工具调用失败时的自然语言兜底回复, 避免把原始错误直接甩给用户.
+
+        对 File not found: 自动列出父目录, 提供真实可用的文件名,
+        而不是直接放弃(模型常把目录+模糊词当文件名, 如 'lv/全部')。
+        """
         err = str(getattr(tool_result, "error", "") or "未知错误").strip()[:120]
         err_lower = err.lower()
         if any(k in err_lower for k in ("no search results", "no results", "无结果", "没有找到", "nothing found")):
             return "抱歉，这次没有搜到相关结果。你可以换个关键词，或告诉我具体想了解什么，我再帮你查。"
         if any(k in err_lower for k in ("timed out", "timeout")):
             return "抱歉，这次查询超时了。你可以稍后再试，或换一个更具体的说法。"
+        # File not found: 尝试列出父目录, 让用户/模型看到真实文件名
+        if "not found" in err_lower or "file does not exist" in err_lower or "不存在" in err:
+            try:
+                m = re.search(r"not found:\s*(.+)", err) or re.search(r"不存在:\s*(.+)", err)
+                if m:
+                    path = m.group(1).strip().strip("'\"")
+                    from pathlib import Path as _P
+                    p = _P(path)
+                    cand = p.parent if p.parent.exists() and p.parent.is_dir() else (p if p.is_dir() else None)
+                    if cand is not None:
+                        try:
+                            entries = sorted(
+                                [e.name for e in cand.iterdir()],
+                                key=lambda x: (not _P(cand / x).is_dir(), x.lower()),
+                            )[:15]
+                            if entries:
+                                listing = "，".join(entries)
+                                return (
+                                    f"抱歉，没找到文件：{path}。"
+                                    f"该目录下现有的内容是：{listing}。"
+                                    f"你可以告诉我具体要操作哪个文件，或直接说'保存全部到 lv'让我新建。"
+                                )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         return f"抱歉，刚才的操作没能完成（{err}）。你可以换个说法再试一次，或告诉我具体想做什么。"
+
 
     def _summarize_tool_answer(self, task: str, action: Any, raw_output: str,
                                token_callback: Optional[Callable[[int], None]] = None) -> str:
@@ -2359,7 +2389,7 @@ class OpenMythosAgent:
                             else:
                                 # 后置核验: 工具执行失败, 不能直接返回承诺文字
                                 self.logger.warning(f"promise retry tool FAILED: {r_result.error}")
-                                final_answer = f"抱歉，执行时遇到问题：{r_result.error or '未知错误'}。请告诉我具体文件路径或内容，我再试一次。"
+                                final_answer = self._tool_failure_fallback(task, r_result)
                         except Exception as e:
                             self.logger.debug(f"promise retry tool exec failed {e}")
                     elif not self._is_promise_response(retry_answer):
