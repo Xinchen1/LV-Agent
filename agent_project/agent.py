@@ -774,19 +774,26 @@ class OpenMythosAgent:
                     clean_task = f"深度研究 {rest}"
                 break
 
-        # 延续性指代解析: "我的意思是你也去搜索整合" "继续刚才的XX" 等是对上一轮话题的延续,
-        # 若提取不出独立主题, 从最近对话历史中找真实主题(否则会把整句话当搜索词)。
+        # 延续性指代解析: 输入含代词(它/这个/那个)或延续话术时,
+        # 必须先从对话历史解析真实主题, 否则会拿"它/报告"这种无意义词去搜索。
         from .research_report import extract_research_topic
         _raw_topic = extract_research_topic(clean_task)
         _continuation_markers = ("我的意思", "的意思", "你也", "你也去", "然后整合", "整合起来",
                                  "接着", "继续刚才", "继续上", "同上面", "和刚才那个",
                                  "同刚才", "和上次", "像刚才", "接着刚才")
-        if (not _raw_topic or len(_raw_topic) > 12 or any(m in clean_task for m in _continuation_markers)) \
-           and any(m in clean_task for m in _continuation_markers):
-            # 从历史提取上一轮真实主题
+        # 代词/指代: "深度分析它" "分析这个" "研究那个" 等
+        _pronoun_present = bool(re.search(r"(深度分析|分析|研究|调研)\s*(它|这个|那个|这些|那些|该系统|这个系统|那个系统)", clean_task))
+        _needs_history_topic = (
+            _pronoun_present
+            or _raw_topic in ("它", "报告", "这个", "那个", "系统", "该", "此")
+            or len(_raw_topic) <= 1
+            or (any(m in clean_task for m in _continuation_markers) and any(m in clean_task for m in _continuation_markers))
+        )
+        if _needs_history_topic:
+            # 从历史提取上一轮真实主题(结合上下文理解指代)
             prev_topic = self._infer_continuation_topic(clean_task)
             if prev_topic:
-                self.logger.info(f"deep research continuation: '{clean_task[:30]}' → topic '{prev_topic}'")
+                self.logger.info(f"deep research referential: '{clean_task[:30]}' → topic '{prev_topic}'")
                 clean_task = f"深度研究 {prev_topic}"
 
         report_result = generate_research_report(
