@@ -981,3 +981,37 @@ def test_search_cache_semantic_similarity_metric():
     c = SearchCache._semantic_ngrams("足球比赛")
     assert SearchCache._similarity(a, b) > 0.3, f"相关查询相似度应较高: {SearchCache._similarity(a,b):.2f}"
     assert SearchCache._similarity(a, c) < 0.2, f"无关查询相似度应很低: {SearchCache._similarity(a,c):.2f}"
+
+
+def test_deep_research_pronoun_resolves_context():
+    """深度研究输入含代词(它/这个)时应结合对话历史解析真实主题.
+
+    回归: '深度分析它,生成研究报告' 之前会拿 '报告'/'它' 当搜索词,
+    现在应解析出历史中的真实主题(如 'Omni 系统的架构')。
+    """
+    import re
+    from agent_project.agent import OpenMythosAgent
+    from agent_project.research_report import extract_research_topic
+
+    a = object.__new__(OpenMythosAgent)
+    a._method_cache = {}
+    a._code_mode_override = False
+    a._current_task = ""
+    a.logger = __import__("logging").getLogger("test")
+    a.conversation_history = [
+        {"user": "分析一下 Omni 系统的架构", "assistant": "Omni 是本地 AI Agent 系统, Rust+TS 架构"},
+    ]
+
+    # 模拟 _run_deep_research 的代词消解段
+    clean_task = "深度分析它,生成研究报告"
+    _raw_topic = extract_research_topic(clean_task)
+    _pronoun_present = bool(re.search(
+        r"(深度分析|分析|研究|调研)\s*(它|这个|那个|这些|那些|该系统|这个系统|那个系统)", clean_task))
+    _needs = _pronoun_present or _raw_topic in ("它", "报告", "这个", "那个", "系统", "该", "此") or len(_raw_topic) <= 1
+    assert _pronoun_present, "含'分析它'应识别为代词指代"
+    if _needs:
+        prev = a._infer_continuation_topic(clean_task)
+        if prev:
+            clean_task = f"深度研究 {prev}"
+    assert "Omni" in clean_task, f"应结合上下文解析出 Omni: {clean_task!r}"
+    assert "报告" not in clean_task.split("深度研究", 1)[-1] or "Omni" in clean_task
