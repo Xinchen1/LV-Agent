@@ -818,6 +818,100 @@ class RichStreamAdapter(StreamAdapter):
 
 
 # ---------------------------------------------------------------------------
+# 非流式 markdown 高亮(供最终答案兜底打印复用, 与流式高亮一致)
+# ---------------------------------------------------------------------------
+
+def render_markdown_rich(text: str) -> str:
+    """将 markdown 文本渲染为带 ANSI 颜色的字符串(非流式).
+
+    复用 RichStreamAdapter._StreamHighlighter 的着色常量, 保证与流式输出一致:
+    标题/章节/列表/代码块/行内高亮(路径、链接、数字、重点词)全部覆盖。
+    返回带色字符串, 由调用方 print。
+    """
+    if not text:
+        return text
+    H = RichStreamAdapter._StreamHighlighter
+    _HL_KEY = H._HL_KEY
+    _SECTION_RE = H._SECTION_RE
+    _LIST_RE = H._LIST_RE
+    lines_out = []
+    in_code = False
+    code_lang = ""
+    for raw in text.split("\n"):
+        line = raw
+        stripped = line.strip()
+        if in_code:
+            if stripped.startswith("```"):
+                in_code = False
+                lines_out.append(f"{H.DIM}└── {code_lang or 'code'}{H.RESET}")
+                code_lang = ""
+            else:
+                lines_out.append(f"{H.CODE_BG}{H.CODE_FG}{line.rstrip()}{H.RESET}")
+            continue
+        if stripped.startswith("```"):
+            in_code = True
+            code_lang = stripped[3:].strip()
+            lines_out.append(f"{H.DIM}┌── {code_lang or 'code'}{H.RESET}")
+            continue
+        if not stripped:
+            lines_out.append("")
+            continue
+        if stripped.startswith(">"):
+            lines_out.append(f"{H.QUOTE}{line.rstrip()}{H.RESET}")
+            continue
+        if stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            title = stripped.lstrip("#").strip()
+            style = H.H2 if level >= 2 else H.H1
+            lines_out.append(f"{style}{title}{H.RESET}")
+            continue
+        m = _SECTION_RE.match(stripped)
+        if m and len(stripped) <= 40:
+            lines_out.append(f"{H.SECTION}{stripped}{H.RESET}")
+            continue
+        m = _LIST_RE.match(line)
+        if m:
+            mark = m.group("mark")
+            rest = line[m.end():]
+            lines_out.append(f"{H.LIST_MARK}{mark} {H.RESET}{_style_inline_hl(H, rest.rstrip())}")
+            continue
+        lines_out.append(_style_inline_hl(H, line.rstrip()))
+    return "\n".join(lines_out)
+
+
+def _style_inline_hl(H, text: str) -> str:
+    """行内高亮: 对文本中的路径/链接/数字/重点词等上色."""
+    if not text:
+        return text
+    parts = []
+    pos = 0
+    for m in H._HL_KEY.finditer(text):
+        if m.start() > pos:
+            parts.append(text[pos:m.start()])
+        kind = m.lastgroup
+        val = m.group(0)
+        if kind == "code":
+            parts.append(f"{H.INLINE}{val}{H.RESET}")
+        elif kind == "url":
+            parts.append(f"{H.URL}{val}{H.RESET}")
+        elif kind == "path":
+            parts.append(f"{H.PATH}{val}{H.RESET}")
+        elif kind == "num":
+            parts.append(f"{H.NUM}{val}{H.RESET}")
+        elif kind == "err":
+            parts.append(f"{H.ERR}{val}{H.RESET}")
+        elif kind == "key":
+            parts.append(f"{H.KEY}{val}{H.RESET}")
+        else:
+            parts.append(val)
+        pos = m.end()
+    if pos < len(text):
+        parts.append(text[pos:])
+    return "".join(parts)
+
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
