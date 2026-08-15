@@ -1188,26 +1188,33 @@ class OpenMythosAgent:
         return None
 
     def _llm_intent_classify(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
-        """用 LLM 做一次简短的意图分类(规则未命中时的兜底).
+        """LLM 软匹配意图分类(规则未命中/置信度不足时的升级层).
 
-        让 LLM 从候选工具中选一个最匹配的, 并给出参数。
-        返回 (tool_name, arguments, confidence, reason), 失败/不确定返回 None。
+        特点:
+        - 精准理解用户意图: 从候选工具选最匹配的并给出参数
+        - 支持拆分复合意图: 如"查资料并保存到文件" → 主意图 web_search,
+          附带 write 子意图(存到 returned secondary, 供调用方二次执行)
+        - 结构化 JSON 校验 + 工具名归一化, 减少幻觉
+        返回 (tool_name, arguments, confidence, reason) 或 None。
         """
         from .tools import TOOLS_REGISTRY
         tools_desc = ", ".join(TOOLS_REGISTRY.list_tools())
         prompt = (
-            "你是意图分类器。判断用户请求最应该用哪个工具完成。\n"
+            "你是意图分类器。精准判断用户请求最应该用哪个工具完成。\n"
             "可用工具: " + tools_desc + "\n"
-            "其中: web_search 查网络信息/新闻/资料; file_ops 操作本地文件; "
-            "bash_exec 执行命令; glob/search_files 找文件; calculator 计算; weather 天气; "
-            "git 操作仓库; python_exec 运行代码。\n"
-            "只输出 JSON: {\"tool\": \"工具名\", \"args\": {...}, \"reason\": \"一句话原因\"}\n"
+            "工具说明: web_search 查网络/新闻/资料; read_web 打开网页读正文; file_ops 本地文件读写; "
+            "bash_exec 执行命令; glob 按文件名找文件; search_files 搜文件内容; calculator 计算; "
+            "weather 天气; git 仓库; python_exec 运行代码; github_search 搜GitHub。\n"
+            "规则: 一个请求可能包含多个动作(如'搜索A并保存到B')。输出\n"
+            "{\"tool\": \"主工具\", \"args\": {主工具参数}, \"reason\": \"一句话原因\", "
+            "\"secondary\": {\"tool\": \"次工具\", \"args\": {...}} 或 null}\n"
+            "主工具 = 用户最核心的动作; secondary = 紧随其后的附加动作(如保存/写入)。\n"
             "若无法确定(闲聊/无明确动作), 输出 {\"tool\": \"none\"}\n\n"
             f"用户请求: {task}\n"
             "JSON:"
         )
         try:
-            raw = self.backend.generate(prompt, n_loops=1, temperature=0.0, max_tokens=200)
+            raw = self.backend.generate(prompt, n_loops=1, temperature=0.0, max_tokens=250)
             import json as _json
             import re as _re
             m = _re.search(r'\{.*\}', str(raw or ""), _re.DOTALL)
@@ -1217,14 +1224,32 @@ class OpenMythosAgent:
             tool_name = payload.get("tool", "")
             if not tool_name or tool_name == "none":
                 return None
-            if not TOOLS_REGISTRY.get(tool_name) and not TOOLS_REGISTRY.get(tool_name.lower()):
+            # 工具名归一化(大小写/别名)
+            canon = None
+            if TOOLS_REGISTRY.get(tool_name):
+                canon = tool_name
+            elif TOOLS_REGISTRY.get(tool_name.lower()):
+                canon = tool_name.lower()
+            else:
+                canon = self._correct_tool_name(tool_name)
+                if canon and not TOOLS_REGISTRY.get(canon):
+                    canon = None
+            if not canon:
                 return None
             args = payload.get("args", {}) or {}
             if not isinstance(args, dict):
                 args = {}
+            # 复合意图: 记录 secondary 供调用方后续执行
+            sec = payload.get("secondary") or {}
+            if isinstance(sec, dict) and sec.get("tool"):
+                sec_name = sec.get("tool")
+                if TOOLS_REGISTRY.get(sec_name) or TOOLS_REGISTRY.get(sec_name.lower()):
+                    sec_args = sec.get("args", {}) or {}
+                    if isinstance(sec_args, dict):
+                        args["_secondary"] = (sec_name, sec_args)
             conf = 0.75
             reason = payload.get("reason", "llm intent classify")
-            return (tool_name, args, conf, reason)
+            return (canon, args, conf, reason)
         except Exception as e:
             self.logger.debug(f"llm intent classify failed: {e}")
             return None
@@ -2098,7 +2123,8 @@ class OpenMythosAgent:
         # 用确定性规则注入正确的工具调用(置信度高的场景)。
         _classifier_override = False
         classified = self._classify_intent(task)
-        if classified and classified[2] >= 0.8:
+        # 规则层高置信(>=0.8)或 LLM 升级层(conf 0.75)都视为可信意图, 可 override
+        if classified and classified[2] >= 0.7:
             c_tool, c_args, c_conf, c_reason = classified
             if action is None or not TOOLS_REGISTRY.get(action.tool_name):
                 _classifier_override = True
