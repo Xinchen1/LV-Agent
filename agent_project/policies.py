@@ -34,6 +34,12 @@ def _cwd() -> str:
         return "."
 
 
+def _today_str() -> str:
+    """当前日期(供策略 prompt 注入, 处理时间敏感查询)."""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d (%A)")
+
+
 # ---------------------------------------------------------------------------
 # Shared parsing helpers (consolidated from reasoning.py + agent.py)
 # ---------------------------------------------------------------------------
@@ -891,7 +897,7 @@ class ReActPolicy(ThinkingPolicy):
 
 Task: {task}
 
-Working directory: {_cwd()}
+Today is {_today_str()}. Working directory: {_cwd()}
 (Use paths RELATIVE to the working directory above for file_ops. Never invent absolute paths.)
 
 CRITICAL: Put all your internal reasoning inside <think>...</think> tags. The user will see this thinking process in real time. Keep the actual Thought: lines brief; the detailed reasoning goes into <think>...</think>.
@@ -1197,6 +1203,9 @@ class CoTPolicy(ThinkingPolicy):
 
 Task: {ctx.task}
 
+Today is {_today_str()}. Working directory: {_cwd()}
+(Use paths relative to the working directory for file_ops.)
+
 CRITICAL: Put all your internal reasoning inside <think>...</think> tags.
 
 Think through this systematically:
@@ -1283,6 +1292,9 @@ class DirectPolicy(ThinkingPolicy):
         base = f"""You are Lv Super Agent, a helpful assistant.
 
 Task: {ctx.task}
+
+Today is {_today_str()}. Working directory: {_cwd()}
+(Use paths relative to the working directory for file_ops.)
 
 Think briefly inside <think>...</think> tags, then respond directly and concisely.
 If the task requires a tool, use [TOOL:name] {{"arg": "value"}} [/TOOL].
