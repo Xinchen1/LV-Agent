@@ -674,6 +674,10 @@ class ExecutionEngine:
                     trace.success = True
                     ctx.steps.append(record)
                     trace.steps.append(record)
+                    # 最终答案通过 content 通道透出(让 UI 高亮 markdown),
+                    # 而不是只由 _finish_result 纯文本打印。
+                    if not getattr(ctx, "_live_streamed", False):
+                        self._emit(ctx, "content", parsed.final_answer)
                     break
 
                 # ---- 阶段 2: 无动作(既无工具调用也无答案) ----
@@ -801,6 +805,9 @@ class ExecutionEngine:
 
     def _generate(self, prompt: str, ctx: ExecutionContext, step_number: int) -> str:
         max_tokens = 8192 if ctx.code_mode else 2048
+        # 分析/报告类任务需要更大输出空间, 避免长报告被 max_tokens 截断
+        if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE):
+            max_tokens = max(max_tokens, 8192)
         if step_number == 1 and len(prompt) > 8000:
             max_tokens = 4096
         # 原生 Function Calling 优先: 后端若支持 generate_native, 直接拿结构化 tool_calls,
@@ -826,6 +833,9 @@ class ExecutionEngine:
             if not tools:
                 return None
             max_tokens = 8192 if ctx.code_mode else 2048
+            # 分析/报告类任务: 更大输出空间, 避免长报告被截断
+            if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE):
+                max_tokens = max(max_tokens, 8192)
             result = backend.generate_native(
                 prompt,
                 tools=tools,
@@ -983,7 +993,9 @@ class ExecutionEngine:
         )
         if extra:
             prompt = prompt.rstrip() + extra + "\n"
-        answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, 3072)
+        # 分析/报告任务: 更大输出空间, 避免兜底报告被截断
+        _mt = 8192 if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE) else 3072
+        answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, _mt)
         cleaned = self._clean_final_text(answer or "")
         # 二次兜底: 生成仍为空/截断时, 用最近一步思考或观察作为答案
         if self._is_truncated_fragment(cleaned):
