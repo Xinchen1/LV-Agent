@@ -880,25 +880,37 @@ class OpenMythosAgent:
         """
         try:
             from .research_report import extract_research_topic as _ext
-            # 1. 最近一轮用户真实话题(排除纯延续话术)
+            # 1. 最近一轮用户真实话题(排除纯延续话术 + 含代词/指代的话术)
+            #    含代词的消息(它/这个/那个/这些)本身依赖上文, 不能作为主题源。
+            _pronoun_re = re.compile(r"(它|这个|那个|这些|那些|该系统|这个系统|那个系统|上面|刚才)")
             for entry in reversed(self.conversation_history):
                 ut = str(entry.get("user", "") or "").strip()
                 if not ut:
                     continue
-                # 跳过纯延续话术(本身不包含主题)
-                if any(m in ut for m in ("我的意思", "的意思", "你也", "然后整合", "整合起来", "继续刚才", "接着刚才", "和刚才那个", "像刚才")):
+                if any(m in ut for m in ("我的意思", "的意思", "你也", "然后整合", "整合起来",
+                                         "继续刚才", "接着刚才", "和刚才那个", "像刚才")):
                     continue
-                # 从该轮提取主题
+                # 跳过含代词的消息(它/这个/那个 指代上文, 不能当主题)
+                if _pronoun_re.search(ut) and len(ut) <= 20:
+                    continue
                 topic = _ext(ut)
-                # 若提取的太长(像是整句), 用简化的"最近关键词"兜底
-                if topic and len(topic) <= 12:
+                if topic and len(topic) <= 12 and not _pronoun_re.search(topic):
                     return topic
-                # 太长的主题: 提取其中较短的候选(取最近对话的实体词)
                 import re as _re
                 cands = [c for c in re.findall(r"[\u4e00-\u9fff]{2,8}(?:AI|ai|Agent|agent)?", topic) if len(c) >= 2]
                 if cands:
                     return cands[0]
-            # 2. 兜底: 用户当前话术里"我的意思是X"中的 X
+            # 2. 回退: 从最近 assistant 消息提取真实实体(含具体系统/项目名)
+            for entry in reversed(self.conversation_history):
+                at = str(entry.get("assistant", "") or "").strip()
+                if not at:
+                    continue
+                # 提取看起来像专有名词的词(大写/带连接符/数字, 或中文长词)
+                import re as _re2
+                for cand in _re2.findall(r"[A-Z][A-Za-z0-9_-]{2,30}|[\u4e00-\u9fff]{3,12}(?:系统|架构|项目|平台|框架)", at):
+                    if len(cand) >= 3 and not _pronoun_re.search(cand):
+                        return cand
+            # 3. 兜底: 用户当前话术里"我的意思是X"中的 X
             m = re.search(r"(?:我的意思是|的意思就是|就是说)\s*(.+)", task)
             if m:
                 return m.group(1).strip()[:40]
