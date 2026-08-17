@@ -69,7 +69,13 @@ class Skill(BaseModel):
     usage_count: int = 0
     success_rate: float = 0.0
     embedding: Optional[List[float]] = None
-
+    # DSH: 可选的能力声明 —— 当技能声明了 tool_spec, 它就能被动态注册为可调用工具。
+    tool_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="若提供, 技能可作为工具动态注册。格式: "
+                    "{'name': str, 'description': str, 'parameters': {name: {type, description, required}}, "
+                    "'effect_class': 'read'|'write'|'exec'|'net'|'pure'}",
+    )
     def to_markdown(self) -> str:
         """Serialize to Markdown with YAML frontmatter."""
         frontmatter = {
@@ -86,6 +92,8 @@ class Skill(BaseModel):
             "usage_count": self.usage_count,
             "success_rate": self.success_rate,
         }
+        if self.tool_spec:
+            frontmatter["tool_spec"] = self.tool_spec
         parts = [
             "---",
             yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip() if _HAS_YAML else json.dumps(frontmatter, ensure_ascii=False),
@@ -413,6 +421,38 @@ class SkillEngine:
         self.active_skill: Optional[Skill] = None
         self.logger = logging.getLogger("SkillEngine")
         self.bank.load_all()
+        # 技能即工具: 绑定的全局 ToolRegistry + 已注册技能的 {技能名: 工具名}。
+        self._registry: Optional[Any] = None
+        self._tool_names: Dict[str, str] = {}
+
+    # ---- skill-as-tool ----
+
+    def bind_tool_registry(self, registry: "Any") -> None:
+        """绑定全局 ToolRegistry, 让声明了 tool_spec 的技能可注册为可调用工具."""
+        self._registry = registry
+
+    def register_as_tool(self, name: str) -> Tuple[bool, str]:
+        """把技能注册为可调用工具. 返回 (ok, message)."""
+        if self._registry is None:
+            return False, "tool registry not bound (call bind_tool_registry first)"
+        skill = self.bank.get(name)
+        if skill is None:
+            return False, f"skill '{name}' not found"
+        if not skill.tool_spec:
+            return False, f"skill '{name}' has no tool_spec"
+        if name in self._tool_names:
+            return True, f"skill '{name}' already registered as tool"
+        tool = SkillTool(skill, self.llm_call)
+        self._registry.register(tool)
+        self._tool_names[name] = tool.name
+        return True, f"registered skill '{name}' as tool '{tool.name}'"
+
+    def unregister_as_tool(self, name: str) -> Tuple[bool, str]:
+        """对称卸载技能对应的工具. 返回 (ok, message)."""
+        if self._registry is None or name not in self._tool_names:
+            return False, f"skill '{name}' not registered as a tool"
+        self._registry.unregister(self._tool_names.pop(name))
+        return True, f"unregistered skill '{name}'"
 
     # ---- runtime API ----
 
@@ -426,10 +466,17 @@ class SkillEngine:
             self.active_skill = skill
             skill.usage_count += 1
             self.bank.save(skill)
+            # 技能声明了 tool_spec 时, 激活即注册为可调用工具。
+            if skill.tool_spec and self._registry is not None:
+                ok, msg = self.register_as_tool(name)
+                if not ok:
+                    self.logger.warning(msg)
         return skill
 
     def unload(self):
         """Deactivate the current skill."""
+        if self.active_skill is not None:
+            self.unregister_as_tool(self.active_skill.name)
         self.active_skill = None
 
     def suggest(self, task: str, top_k: int = 3) -> List[Tuple[Skill, float]]:
@@ -621,3 +668,91 @@ def format_skills_for_prompt(skills: List[Skill], max_chars: int = 2000) -> str:
         lines.append(entry)
         total += len(entry) + 1
     return "\n".join(lines)
+
+
+# =============================================================================
+# 5. Skill-as-tool bridge
+# =============================================================================
+# 技能声明 tool_spec 后即可被注册为可调用工具 (load 时自动注册, unload 时卸载)。
+# 保持最小: 不做依赖检查、不做副作用追踪 —— 技能工具只是把 task 渲染进
+# prompt 模板并交给 LLM, 本身不触碰文件/网络, 无需额外治理。
+
+class SkillTool:
+    """把技能包装成 BaseTool 兼容对象 (鸭子类型, 避免循环导入).
+
+    执行时允许技能模板产出 <invoke> 工具调用: 解析 → 执行 → 结果喂回 LLM,
+    直到模型输出纯文本答案 (受 max_rounds 限制, 防止死循环)。
+    """
+
+    def __init__(self, skill: "Skill", llm_call: Callable[[str, float, int], str],
+                 tool_executor: Optional[Callable[[str, Dict[str, Any]], str]] = None):
+        self._skill = skill
+        self._llm_call = llm_call
+        self._tool_executor = tool_executor
+        spec = skill.tool_spec or {}
+        self.name = spec.get("name") or skill.name
+        self.description = spec.get("description") or skill.description
+        self.parameters = {
+            "task": {
+                "type": "string",
+                "description": f"任务描述, 交给技能 '{skill.name}' 处理",
+                "required": True,
+            }
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
+
+    def _run_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
+        """执行单个工具调用, 返回文本结果. 无 executor 时尝试从全局注册表执行."""
+        if self._tool_executor is not None:
+            raw = self._tool_executor(tool_name, args)
+            # 兼容 ToolResult / str 两种返回。
+            if hasattr(raw, "output"):
+                out = raw.output or ""
+                return out if getattr(raw, "success", True) else f"[tool error: {raw.error}]"
+            return str(raw)
+        from .tools import TOOLS_REGISTRY
+        tool = TOOLS_REGISTRY.get(tool_name)
+        if tool is None:
+            return f"[tool {tool_name} not found]"
+        try:
+            res = tool.execute(**args)
+            return str(res.output) if getattr(res, "success", True) else f"[tool error: {res.error}]"
+        except Exception as e:
+            return f"[tool exception: {e}]"
+
+    def execute(self, task: str = "", **kwargs: Any) -> "Any":
+        """渲染 prompt → 循环执行工具调用 → 返回最终文本."""
+        from .tools import ToolResult
+        from .policies import ToolCallParser
+
+        rendered = self._skill.render(task, context=kwargs.pop("_context", ""))
+        prompt = rendered
+        max_rounds = 3
+        for _ in range(max_rounds):
+            try:
+                raw = self._llm_call(prompt, 0.3, 2048)
+            except Exception as e:
+                return ToolResult(success=False, output="", error=f"skill execution failed: {e}")
+            raw = (raw or "").strip()
+            if not raw:
+                return ToolResult(success=False, output="", error="skill returned empty output")
+
+            calls = ToolCallParser.parse_all(raw)
+            if not calls:
+                return ToolResult(success=True, output=raw)
+
+            # 有工具调用: 依次执行, 把结果追加给 LLM 继续生成。
+            parts = [raw]
+            for tool_name, args in calls:
+                result_text = self._run_tool(tool_name, args)
+                parts.append(f"\n[{tool_name} result]:\n{result_text}")
+            parts.append("\n请基于上述工具结果, 给出最终答案。")
+            prompt = "\n".join(parts)
+
+        return ToolResult(success=True, output=raw)

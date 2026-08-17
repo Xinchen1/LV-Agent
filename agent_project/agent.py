@@ -40,6 +40,15 @@ except Exception:  # pragma: no cover - rich is in requirements-core but keep fa
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+# 全局禁用 transformers/sentence-transformers 权重加载进度条 (Loading weights ...),
+# 避免污染终端界面。放在所有模块加载前。
+try:
+    from transformers import logging as _tf_logging
+    _tf_logging.disable_progress_bar()
+except Exception:
+    pass
+
+
 class OpenMythosAgent:
     """
     深度思考Agent
@@ -387,6 +396,12 @@ class OpenMythosAgent:
                 embedding_model=self.config.memory.embedding_model,
                 llm_call=_skill_llm_call,
             )
+            # DSH: 绑定工具注册表, 让声明了 tool_spec 的技能可动态注册为可调用工具.
+            try:
+                from .tools import TOOLS_REGISTRY
+                self.skill_engine.bind_tool_registry(TOOLS_REGISTRY)
+            except Exception as _e:
+                self.logger.debug(f"skill tool registry bind failed: {_e}")
             _ready("skills", f"{len(self.skill_engine.list())} loaded")
         except Exception as e:
             _failed("skills", e)
@@ -796,6 +811,18 @@ class OpenMythosAgent:
                 self.logger.info(f"deep research referential: '{clean_task[:30]}' → topic '{prev_topic}'")
                 clean_task = f"深度研究 {prev_topic}"
 
+        # 对话上下文注入: 深度研究必须结合用户之前讨论的具体背景,
+        # 否则搜索和报告都是"孤立主题", 丢失延续性上下文。
+        _history_ctx = self._format_history_context(max_turns=6)
+
+        # 主题提炼: 当请求含糊(含"这些/文章/思路/讨论"等指代, 或历史推断出的主题仍笼统)时,
+        # 用一次 LLM 调用结合对话历史, 把模糊意图变成明确的研究主题。
+        # 这是"研究前先理解用户"的关键一步, 避免拿整句废话去搜索。
+        if _needs_history_topic or any(m in clean_task for m in ("文章", "思路", "这些", "那些", "上面", "刚才", "讨论")):
+            refined = self._refine_research_topic(clean_task, _history_ctx)
+            if refined:
+                self.logger.info(f"deep research refined topic: '{clean_task[:30]}' → '{refined}'")
+                clean_task = f"深度研究 {refined}"
         report_result = generate_research_report(
             clean_task,
             backend=self.backend,
@@ -803,6 +830,7 @@ class OpenMythosAgent:
             stream_callback=stream_callback,
             token_callback=token_callback,
             output_dir=_PROJECT_ROOT / "reports",
+            context=_history_ctx,
         )
         final_answer = report_result.get("final_answer", "")
         self.last_report_path = report_result.get("report_path")
@@ -919,6 +947,45 @@ class OpenMythosAgent:
             self.logger.debug(f"infer continuation topic failed: {e}")
             return None
 
+    def _refine_research_topic(self, task: str, history_ctx: str) -> Optional[str]:
+        """用 LLM 结合对话历史, 把含糊的研究请求提炼成明确主题.
+
+        适用场景: "以这些文章的思路去做深度研究" 等含糊请求.
+        一次轻量 LLM 调用; 提取输出末尾最具体的连续主题片段。
+        """
+        if not history_ctx:
+            return None
+        try:
+            prompt = (
+                "用户想做一个深度研究, 但表述含糊, 需要你结合对话上下文提炼出具体研究主题。\n\n"
+                "用户请求: {task}\n\n"
+                "对话上下文: {history}\n\n"
+                "请给出 1 个具体、可搜索的研究主题 (实体+方面, 40字以内)。\n"
+                "直接输出主题, 不要解释。"
+            ).format(task=task[:200], history=history_ctx[:2000])
+            raw = self.backend.generate(prompt, n_loops=1, temperature=0.3, max_tokens=120).strip()
+            import re as _re
+            # 取输出末尾最具体的连续中文/英文片段 (LLM 常把主题放在末尾)
+            cand = None
+            # 尝试 1: 提取"主题"后的内容
+            m = _re.search(r"(?:主题|theme|Topic)\s*[:：]?\s*([^。.!？?\n]{2,40})", raw, re.IGNORECASE)
+            if m:
+                cand = m.group(1).strip().strip(chr(34) + chr(39))
+            # 尝试 2: 取输出中第一个 >=5 字的中文连续串 (LLM 常把主题嵌在解释里)
+            m2 = _re.findall(r"[\u4e00-\u9fff]{5,}", raw)
+            for seg in m2:
+                seg = seg.strip()
+                if _re.search(r"深度研究|研究报告|这些文件|应该是|就是|说的是|关于", seg):
+                    continue
+                if 4 <= len(seg) <= 40:
+                    cand = seg
+                    break
+            if cand and 2 <= len(cand) <= 40:
+                return cand
+        except Exception as e:
+            self.logger.debug(f"refine research topic failed: {e}")
+        return None
+
     # ============ 快速路径 ============
 
     def _is_simple_query(self, task: str) -> bool:
@@ -950,7 +1017,14 @@ class OpenMythosAgent:
         # "给XX加功能""修改XX文件""在XX里加YY" 等必须真正改动文件, 不能 fast 单次回答
         _mod_verbs = ("加", "加上", "加入", "添加", "增加", "修改", "改", "更新", "优化",
                       "完善", "改进", "增强", "重构", "修复", "调整", "删除", "去除",
-                      "add", "modify", "update", "improve", "optimize", "refactor", "fix")
+                      "移动", "移", "移到", "移动到", "挪", "剪切", "搬到",
+                      "add", "modify", "update", "improve", "optimize", "refactor", "fix",
+                      "move", "mv", "relocate", "rename", "重命名")
+        # 移动/重命名类任务: 只要含移动词且提到文件/目录/到目标, 就绝不能 fast 单答
+        if any(v in task for v in ("移动", "移到", "移动到", "挪", "剪切", "搬到", "move", "mv", "relocate")) and any(
+            k in task for k in ("到", "文件夹", "目录", "文件", "进去", "放到", "放进", "移入", "移至", "目录", "folder", "dir", "path")
+        ):
+            return False
         if any(v in task for v in _mod_verbs) and any(
             k in task for k in ("功能", "特性", "文件", "代码", "程序", "脚本", "游戏", "项目", "音效",
                                 ".py", ".js", ".ts", ".md", ".txt", "snake", "贪吃", "贪食")
@@ -1004,6 +1078,19 @@ class OpenMythosAgent:
             'build', 'fetch', 'call', 'run', 'execute', 'list', 'show', 'display',
             'plan', 'evaluate', 'recommend', 'architecture', 'workflow', 'compare',
         ]
+        # 2.8) 纯知识问答豁免: "什么是X / X是什么 / 解释一下X概念" 等定义类问题
+        #     即使含 '解释/原理/算' 等深度关键词, 也不需要工具/多轮推理 —— 走 fast 单次回答。
+        #     但涉及 文件/代码/项目/报错 等需工具场景时排除, 避免误伤。
+        _qa_exclude = ('文件', '代码', '程序', '项目', '目录', '文件夹', '脚本',
+                       '.py', '.js', '.ts', '.md', 'bug', '报错', '错误',
+                       '库', '包', '函数', '接口', '报修')
+        if not any(e in task for e in _qa_exclude):
+            if (re.match(r"^什么(是|叫|叫做)\s*\S+", task, re.IGNORECASE)
+                    or re.match(r"^\S{1,20}?(是|叫|叫做)\s*什么\??$", task, re.IGNORECASE)
+                    or re.match(r"^(解释|解释一下|简单解释|用.*话解释|介绍一下|说说|聊聊|讲讲|给我解释)\s*[^，。！？]{1,25}?",
+                                task, re.IGNORECASE)):
+                return True
+
         if any(kw in task_lower for kw in deep_keywords):
             return False
 
@@ -1054,6 +1141,36 @@ class OpenMythosAgent:
                     fname = raw
             if fname:
                 return ("file_ops", {"action": "list", "path": fname}, 0.9, "detected folder-read intent")
+
+        # -0.34) 移动/剪切文件意图 → bash_exec mv (需要真正执行文件系统操作)
+        _move_verbs = ("移动到", "移到", "移动", "挪到", "挪", "剪切", "搬到", "移入", "移至", "move", "mv", "relocate")
+        if any(v in tl for v in _move_verbs):
+            # 提取源(用户提到的具体文件名/目录名)与目标
+            target = None
+            src_name = None
+            m = re.search(r"(?:到|移至|移入|放到|放进|移到)\s*([^，。！？\s]+)", t)
+            if m:
+                target = m.group(1).strip().strip(chr(34) + chr(39))
+            m2 = re.search(r"([\w\u4e00-\u9fff\-.]+\.(?:md|txt|py|js|ts|json|yaml|yml|csv|html|pdf))", t)
+            if m2:
+                src_name = m2.group(1)
+            if target:
+                cmd = f'mv "{src_name}" "{target}/" && echo moved' if src_name else f'mkdir -p "{target}" && echo ready'
+                return ("bash_exec", {"command": cmd}, 0.85, "detected move-file intent")
+
+        # -0.35) PDF 生成意图 → pdf_tool (优先于 file_ops, 因为用户明确要 PDF 文件)
+        if any(k in tl for k in ("pdf", "pdf文件", "转成pdf", "转pdf", "做成pdf", "输出pdf",
+                                 "pdf报告", "pdf版", "生成pdf", "导出pdf")):
+            pdf_content = t.strip()
+            # 提取输出路径(可选)
+            pdf_path = None
+            m = re.search(r"(?:到|存到|保存到|输出到)\s*([^，。！？\s]+?\.pdf)", tl)
+            if m:
+                pdf_path = m.group(1)
+            args = {"content": pdf_content}
+            if pdf_path:
+                args["path"] = pdf_path
+            return ("pdf_tool", args, 0.92, "detected pdf-generation intent")
 
         # -0.4) 保存/写入意图优先 → file_ops write(必须在"分析X文件夹"之前,
         #       否则"保存到 lv 文件夹"会被"分析"正则误判为 list)
@@ -1910,6 +2027,19 @@ class OpenMythosAgent:
 
         # 纯催促型延续(如"继续啊/接着做/go on"): 用户是要"继续执行上一个任务",
         # 不是"延续聊天"。此时把最近一次用户任务重新注入, 让 LLM 真正行动而非空回复。
+        # 确认/同意词(如"可以/好的/行/ok/要/当然/没问题") + 非延续: 用户是在同意
+        # 上一条 assistant 提议的下一步动作。此时把上一条用户任务重新注入,
+        # 让 LLM 真正执行, 而不是把"可以"当成一句孤立的简单回答。
+        _agree_only = re.fullmatch(
+            r"[！!。.？?\s]*?(可以|好的|好|行|要|要的|需要|当然|没问题|ok|okay|yes|对|嗯|嗯嗯|可以啊|好呀)[！!。.？?\s]*",
+            task.strip().lower(),
+        )
+        if _agree_only:
+            last_task = self._last_user_task()
+            if last_task:
+                is_continuation = False  # 走工具执行路径
+                task = f"继续执行上一条任务: {last_task}\n(用户已同意/确认, 若已完成则确认结果; 若未完成则现在真正执行并给出结果)"
+                self.logger.info(f"continuation agree -> re-execute last task: {last_task[:60]}")
         if is_continuation and self._is_pure_nudge(task):
             last_task = self._last_user_task()
             if last_task:
@@ -2171,6 +2301,16 @@ class OpenMythosAgent:
                         intent_args["path"] = resolved_folder
                     from .tools import ToolCall
                     action = ToolCall(tool_name="file_ops", arguments=intent_args)
+                elif tool_name == "pdf_tool":
+                    # PDF 生成意图: 直接把内容交给 pdf_tool, 产出真实 PDF 文件。
+                    from .tools import ToolCall
+                    pdf_args = dict(intent_args)
+                    pdf_args.setdefault("content", task)
+                    action = ToolCall(tool_name="pdf_tool", arguments=pdf_args)
+                elif tool_name == "bash_exec" and intent_args.get("command"):
+                    # 移动/剪切文件意图: 直接执行 mv 命令, 产出真实文件操作。
+                    from .tools import ToolCall
+                    action = ToolCall(tool_name="bash_exec", arguments=intent_args)
                 elif tool_name == "file_ops" and not intent_args.get("path") and any(
                     k in task for k in ("新建", "创建", "写一篇", "保存为", "输出到文件", "写个文件", "新建文件", "创建文件")
                 ):

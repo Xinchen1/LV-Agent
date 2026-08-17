@@ -269,22 +269,41 @@ class StrategyDatabase:
         return "\n".join(lines)
 
     def _save(self):
-        """保存到磁盘"""
-        import pickle
-        path = f"{self.storage_path}/strategies.pkl"
-        with open(path, 'wb') as f:
-            pickle.dump(self.strategies, f)
+        """保存到磁盘 (JSON, 版本迁移友好)."""
+        from pathlib import Path
+        path = Path(self.storage_path) / "strategies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {sid: asdict(s) for sid, s in self.strategies.items()}
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load(self):
-        """从磁盘加载"""
-        import pickle
+        """从磁盘加载 (JSON 优先, 兼容旧 pickle)."""
         from pathlib import Path
-        path = Path(f"{self.storage_path}/strategies.pkl")
+        path = Path(self.storage_path) / "strategies.json"
         if path.exists():
             try:
-                with open(path, 'rb') as f:
-                    self.strategies = pickle.load(f)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.strategies = {sid: Strategy(**s) for sid, s in data.items()}
                 print(_style(f"  strategies: {len(self.strategies)} loaded", "2"))
+                return
+            except Exception as e:
+                print(_style(f"  strategies: load failed ({e})", "2"))
+                self.strategies = {}
+                return
+        # 旧 pickle 文件兼容
+        legacy = Path(self.storage_path) / "strategies.pkl"
+        if legacy.exists():
+            try:
+                import pickle
+                with open(legacy, "rb") as f:
+                    self.strategies = pickle.load(f)
+                print(_style(f"  strategies: {len(self.strategies)} loaded (migrated)", "2"))
+                # 迁移后立即转存 JSON
+                try:
+                    self._save()
+                except Exception:
+                    pass
+                return
             except Exception as e:
                 print(_style(f"  strategies: load failed ({e})", "2"))
                 self.strategies = {}

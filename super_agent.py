@@ -201,7 +201,6 @@ class SuperAgentCLI:
         self.config = None
         self.agent = None
         self._tg_process = None
-        self.harness_mode = False
         self._running = False
         self._last_activity = time.time()
         self._watchdog_started = False
@@ -217,7 +216,7 @@ class SuperAgentCLI:
 
     _COMMANDS = [
         "/deep", "/research", "/model", "/config", "/theme", "/code", "/status",
-        "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/harness", "/mcp", "/tg",
+        "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/strategy", "/mcp", "/tg",
         "/learn", "/memskill", "/help", "/exit",
     ]
 
@@ -250,10 +249,7 @@ class SuperAgentCLI:
             pass
 
     def _select_runner(self):
-        """harness 开启时走事件溯源运行时，否则保持旧循环。"""
-        if getattr(self, 'harness_mode', False) and self.agent is not None:
-            from agent_project.harness.runner import make_legacy_runner
-            return make_legacy_runner(self.agent, self.config)
+        """选择任务执行入口 (legacy loop)."""
         return self.agent.run
 
     def load_config(self) -> bool:
@@ -1266,11 +1262,6 @@ class SuperAgentCLI:
             elif '@' in user_input:
                 user_input = self._expand_file_refs(user_input)
 
-            elif user_input.lower() == '/harness':
-                self.harness_mode = not self.harness_mode
-                state = "on (event-sourced runtime)" if self.harness_mode else "off (legacy loop)"
-                print(f" harness mode: {state}")
-                continue
 
             elif user_input.lower() in ('/model', '/switch-model'):
                 changed = self.choose_and_set_model()
@@ -1280,6 +1271,29 @@ class SuperAgentCLI:
                     print("\033[31mreload failed\033[0m\n")
                     continue
                 self.show_status()
+                continue
+
+            elif user_input.lower().startswith('/strategy'):
+                # 推理策略入口: /strategy tot|mcts|self_consistency|verify|cot|react|direct|super_agent|reset
+                parts = user_input.split(None, 1)
+                strategy = parts[1].strip() if len(parts) > 1 else ''
+                valid = {
+                    'tot': 'tot', 'mcts': 'mcts', 'self_consistency': 'self_consistency',
+                    'verify': 'verify', 'cot': 'cot', 'chain_of_thought': 'cot',
+                    'react': 'react', 'direct': 'zero_shot', 'super_agent': 'super_agent',
+                    'reset': 'reset', 'off': 'reset',
+                }
+                if strategy not in valid:
+                    print(f" usage: /strategy <{'|'.join(sorted(set(valid.values())))}>")
+                    print(" 当前策略:", self.agent._strategy_override or "(自适应)")
+                    continue
+                sel = valid[strategy]
+                if sel == 'reset':
+                    self.agent._strategy_override = None
+                    print(" strategy reset -> 自适应 (SUPER_AGENT)")
+                else:
+                    self.agent._strategy_override = sel
+                    print(f" strategy -> {sel}")
                 continue
 
             elif user_input.lower() == '/config':
@@ -1340,22 +1354,28 @@ class SuperAgentCLI:
                 continue
 
             elif user_input.lower() == '/sessions':
-                # 设计方案: 会话选择器 - 显示最近会话文件
-                import glob as _g
-                sess_dir = Path(__file__).parent / "data" / "harness_sessions"
-                sessions = sorted(_g.glob(str(sess_dir / "*.jsonl")))[-10:] if sess_dir.exists() else []
-                if not sessions:
+                # 会话选择器: 从 legacy sessions.db 读取最近会话
+                import sqlite3
+                db_path = Path(__file__).parent / "data" / "sessions.db"
+                if not db_path.exists():
                     print(" 暂无持久化会话")
                 else:
-                    print(f" {len(sessions)} 个历史会话:")
-                    for s in sessions[-8:]:
-                        import datetime as _dt
-                        try:
-                            ts = float(Path(s).stem.split('-')[0]) / 1000
-                            when = _dt.datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')
-                        except Exception:
-                            when = "?"
-                        print(f"  · {_style(Path(s).name[:40], '188')} {_style(when, '2')}")
+                    try:
+                        with sqlite3.connect(str(db_path)) as conn:
+                            rows = conn.execute(
+                                "SELECT session_id, MAX(created_at), COUNT(*) FROM turns "
+                                "GROUP BY session_id ORDER BY MAX(created_at) DESC LIMIT 10"
+                            ).fetchall()
+                        if not rows:
+                            print(" 暂无持久化会话")
+                        else:
+                            print(f" {len(rows)} 个历史会话:")
+                            for sid, created, count in rows:
+                                ts = created or "?"
+                                preview = f"{sid[:24]}" if sid else "?"
+                                print(f"  · {_style(preview, '188')} {_style(str(count) + ' turns', '2')} {_style(str(ts)[:16], '2')}")
+                    except Exception as e:
+                        print(f" 读取会话失败: {e}")
                 continue
 
             elif user_input.lower() == '/dashboard':
