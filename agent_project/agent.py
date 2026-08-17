@@ -4519,7 +4519,28 @@ class OpenMythosAgent:
                 admission = self._harness_kernel.evaluate(
                     make_effect(tool_call.tool_name, args)
                 )
-                if admission.decision is not Decision.ALLOW:
+                decision = admission.decision
+                if decision is Decision.ASK:
+                    # ASK: 弹确认框, 用户同意才放行; 非交互环境回退为拒绝。
+                    granted = False
+                    try:
+                        import sys as _sys
+                        if _sys.stdin and _sys.stdin.isatty():
+                            granted = self._harness_kernel.ask(make_effect(tool_call.tool_name, args), admission.reason)
+                    except Exception as e:
+                        self.logger.warning(f"harness ask failed: {e}")
+                    if granted:
+                        try:
+                            self._harness_kernel.allowlist_add(make_effect(tool_call.tool_name, args))
+                        except Exception:
+                            pass
+                    else:
+                        self.logger.warning(f"harness denied {tool_call.tool_name}: {admission.reason}")
+                        return ToolResult(
+                            success=False, output="",
+                            error=f"Denied by harness policy: {admission.reason}"
+                        )
+                elif decision is not Decision.ALLOW:
                     self.logger.warning(
                         f"harness denied {tool_call.tool_name}: {admission.reason}"
                     )
