@@ -184,6 +184,7 @@ def register_builtin_tools() -> None:
     from .project_context import ProjectContextTool  # noqa: F401
     from .weather import WeatherTool  # noqa: F401
     from .web_fetcher import ReadWebTool  # noqa: F401
+    from .pdf_tool import PdfTool  # noqa: F401
 
     _defaults = [
         WebSearchTool(),
@@ -201,6 +202,7 @@ def register_builtin_tools() -> None:
         WeatherTool(),
         GitHubSearchTool(),
         ReadWebTool(),
+        PdfTool(),
     ]
     for t in _defaults:
         if t.name not in TOOLS_REGISTRY._tools:

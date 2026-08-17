@@ -81,6 +81,33 @@ Do NOT just summarize. Identify CAUSES and SOLUTIONS."""
         from pathlib import Path
         Path(self.reflections_path).mkdir(parents=True, exist_ok=True)
 
+    BATCH_REFLECTION_TEMPLATE = """You are a meta-cognitive analyzer. Review {n} agent executions critically.
+
+{episodes}
+
+For EACH episode above, analyze (in the same order):
+1. THINKING QUALITY: Was the loop depth adequate? Too shallow? Overthinking?
+2. TOOL SELECTION: Right tools used? Any wrong, missing, or redundant calls?
+3. ERROR PATTERNS: If failed, what went wrong? Premature action? Parsing? Tool misuse?
+4. EFFICIENCY: Could fewer loops achieve the same? Wasted iterations?
+5. STRATEGY: What general principle can be extracted for similar future tasks?
+
+{history_note}Return a JSON ARRAY with exactly {n} objects, one per episode, each in this EXACT format:
+[
+  {{
+    "quality_score": <integer 1-10>,
+    "loop_depth_adequate": <boolean>,
+    "tool_choice_critique": "<specific critique>",
+    "identified_patterns": ["p1", "p2"],
+    "improvement_suggestions": [{{"suggestion": "...", "reasoning": "...", "priority": "high"}}],
+    "generalized_rule": "<concise rule for future similar tasks>",
+    "failure_mode": "<reasoning_error|tool_error|parsing_error|insufficient_loops|other>",
+    "confidence_in_reflection": <float 0-1>
+  }},
+  ...
+]
+Focus on EXTRACTABLE KNOWLEDGE that improves future performance. Identify CAUSES and SOLUTIONS, not summaries."""
+
     def reflect(self, episode: Experience) -> Reflection:
         """对单个episode进行深度反思"""
 
@@ -225,23 +252,108 @@ Do NOT just summarize. Identify CAUSES and SOLUTIONS."""
         with open(filename, 'w') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-    def batch_reflect(self, episodes: List[Experience]) -> List[Reflection]:
-        """批量反思"""
+    def batch_reflect(self, episodes: List[Experience], group_size: int = 3) -> List[Reflection]:
+        """批量反思: 每组合并为一次 LLM 调用 (省 token/时间), 并注入历史 lessons 提供参照."""
         reflections = []
-        for ep in episodes:
+        # 每组最多 group_size 个 episode, 保持单案例分析质量同时减少 LLM 调用次数。
+        for i in range(0, len(episodes), group_size):
+            group = episodes[i:i + group_size]
             try:
-                ref = self.reflect(ep)
-                reflections.append(ref)
+                refs = self._reflect_group(group)
+                reflections.extend(refs)
             except Exception as e:
-                print(f"Reflection failed for {ep.id}: {e}")
-                # 添加一个默认的失败反思
-                reflections.append(Reflection(
-                    quality_score=0,
-                    loop_depth_adequate=False,
-                    tool_choice_critique=f"Reflection error: {e}",
-                    identified_patterns=[],
-                    improvement_suggestions=[],
-                    generalized_rule="",
-                    raw_output=""
-                ))
+                print(f"Reflection group failed: {e}")
+                for ep in group:
+                    reflections.append(self._fallback_reflection(ep, f"Reflection error: {e}"))
         return reflections
+
+    def _reflect_group(self, episodes: List[Experience]) -> List[Reflection]:
+        """对一组 episode 执行一次批量反思 LLM 调用."""
+        # 组装每组文本
+        parts = []
+        for idx, ep in enumerate(episodes, start=1):
+            trace = self._format_trace(ep)
+            parts.append(
+                f"EPISODE {idx}\n"
+                f"TASK: {ep.task}\n"
+                f"EXECUTION TRACE:\n{trace}\n"
+                f"RESULT: {ep.trajectory.get('final_reward', 'N/A')}\n"
+                f"SUCCESS: {ep.trajectory.get('success', False)}\n"
+            )
+        episodes_text = "\n\n".join(parts)
+
+        # 注入历史 lessons: 让反思基于已有经验, 而不是从零开始。
+        history_note = ""
+        try:
+            lessons = self.agent.experience_buffer.get_lessons(episodes[0].task, k=3) if self.agent.experience_buffer else []
+            if lessons:
+                lesson_lines = [f"- {l.condition}: {l.action}" for l in lessons]
+                history_note = "PREVIOUS LESSONS (from past reflections):\n" + "\n".join(lesson_lines) + "\n\n"
+        except Exception:
+            history_note = ""
+
+        prompt = self.BATCH_REFLECTION_TEMPLATE.format(
+            n=len(episodes),
+            episodes=episodes_text,
+            history_note=history_note,
+        )
+        try:
+            raw = self.agent.backend.generate(
+                prompt, n_loops=3, temperature=0.3, max_tokens=2048
+            )
+        except Exception as e:
+            raise RuntimeError(f"batch reflection LLM failed: {e}")
+
+        text = raw if isinstance(raw, str) else self.agent.tokenizer.decode(raw)
+        return self._parse_batch_reflections(text, episodes)
+
+    def _parse_batch_reflections(self, text: str, episodes: List[Experience]) -> List[Reflection]:
+        """解析批量反思输出: 期望 JSON 数组; 失败时回退逐个解析或默认."""
+        import json
+        try:
+            start = text.find('[')
+            end = text.rfind(']') + 1
+            if start != -1 and end > start:
+                data = json.loads(text[start:end])
+                if isinstance(data, list) and data:
+                    refs = []
+                    for item, ep in zip(data, episodes):
+                        if not isinstance(item, dict):
+                            refs.append(self._fallback_reflection(ep, "non-dict batch item"))
+                            continue
+                        refs.append(self._build_reflection(item, ep, text))
+                    # 若数组比 episode 少, 补齐
+                    while len(refs) < len(episodes):
+                        refs.append(self._fallback_reflection(episodes[len(refs)], "missing in batch"))
+                    return refs
+        except Exception:
+            pass
+        # 回退: 逐个用单案例 reflect (代价高但保底)
+        return [self.reflect(ep) for ep in episodes]
+
+    def _build_reflection(self, data: Dict[str, Any], ep: Experience, raw_text: str) -> Reflection:
+        """从解析后的 dict 构造 Reflection."""
+        reflection = Reflection(
+            quality_score=data.get('quality_score', 5),
+            loop_depth_adequate=data.get('loop_depth_adequate', False),
+            tool_choice_critique=data.get('tool_choice_critique', ''),
+            identified_patterns=data.get('identified_patterns', []),
+            improvement_suggestions=data.get('improvement_suggestions', []),
+            generalized_rule=data.get('generalized_rule', ''),
+            raw_output=raw_text
+        )
+        if self.config.reflection.save_reflections:
+            self._save_reflection(ep.id, reflection)
+        return reflection
+
+    def _fallback_reflection(self, ep: Experience, reason: str) -> Reflection:
+        """解析/调用失败时的默认反思."""
+        return Reflection(
+            quality_score=0,
+            loop_depth_adequate=False,
+            tool_choice_critique=reason,
+            identified_patterns=[],
+            improvement_suggestions=[],
+            generalized_rule="",
+            raw_output=""
+        )

@@ -144,16 +144,11 @@ class PlanningConfig(BaseModel):
     default_strategy: str = "adaptive"
     optimize_plans: bool = True
     max_subtasks: int = 10
-    mcts_iterations: int = 100
-    mcts_max_depth: int = 20
-    mcts_exploration: float = 1.41
 
 
 class ReasoningConfig(BaseModel):
     enabled: bool = True
     default_strategy: str = "react"
-    multi_strategy_voting: bool = False
-    strategies_to_try: List[str] = Field(default_factory=lambda: ["react", "chain_of_thought"])
     loop_controller_min_loops: int = 2
     loop_controller_max_loops: int = 16
     loop_controller_default_loops: int = 2
@@ -201,7 +196,7 @@ class HealthConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     use_legacy: bool = False  # fallback to old _run_traditional implementation
-    default_strategy: str = "react"  # react | super_agent | chain_of_thought | verification | direct
+    default_strategy: str = "react"  # react | cot | super_agent | verify | direct | tot | mcts | self_consistency
 
 
 class ResearchConfig(BaseModel):
@@ -215,7 +210,6 @@ class ResearchConfig(BaseModel):
     max_urls_to_fetch: int = 50                 # webpage bodies to fetch
     max_sources_for_report: int = 50            # sources fed into final report
     # Reasoning depth
-    thinking_strategy: str = "super_agent"      # react | chain_of_thought | super_agent | verification
     max_thinking_steps: int = 32                # ExecutionEngine max steps
     verification_rounds: int = 2                # verification passes on final report
     report_max_tokens: int = 8192               # report generation token budget

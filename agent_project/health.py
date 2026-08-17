@@ -85,6 +85,10 @@ class ModuleHealthChecker:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _vector_deps(self) -> "tuple[bool, bool]":
+        """向量检索依赖可用性 (chromadb + sentence-transformers). 供多个模块复用."""
+        return self._importable("chromadb"), self._importable("sentence_transformers")
+
     @staticmethod
     def _importable(module_name: str) -> bool:
         try:
@@ -102,8 +106,7 @@ class ModuleHealthChecker:
     def _check_experience(self) -> ModuleHealth:
         if not (self._enabled("memory") or self._enabled("reflection")):
             return ModuleHealth("experience", ModuleStatus.DISABLED)
-        has_chroma = self._importable("chromadb")
-        has_st = self._importable("sentence_transformers")
+        has_chroma, has_st = self._vector_deps()
         if has_chroma and has_st:
             return ModuleHealth("experience", ModuleStatus.READY, dependency="chromadb, sentence-transformers")
         return ModuleHealth(
@@ -151,8 +154,7 @@ class ModuleHealthChecker:
     def _check_memory(self) -> ModuleHealth:
         if not self._enabled("memory"):
             return ModuleHealth("memory", ModuleStatus.DISABLED)
-        has_chroma = self._importable("chromadb")
-        has_st = self._importable("sentence_transformers")
+        has_chroma, has_st = self._vector_deps()
         try:
             from .memory import create_memory_manager
             from .wiki_memory import LLMWikiManager

@@ -246,9 +246,8 @@ class ExperienceBuffer:
         """获取最近的N个episodes"""
         if self._mode == "vector":
             results = self.collection.get(
-                limit=n,
+                limit=max(n * 4, 100),
                 include=["documents", "metadatas"],
-                sort=[{"timestamp": "desc"}] if hasattr(self.collection, 'sort') else None
             )
 
             experiences = []
@@ -259,6 +258,8 @@ class ExperienceBuffer:
                 exp = Experience(**exp_data)
                 experiences.append(exp)
 
+            # chromadb get() 无 sort 参数: Python 侧按时间倒序
+            experiences.sort(key=lambda e: e.timestamp, reverse=True)
             return experiences[:n]
         else:
             # 内存模式：从缓存或内存列表获取
@@ -335,11 +336,11 @@ class ExperienceBuffer:
             if self.collection.count() > self.config.max_episodes:
                 to_delete = int(self.config.max_episodes * 0.1)
                 results = self.collection.get(
-                    limit=to_delete,
-                    sort=[{"timestamp": "asc"}],
+                    limit=to_delete * 4,
                     include=["metadatas"]
                 )
-                ids_to_delete = [meta.get('id') for meta in results['metadatas'] if 'id' in meta]
+                metas = sorted(results['metadatas'], key=lambda m: m.get('timestamp', ''))
+                ids_to_delete = [meta.get('id') for meta in metas[:to_delete] if 'id' in meta]
                 if ids_to_delete:
                     self.collection.delete(ids=ids_to_delete)
         elif self._mode == "memory" and self.config.max_episodes:
