@@ -298,6 +298,8 @@ class ResearchReportGenerator:
             from .config import ResearchConfig
             self.cfg = ResearchConfig()
         self.output_dir = output_dir or (Path.home() / "OpenMythos" / "reports")
+        # 对话上下文: 深度研究需结合用户之前的讨论背景, 而不是孤立搜索孤立主题。
+        self._context: str = ""
         self.web_search_tool = TOOLS_REGISTRY.get("web_search")
 
     def run(
@@ -305,7 +307,9 @@ class ResearchReportGenerator:
         task: str,
         stream_callback: Optional[Callable[[str, str], None]] = None,
         token_callback: Optional[Callable[[int], None]] = None,
+        context: str = "",
     ) -> Dict[str, Any]:
+        self._context = (context or "").strip()
         topic = extract_research_topic(task)
         if not topic:
             return {
@@ -506,10 +510,16 @@ class ResearchReportGenerator:
     def _generate_query_variants(self, topic: str, orig_keywords: str) -> List[str]:
         """Ask the LLM for complementary search queries."""
         today = datetime.now().strftime("%Y-%m-%d")
+        _ctx_note = ""
+        if self._context:
+            _ctx_note = f"""
+User conversation background (research must align with this context):
+{self._context[:800]}
+"""
         prompt = f"""You are a research assistant. Given the topic below, generate 6 to 10 diverse Chinese web-search queries that together cover definitions, market status, key products/players, technology, trends, risks, and recent news.
 
 Today is {today}. Use the CURRENT year ({datetime.now().year}) for any time-sensitive queries (e.g. "2026 最新进展"). Do NOT use 2025/2024 unless the user explicitly asks for that year.
-
+{_ctx_note}
 Topic: {topic}
 Core keywords to preserve: {orig_keywords or topic}
 
@@ -554,9 +564,12 @@ Rules:
             snippet = (s.get("snippet") or "").strip()
             score = EvidenceLedger.score_of(s)
             block.append(f"[{i}] {title} (质量{score:.2f}): {snippet[:160]}")
+        _ctx_note = ""
+        if self._context:
+            _ctx_note = f"\n\n对话背景(缺口判断需贴合这些关注点):\n{self._context[:600]}"
         prompt = (
             f"你是研究分析师。基于以下已收集证据, 写一段 150 字以内的当前已知要点总结, "
-            f"并用一句话指出最缺证据或最矛盾的方向。\n\n主题: {topic}\n\n证据:\n"
+            f"并用一句话指出最缺证据或最矛盾的方向。\n\n主题: {topic}{_ctx_note}\n\n证据:\n"
             + "\n".join(block)
             + "\n\n输出格式:\n已知要点: <两三点>\n证据缺口: <一句>\n"
         )
@@ -907,10 +920,17 @@ Rules:
                 "- 关键事实/数字末尾标注引用源编号, 如 [1][2]; 编号必须对应 ## 参考来源 的条目。\n"
             )
 
+        _ctx_note = ""
+        if self._context:
+            _ctx_note = f"""
+## 对话背景 (报告需呼应这些上下文, 聚焦用户真正关心的点)
+{self._context[:1200]}
+"""
         prompt = f"""你是资深研究分析师。请基于以下证据撰写一份完整、专业、信息丰富的中文 Markdown 深度调研报告。
 
 主题: {topic}
 研究日期: {today}
+{_ctx_note}
 
 先在 <think>...</think> 内思考: 各来源可信度、观点冲突、证据缺口、报告结构。然后输出报告。
 
@@ -1291,7 +1311,11 @@ def generate_research_report(
     stream_callback: Optional[Callable[[str, str], None]] = None,
     token_callback: Optional[Callable[[int], None]] = None,
     output_dir: Optional[Path] = None,
+    context: str = "",
 ) -> Dict[str, Any]:
-    """Generate a research report for the given task and return result dict."""
+    """Generate a research report for the given task and return result dict.
+
+    context: 可选对话背景, 让研究结合用户之前的讨论, 而非孤立搜索孤主题.
+    """
     generator = ResearchReportGenerator(backend, config=config, output_dir=output_dir)
-    return generator.run(task, stream_callback=stream_callback, token_callback=token_callback)
+    return generator.run(task, stream_callback=stream_callback, token_callback=token_callback, context=context)

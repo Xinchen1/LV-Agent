@@ -278,7 +278,6 @@ class OpenMythosBackend:
 
         # 加载权重（如果有）
         if model_path:
-            print(f"  Loading weights from {model_path}")
             import torch
             state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
             self.model.load_state_dict(state_dict, strict=False)
@@ -292,7 +291,6 @@ class OpenMythosBackend:
             print(_style("  MythosTokenizer not available, using fallback", "2"))
             self.tokenizer = self._create_simple_tokenizer()
 
-        print(f"  model loaded: {sum(p.numel() for p in self.model.parameters()):,} parameters")
 
     def _create_simple_tokenizer(self):
         """简单tokenizer回退"""

@@ -116,6 +116,15 @@ class McpAutoConfigurator:
             "args": ["-y", "@modelcontextprotocol/server-google-maps"],
             "env": {"GOOGLE_MAPS_API_KEY": ""},
         },
+        # Google 搜索 MCP: 需要 GOOGLE_API_KEY (Google Custom Search JSON API)。
+        # 注意: 普通 web_search 工具已内置多 provider 免费搜索, 大多数场景无需此 MCP。
+        "google-search": {
+            "keywords": ["google search", "google搜索", "谷歌搜索", "google", "谷歌"],
+            "runtime": "npx",
+            "command": "npx",
+            "args": ["-y", "@adenot/mcp-google-search"],
+            "env": {"GOOGLE_API_KEY": ""},
+        },
     }
 
     TOKEN_PATTERNS = {

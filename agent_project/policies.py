@@ -238,6 +238,59 @@ class ToolCallParser:
                 else:
                     add_call(tool_name, args)
 
+        # Format 4b: <invoke name="tool">... </invoke> (模型在技能工具里常用这种格式)
+        for match in re.finditer(
+            r"<invoke\s+name=([\"\']?[^>\s]+)[\"\']?[^>]*>(.*?)</invoke>",
+            text, re.DOTALL | re.IGNORECASE,
+        ):
+            tool_name = match.group(1).strip().strip('"\'')
+            inner = strip_tool_markers(match.group(2)).strip()
+            args = {}
+            # 参数可能以 <parameter name=... string=...>...</parameter> 形式 (支持附加属性)
+            for param_match in re.finditer(
+                r"<parameter\s+name=([\"\']?[^>\s]+)[\"\']?[^>]*>(.*?)</parameter>",
+                inner, re.DOTALL | re.IGNORECASE,
+            ):
+                args[param_match.group(1).strip().strip('"\'')] = param_match.group(2).strip()
+            if not args:
+                # 尝试直接解析 JSON 参数块
+                try:
+                    parsed = json.loads(inner)
+                    if isinstance(parsed, dict):
+                        args = cls._sanitize_parsed_args(parsed)
+                except Exception:
+                    args = cls._parse_args(inner)
+            if tool_name.lower() == "python_exec":
+                add_call(tool_name, cls._extract_python_exec_code(str(args.get("code", ""))))
+            else:
+                add_call(tool_name, args)
+
+        # Format 4c: DeepSeek DSML 文本协议 (<||DSML||tool_calls> ... </||DSML||tool_calls>)
+        # 注意: 模型用全角竖线 U+FF5C, 且标记为 <｜｜DSML｜｜...> (开头两个竖线)。
+        _bar = "\uff5c"
+        _d = f"{_bar}{_bar}DSML{_bar}{_bar}"
+        _dsml_open = f"<{_d}tool_calls>"
+        _dsml_close = f"</{_d}tool_calls>"
+        if _dsml_open in text:
+            for segment in text.split(_dsml_open)[1:]:
+                seg = segment.split(_dsml_close, 1)[0] if _dsml_close in segment else segment
+                for invoke_m in re.finditer(
+                    f"<{_d}invoke name=([^>]+)>",
+                    seg, re.DOTALL | re.IGNORECASE,
+                ):
+                    tool_name = invoke_m.group(1).strip().strip('"\'')
+                    next_i = seg.find(f"<{_d}invoke", invoke_m.end())
+                    body = seg[invoke_m.end():next_i if next_i >= 0 else len(seg)]
+                    args = {}
+                    for pm in re.finditer(
+                        f"<{_d}parameter name=([^>]+)>(.*?)</{_d}parameter>",
+                        body, re.DOTALL | re.IGNORECASE,
+                    ):
+                        key = pm.group(1).strip().split()[0].strip('"\'') if pm.group(1).strip() else ""
+                        if key:
+                            args[key] = pm.group(2).strip()
+                    add_call(tool_name, args)
+
         # Format 5: JSON {"action": [...]}
         first_brace = text.find("{")
         if first_brace >= 0:

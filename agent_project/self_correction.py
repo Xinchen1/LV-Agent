@@ -142,21 +142,36 @@ class QualityEvaluator:
         )
 
     def _estimate_confidence(self, trace: Any) -> float:
-        """Estimate confidence from trace characteristics"""
-        if trace is None or not hasattr(trace, 'steps') or not trace.steps:
+        """基于真实执行信号估计置信度 (不再使用默认 0.8 的假值).
+
+        真实信号优先级:
+        1. trace.quality_score (由真实质量评估产出, 0-1)
+        2. trace.success (成功/失败直接校准)
+        3. 无信号时中性 0.5, 不虚高。
+        """
+        if trace is None:
             return 0.5
 
-        # Average step confidence
-        avg_step_conf = mean(getattr(s, 'confidence', 0.8) for s in trace.steps)
+        qs = getattr(trace, 'quality_score', 0.0) or 0.0
+        success = getattr(trace, 'success', False)
+        steps = getattr(trace, 'steps', None) or []
 
-        # Length factor (shorter = more confident, up to point)
-        length_factor = 1.0
-        if len(trace.steps) > 15:
-            length_factor = 0.8
-        elif len(trace.steps) < 3:
-            length_factor = 1.0
+        # 质量分是最强信号 (已含对成功/连贯/效率的评估)
+        if qs > 0:
+            base = qs
+        elif success:
+            base = 0.8
+        else:
+            base = 0.3
 
-        return min(avg_step_conf * length_factor, 1.0)
+        # 长度因素: 超长链路的自信度应下调 (容易发散)
+        if len(steps) > 15:
+            base *= 0.85
+        elif not steps:
+            # 没有任何执行步骤却成功 → 可能是直接回答, 中性偏低
+            base *= 0.9
+
+        return max(0.0, min(base, 1.0))
 
     def _assess_coherence(self, trace: Any) -> float:
         """Assess logical coherence of reasoning"""
