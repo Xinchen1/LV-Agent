@@ -39,9 +39,18 @@ env/
 # Project secrets (NEVER commit API keys)
 config.yaml
 config.local.yaml
+
+# User data and secrets
 .env
+.env.*
+!.env.example
 *.key
 *.pem
+
+# Personal files — NEVER commit
+assets/portrait*.png
+frontend-design-proposal/
+*.pdf
 
 # Runtime data and logs
 data/
