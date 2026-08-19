@@ -68,7 +68,7 @@ LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循
 ### 1. Install
 
 ```bash
-git clone https://github.com/Xinchen1/LV-Agent.git
+git clone https://github.com/<your-username>/LV-Agent.git
 cd LV-Agent
 python -m venv .venv
 source .venv/bin/activate    # macOS/Linux
