@@ -215,7 +215,7 @@ class SuperAgentCLI:
         self._setup_command_completion()
 
     _COMMANDS = [
-        "/deep", "/research", "/model", "/config", "/theme", "/code", "/status",
+        "/deep", "/research", "/model", "/models", "/config", "/theme", "/code", "/status",
         "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/strategy", "/mcp", "/tg",
         "/learn", "/memskill", "/help", "/exit",
     ]
@@ -1263,7 +1263,7 @@ class SuperAgentCLI:
                 user_input = self._expand_file_refs(user_input)
 
 
-            elif user_input.lower() in ('/model', '/switch-model'):
+            elif user_input.lower() in ('/model', '/models', '/switch-model'):
                 changed = self.choose_and_set_model()
                 if changed:
                     print(" \033[2mreloading...\033[0m\n")
@@ -1718,13 +1718,14 @@ class SuperAgentCLI:
         print(f"\ncurrent backend: \033[34m{current_backend}\033[0m")
         print(" [1] Anthropic")
         print(" [2] OpenAI API")
-        print(" [3] OpenRouter")
-        print(" [4] Local endpoint")
-        print(" [5] DeepSeek")
-        print(" [6] Cancel")
+        print(" [3] DeepSeek")
+        print(" [4] OpenRouter")
+        print(" [5] Local endpoint")
+        print(" [6] NVIDIA NIM (英伟达)")
+        print(" [7] Cancel")
 
-        choice = Prompt.ask("choice", choices=["1", "2", "3", "4", "5", "6"], default="1")
-        if choice == "6":
+        choice = Prompt.ask("choice", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
+        if choice == "7":
             print("cancelled.")
             return False
 
@@ -1733,17 +1734,62 @@ class SuperAgentCLI:
         elif choice == "2":
             self._configure_openai_direct(cfg)
         elif choice == "3":
-            self._configure_openrouter(cfg)
-        elif choice == "4":
-            self._configure_local_endpoint(cfg)
-        elif choice == "5":
             self._configure_deepseek(cfg)
+        elif choice == "4":
+            self._configure_openrouter(cfg)
+        elif choice == "5":
+            self._configure_local_endpoint(cfg)
+        elif choice == "6":
+            self._configure_nvidia(cfg)
 
         with open(self.config_path, 'w') as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
         print("\033[32mconfig updated\033[0m")
         return True
+
+    def _configure_nvidia(self, cfg):
+        import yaml
+        print("\n\033[1mNVIDIA NIM\033[0m\n")
+        api_key = Prompt.ask("API Key (nvapi-...)").strip()
+        if not api_key:
+            print(" \033[31mAPI key required\033[0m")
+            return
+
+        print(" 1) stepfun-ai/step-3.7-flash  (当前推荐)")
+        print(" 2) meta/llama-3.1-405b-instruct")
+        print(" 3) deepseek-ai/deepseek-r1")
+        print(" 4) custom...")
+        model_choice = Prompt.ask("select", choices=["1", "2", "3", "4"], default="1")
+
+        models = {
+            "1": "stepfun-ai/step-3.7-flash",
+            "2": "meta/llama-3.1-405b-instruct",
+            "3": "deepseek-ai/deepseek-r1",
+        }
+
+        if model_choice in models:
+            model = models[model_choice]
+        else:
+            model = Prompt.ask("model name (e.g. nvidia/llama-3.1-nemotron-70b-instruct)").strip()
+
+        temp = Prompt.ask("temperature", default="0.7").strip()
+        try:
+            temp = float(temp)
+        except ValueError:
+            temp = 0.7
+
+        cfg.setdefault('agent', {})
+        cfg['agent']['backend'] = 'openai'
+        cfg['agent']['openai'] = {
+            'api_key': api_key,
+            'base_url': 'https://integrate.api.nvidia.com/v1',
+            'model': model,
+            'temperature': temp,
+            'top_p': 0.95,
+            'max_tokens': 16384,
+            'timeout': 120
+        }
 
     def _configure_anthropic(self, cfg):
         import yaml

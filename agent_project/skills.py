@@ -38,12 +38,6 @@ try:
 except Exception:
     _HAS_YAML = False
 
-try:
-    from sentence_transformers import SentenceTransformer
-    _HAS_SENTENCE_TRANSFORMERS = True
-except Exception:
-    _HAS_SENTENCE_TRANSFORMERS = False
-
 logger = logging.getLogger("skill_engine")
 
 
@@ -220,19 +214,11 @@ class SkillBank:
     def __init__(
         self,
         skills_dir: str = "./data/skills",
-        embedding_model: str = "all-MiniLM-L6-v2",
     ):
         self.skills_dir = Path(skills_dir)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        self.embedding_model_name = embedding_model
         self._skills: Dict[str, Skill] = {}
         self._lock = threading.RLock()
-        self._embedding_model: Optional[Any] = None
-        if _HAS_SENTENCE_TRANSFORMERS:
-            try:
-                self._embedding_model = SentenceTransformer(embedding_model)
-            except Exception as e:
-                logger.warning(f"SkillBank embedding model unavailable: {e}")
 
     def _ensure_builtins(self):
         """Write built-in skills to disk if they do not exist."""
@@ -302,13 +288,6 @@ class SkillBank:
         except Exception as e:
             logger.warning(f"Invalid skill {path}: {e}")
             return None
-
-        # Compute embedding if model is ready.
-        if self._embedding_model is not None:
-            try:
-                skill.embedding = self._embedding_model.encode(skill.embedding_text()).tolist()
-            except Exception as e:
-                logger.debug(f"skill embedding failed: {e}")
         return skill
 
     @staticmethod
@@ -360,13 +339,12 @@ class SkillBank:
             return False
 
     def search(self, query: str, top_k: int = 3) -> List[Tuple[Skill, float]]:
-        """Keyword + semantic search over skills."""
+        """Keyword search over skills."""
         query_lower = query.lower()
         scored: List[Tuple[Skill, float]] = []
         with self._lock:
             skills = list(self._skills.values())
 
-        # Keyword score
         for skill in skills:
             score = 0.0
             texts = [
@@ -381,18 +359,6 @@ class SkillBank:
             if score:
                 scored.append((skill, score))
 
-        # Semantic score
-        if self._embedding_model is not None and query.strip():
-            try:
-                q_emb = self._embedding_model.encode(query).tolist()
-                for skill in skills:
-                    if skill.embedding:
-                        sim = _cosine_similarity(q_emb, skill.embedding)
-                        scored.append((skill, sim))
-            except Exception as e:
-                logger.debug(f"semantic skill search failed: {e}")
-
-        # Merge and rank
         merged: Dict[str, Tuple[Skill, float]] = {}
         for skill, score in scored:
             if skill.name in merged:
@@ -413,10 +379,9 @@ class SkillEngine:
     def __init__(
         self,
         skills_dir: str = "./data/skills",
-        embedding_model: str = "all-MiniLM-L6-v2",
         llm_call: Optional[Callable[[str, float, int], str]] = None,
     ):
-        self.bank = SkillBank(skills_dir=skills_dir, embedding_model=embedding_model)
+        self.bank = SkillBank(skills_dir=skills_dir)
         self.llm_call = llm_call
         self.active_skill: Optional[Skill] = None
         self.logger = logging.getLogger("SkillEngine")

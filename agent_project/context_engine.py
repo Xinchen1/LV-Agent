@@ -591,7 +591,7 @@ class ContextEngine:
         # Subsystems
         self.working_memory = WorkingMemory(max_events=200)
         self.user_profile = UserProfileMemory(
-            storage_path=getattr(config.memory, "user_profile_path", "./data/user_profile.json")
+            storage_path=getattr(config.memory, "user_memory_path", "./data/user.md")
         )
         self.compressor = ContextCompressor(llm_client=self._llm_client())
 
@@ -619,7 +619,6 @@ class ContextEngine:
                     self.semantic_memory = create_memory_manager(
                         kg_storage=config.memory.kg_storage_path,
                         episodic_storage=config.memory.episodic_storage_path,
-                        embedding_model=config.memory.embedding_model,
                         llm_client=llm_client,
                     )
                 except Exception as e:

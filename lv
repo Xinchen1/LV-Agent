@@ -31,15 +31,18 @@ if [ -n "$OMNIROUTE_DIR" ] && [ -x "${OMNIROUTE_DIR}/omniroute" ] && ! curl -s h
     done
 fi
 
-# Load DeepSeek API key from config.yaml so the agent always has it.
-# 注意: 不要用系统 python3 解析 yaml —— 用户环境的 Python.framework 3.13
-# 在 import yaml(C 扩展)时会因代码签名无效崩溃(CODESIGNING, Invalid Page)。
-# 这里用纯 shell 提取 deepseek 段落的 api_key。
-DS_KEY=$(grep -A8 '^[[:space:]]*deepseek:' "$PROJECT_DIR/config.yaml" 2>/dev/null \
-    | grep 'api_key' | head -1 \
-    | sed -E 's/^[[:space:]]*api_key:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/' )
-if [ -n "$DS_KEY" ]; then
-    export DEEPSEEK_API_KEY="$DS_KEY"
+# Load secrets from .env if present.
+# Only export variables that are standard names (not leaking unrelated .env vars).
+if [ -f "$PROJECT_DIR/.env" ]; then
+    while IFS= read -r line; do
+        key=$(echo "$line" | cut -d'=' -f1 | xargs)
+        val=$(echo "$line" | cut -d'=' -f2- | xargs)
+        case "$key" in
+            NIM_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|DEEPSEEK_API_KEY|SERPAPI_KEY|TELEGRAM_BOT_TOKEN)
+                export "$key=$val"
+                ;;
+        esac
+    done < "$PROJECT_DIR/.env"
 fi
 
 # Avoid vector-deps trying to phone home during import (keeps startup fast/offline)
@@ -73,9 +76,24 @@ fi
 # Build rust_file_ops for fast/verified file ops (apply_diff auto-verify etc.)
 # 若系统无 cargo, 静默跳过(文件操作将回退到纯 Python 实现)。
 RUST_BIN="$PROJECT_DIR/rust_file_ops/target/release/rust_file_ops"
-if [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v cargo >/dev/null 2>&1; then
+_NEED_BUILD=false
+if [ ! -x "$RUST_BIN" ]; then
+    _NEED_BUILD=true
+elif command -v uname >/dev/null 2>&1; then
+    _BIN_ARCH=$(file "$RUST_BIN" 2>/dev/null | grep -o 'x86_64\|aarch64\|arm64' | head -1)
+    _SYS_ARCH=$(uname -m)
+    if [ "$_SYS_ARCH" = "arm64" ] || [ "$_SYS_ARCH" = "aarch64" ]; then
+        if [ "$_BIN_ARCH" != "aarch64" ] && [ "$_BIN_ARCH" != "arm64" ]; then
+            _NEED_BUILD=true
+            echo "⚠ rust_file_ops binary is $_BIN_ARCH but system is $_SYS_ARCH — will recompile..."
+        fi
+    elif [ "$_SYS_ARCH" = "x86_64" ] && [ "$_BIN_ARCH" != "x86_64" ]; then
+        _NEED_BUILD=true
+        echo "⚠ rust_file_ops binary is $_BIN_ARCH but system is $_SYS_ARCH — will recompile..."
+    fi
+fi
+if $_NEED_BUILD && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v cargo >/dev/null 2>&1; then
     echo "building rust_file_ops (fast file ops + auto syntax verification)..."
-    # 编译输出写入临时日志; 失败时展示 cargo 报错, 方便用户排查(而非静默吞掉)
     RUST_BUILD_LOG="${TMPDIR:-/tmp}/rust_file_ops_build.log"
     if ( cd "$PROJECT_DIR/rust_file_ops" && cargo build --release >"$RUST_BUILD_LOG" 2>&1 ); then
         echo "✓ rust_file_ops ready"
@@ -84,8 +102,8 @@ if [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v car
         echo "  (last lines:)"
         tail -5 "$RUST_BUILD_LOG" 2>/dev/null | sed 's/^/    /'
     fi
-elif [ ! -x "$RUST_BIN" ] && [ -d "$PROJECT_DIR/rust_file_ops" ]; then
-    echo "⚠ rust_file_ops not built and cargo not found — using Python fallback (slower file ops)."
+elif $_NEED_BUILD && [ -d "$PROJECT_DIR/rust_file_ops" ]; then
+    echo "⚠ rust_file_ops needs recompile but cargo not found — using Python fallback (slower file ops)."
     echo "  Install Rust (https://rustup.rs) to enable fast file ops."
 fi
 

@@ -188,7 +188,7 @@ class ToolExecutor:
                     call, cache_key = futures[future]
                     ok = False
                     obs = (
-                        f"SYSTEM STOP: Tool '{call.tool_name}' timed out after {self.tool_timeout}s. "
+                        f"SYSTEM SKIP: Tool '{call.tool_name}' timed out after {self.tool_timeout}s. "
                         "Do NOT retry this call; use a different tool or answer with what you have."
                     )
                     self.per_turn_cache[cache_key] = ToolResult(success=ok, output=obs)
@@ -293,9 +293,9 @@ class ToolExecutor:
                         except Exception:
                             pass
                     else:
-                        return False, f"SYSTEM STOP: harness blocked {tool_name}: {admission.reason}"
+                        return False, f"SYSTEM SKIP: harness blocked {tool_name}: {admission.reason}"
                 elif admission.decision is not Decision.ALLOW:
-                    return False, f"SYSTEM STOP: harness blocked {tool_name}: {admission.reason}"
+                    return False, f"SYSTEM SKIP: harness blocked {tool_name}: {admission.reason}"
             except Exception as e:
                 self.logger.warning(f"harness admission failed: {e}")
 
@@ -357,12 +357,12 @@ class ConvergenceChecker:
         if step_number < self.min_steps:
             return False
 
-        # 连续 SYSTEM STOP -> 判断是真卡住还是良性去重:
+        # SYSTEM SKIP / SYSTEM STOP → 判断是真卡住还是良性去重:
         # - "already executed" (去重) 是良性, 模型应换工具继续, 不算卡住
-        # - "timed out" / "harness blocked" 是真失败, 连续出现才是卡住
+        # - "timed out" / "harness blocked" / "permission denied" 是真失败, 连续出现才是卡住
         recent_obs = ctx.observations[-3:]
         hard_stops = [o for o in recent_obs
-                      if "SYSTEM STOP" in o
+                      if ("SYSTEM SKIP" in o or "SYSTEM STOP" in o or "timed out" in o.lower())
                       and "already executed" not in o
                       and "You already have this result" not in o]
         dedup_stops = [o for o in recent_obs if "already executed" in o]
@@ -594,11 +594,11 @@ class ExecutionEngine:
             if tool is None:
                 return None
             result = tool.execute(**args)
-            if result.success:
-                out = (result.output or "")[:200]
-                ctx.observations.append(f"[协作补位] {tool_name}: {out[:150]}")
-                return f"{tool_name} → {out[:100]}"
-            return f"{tool_name} 补位失败: {(result.error or '')[:100]}"
+            out_src = result.output or result.error or "executed"
+            out = out_src[:200]
+            status = "OK" if result.success else f"FAIL: {(result.error or '')[:80]}"
+            ctx.observations.append(f"[协作补位] {tool_name}: {status} | {out[:100]}")
+            return f"{tool_name} → {out[:100]}"
         except Exception as e:
             self.logger.debug(f"backfill failed: {e}")
             return None
@@ -649,6 +649,8 @@ class ExecutionEngine:
                 self._emit_status(ctx, f"thinking (step {step_number}/{ctx.max_steps})")
 
                 output = self._generate(prompt, ctx, step_number)
+                if not output:
+                    output = ""
                 parsed = policy.parse_output(output, ctx)
 
                 # Stream reasoning and tool calls
@@ -939,10 +941,10 @@ class ExecutionEngine:
             ctx.call_counts[key] = ctx.call_counts.get(key, 0) + 1
             if key in ctx.executed_calls:
                 obs = (
-                    f"SYSTEM STOP: You already executed {call.display_key}. "
-                    f"Result was: {ctx.executed_calls[key][:800]}\n"
-                    "You already have this result. Do NOT call the same tool with the same arguments again. "
-                    "Either call a DIFFERENT tool with different arguments, or output 'Final Answer:' now."
+                    f"⊙ Smart Dedup: search for \"{call.display_key}\" already completed. "
+                    f"Reusing prior results to maximize research coverage.\n"
+                    f"  Cached: {ctx.executed_calls[key][:400]}\n"
+                    "  → Pivoting to a new angle, or synthesizing a final answer from existing evidence."
                 )
                 ctx.executed_calls[key] = obs
                 duplicate_results.append((call, obs, False))
@@ -984,8 +986,8 @@ class ExecutionEngine:
                 return ctx.steps[-1].reasoning or "No result produced."
             return "No result produced."
 
-        # 过滤掉 SYSTEM STOP 去重拦截(不提供新信息, 且会占掉观察配额)
-        useful = [o for o in ctx.observations if "SYSTEM STOP" not in o and "already executed" not in o]
+        # 过滤掉 SYSTEM SKIP 去重拦截(不提供新信息, 且会占掉观察配额)
+        useful = [o for o in ctx.observations if "SYSTEM SKIP" not in o and "already executed" not in o]
         if not useful:
             useful = ctx.observations
         recent = "\n\n".join(useful[-max_obs:])
@@ -1034,32 +1036,52 @@ class ExecutionEngine:
         """评估最近几步是否产生真实进展(而非原地打转).
 
         依据:
-        - 最近 N 个观察中, 成功工具结果的比例(排除 SYSTEM STOP/错误/空输出)
+        - 模型仍在产生新/不同的工具调用 → 视为有进展(执行层面失败≠停滞)
+        - 同一调用反复执行(≥3次)且观察未变 → 原地打转
         - 至少 1 个非空、非错误的成功观察才视为有进展
         """
+        import json as _json
+        # 工具调用签名格式与 call_counts key 格式一致 (line 940):
+        #   json.dumps({"name": tool_name, "args": arguments})
+        # 这样 call_counts.get(top_sig) 才能命中
+        recent_steps = getattr(ctx, "steps", [])[-3:]
+        recent_sigs = []
+        for st in recent_steps:
+            for c in st.tool_calls:
+                sig = _json.dumps(
+                    {"name": c.tool_name, "args": c.arguments},
+                    sort_keys=True, ensure_ascii=False
+                )
+                recent_sigs.append(sig)
+        if recent_sigs:
+            if len(set(recent_sigs)) >= 2:
+                return True  # 多种不同调用 = 在换思路
+            if getattr(ctx, "call_counts", {}).get(recent_sigs[0], 0) >= 3:
+                return False  # 连续≥3次同一调用
+            return True  # 开始尝试，短时间不判为打转
+
         obs = ctx.observations[-6:] if len(ctx.observations) > 6 else ctx.observations
         if not obs:
             return False
         _fail_markers = (
             "tool error", "tool execution error", "failed", "timed out",
             "error:", "denied", "blocked", "not found", "no results",
-            "already executed", "SYSTEM STOP", "No search results",
+            "already executed", "SYSTEM SKIP", "SYSTEM STOP",
             "no output", "(no output)",
         )
         successful = 0
         total = 0
         for o in obs:
             ol = str(o).lower()
-            if "SYSTEM STOP" in ol or "already executed" in ol:
-                continue  # 去重拦截不算进展也不算失败
+            if "SYSTEM SKIP" in ol or "SYSTEM STOP" in ol or "already executed" in ol:
+                continue
             total += 1
-            if any(m in ol for m in _fail_markers):
-                continue  # 失败
+            if any(m.lower() in ol for m in _fail_markers):
+                continue
             if ol.strip():
                 successful += 1
         if total == 0:
             return False
-        # 至少一半成功, 且至少 1 个真实成功 → 有进展
         return successful >= max(1, total // 2)
 
     @staticmethod
@@ -1159,7 +1181,7 @@ class ExecutionEngine:
             ratio = trace.tools_used.count(most_common) / len(trace.tools_used)
             if ratio > 0.7 and len(trace.tools_used) >= 3:
                 score -= 0.15
-        stop_count = sum(1 for o in trace.observations if "SYSTEM STOP" in o)
+        stop_count = sum(1 for o in trace.observations if "SYSTEM SKIP" in o)
         if trace.observations and stop_count / len(trace.observations) > 0.5:
             score -= 0.2
         if trace.duration_ms < 10000:

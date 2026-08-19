@@ -11,15 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict
+from collections import defaultdict, deque
 import logging
-
-try:
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-    _HAS_VECTOR_DEPS = True
-except ImportError:
-    _HAS_VECTOR_DEPS = False
 
 from pydantic import BaseModel, Field
 
@@ -98,41 +91,14 @@ class KnowledgeGraph:
 
     def __init__(
         self,
-        embedding_model: str = "all-MiniLM-L6-v2",
-        storage_path: str = "./data/kg_store",
-        device: str = "cpu"
+        storage_path: str = "./data/kg_store"
     ):
         self.storage_path = storage_path
         self.nodes: Dict[str, MemoryNode] = {}
         self.edges: Dict[str, MemoryEdge] = {}
         self.node_index: Dict[str, Set[str]] = defaultdict(set)  # label -> set of node IDs
         self.edge_index: Dict[Tuple[str, str], Set[str]] = defaultdict(set)  # (relation, source) -> edge IDs
-
-        # Vector storage
-        if _HAS_VECTOR_DEPS:
-            try:
-                self.client = chromadb.PersistentClient(path=storage_path)
-                self.collection = self.client.get_or_create_collection(
-                    name="kg_nodes",
-                    metadata={"hnsw:space": "cosine"}
-                )
-                self.embedding_model = SentenceTransformer(embedding_model, device=device)
-                self._mode = "vector"
-                logging.info("KnowledgeGraph: Vector mode enabled")
-            except Exception as e:
-                logging.warning(f"Failed to init vector DB: {e}. Falling back to pure memory mode.")
-                self._mode = "memory"
-        else:
-            self._mode = "memory"
-            # 降级到内存模式是预期行为(未安装向量依赖), 不打扰界面; 需排查时看日志文件
-            logging.debug(
-                "KnowledgeGraph: memory mode (semantic/vector search disabled; "
-                "install chromadb + sentence-transformers to enable)"
-            )
-
-        # In-memory index for fast lookup
-        self._node_embeddings: Dict[str, List[float]] = {}
-        self._edge_embeddings: Dict[str, List[float]] = {}
+        self._mode: str = "memory"
 
     def add_node(self, node: MemoryNode) -> str:
         """Add a node to the graph"""
@@ -140,21 +106,6 @@ class KnowledgeGraph:
 
         # Index by label
         self.node_index[node.label].add(node.id)
-
-        # Store embedding
-        if node.embedding:
-            self._node_embeddings[node.id] = node.embedding
-            if self._mode == "vector":
-                self.collection.add(
-                    ids=[node.id],
-                    embeddings=[node.embedding],
-                    documents=[json.dumps(asdict(node))],
-                    metadatas=[{
-                        "label": node.label,
-                        "created_at": node.created_at,
-                        "last_accessed": node.last_accessed
-                    }]
-                )
 
         return node.id
 
@@ -178,68 +129,21 @@ class KnowledgeGraph:
         self,
         query: Optional[str] = None,
         label: Optional[str] = None,
-        embedding: Optional[List[float]] = None,
         k: int = 10,
         min_similarity: float = 0.5
     ) -> List[Tuple[MemoryNode, float]]:
-        """
-        Find nodes by semantic similarity
-
-        Args:
-            query: Text query (will be embedded)
-            label: Filter by label
-            embedding: Direct embedding vector
-            k: Max results
-            min_similarity: Minimum similarity threshold
-
-        Returns:
-            List of (node, similarity_score)
-        """
+        """Find nodes by keyword/label matching."""
+        query_lower = query.lower() if query else ""
         candidates = []
-
-        if self._mode == "vector" and (query or embedding):
-            # Use vector search
-            query_embedding = embedding
+        for node in self.nodes.values():
+            if label and node.label != label:
+                continue
             if query:
-                query_embedding = self.embedding_model.encode(query).tolist()
-
-            if label:
-                where = {"label": label}
+                text = f"{node.label} {json.dumps(node.properties)}".lower()
+                if query_lower in text:
+                    candidates.append((node, 0.8))
             else:
-                where = None
-
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=k * 2,  # over-fetch to filter
-                where=where,
-                include=["embeddings", "documents", "metadatas", "distances"]
-            )
-
-            for i, doc in enumerate(results['documents'][0]):
-                node_data = json.loads(doc)
-                node = MemoryNode(**node_data)
-                dist = results['distances'][0][i]
-                similarity = 1.0 - dist  # convert distance to similarity
-
-                if similarity >= min_similarity:
-                    candidates.append((node, similarity))
-
-        else:
-            # Fallback: keyword search on properties
-            query_lower = query.lower() if query else ""
-            for node in self.nodes.values():
-                if label and node.label != label:
-                    continue
-
-                if query:
-                    # Simple keyword match
-                    text = f"{node.label} {json.dumps(node.properties)}".lower()
-                    if query_lower in text:
-                        candidates.append((node, 0.8))  # arbitrary score
-                else:
-                    candidates.append((node, 1.0))
-
-        # Sort by score and return top k
+                candidates.append((node, 1.0))
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[:k]
 
@@ -323,30 +227,12 @@ class KnowledgeGraph:
         node_id: str,
         max_results: int = 5
     ) -> List[Tuple[MemoryNode, float]]:
-        """
-        Suggest related nodes based on graph connectivity and semantic similarity
-        """
-        # Method 1: Graph-based (2-hop neighbors)
-        connected = self.get_connected_nodes(node_id, direction="both")
-        neighbor_ids = {n.id for _, n in connected}
-
-        if len(neighbor_ids) >= max_results:
-            # Return most frequent neighbors (weighted by edge weight)
-            neighbor_scores = defaultdict(float)
-            for edge, _ in connected:
-                neighbor_scores[edge.source_id if edge.target_id == node_id else edge.target_id] += edge.weight
-            sorted_neighbors = sorted(neighbor_scores.items(), key=lambda x: x[1], reverse=True)[:max_results]
-            return [(self.nodes[nid], score) for nid, score in sorted_neighbors if nid in self.nodes]
-
-        # Method 2: Semantic similarity (fallback/augmentation)
-        node = self.nodes.get(node_id)
-        if node and node.embedding:
-            semantic = self.find_nodes(embedding=node.embedding, k=max_results * 2)
-            # Filter out already connected
-            semantic = [(n, s) for n, s in semantic if n.id != node_id and n.id not in neighbor_ids]
-            return semantic[:max_results]
-
-        return []
+        """Suggest related nodes based on graph connectivity."""
+        neighbor_scores = defaultdict(float)
+        for edge, n in self.get_connected_nodes(node_id, direction="both"):
+            neighbor_scores[n.id] += edge.weight
+        ranked = sorted(neighbor_scores.items(), key=lambda x: x[1], reverse=True)[:max_results]
+        return [(self.nodes[nid], score) for nid, score in ranked if nid in self.nodes]
 
     def prune_by_utility(
         self,
@@ -431,33 +317,13 @@ class EpisodicMemory:
 
     def __init__(
         self,
-        embedding_model: str = "all-MiniLM-L6-v2",
         storage_path: str = "./data/episodic_store",
         max_episodes: int = 10000
     ):
         self.storage_path = storage_path
         self.max_episodes = max_episodes
         self.episodes: Dict[str, MemoryRecord] = {}
-
-        if _HAS_VECTOR_DEPS:
-            try:
-                self.client = chromadb.PersistentClient(path=storage_path)
-                self.collection = self.client.get_or_create_collection(
-                    name="episodes",
-                    metadata={"hnsw:space": "cosine"}
-                )
-                self.embedding_model = SentenceTransformer(embedding_model, device='cpu')
-                self._mode = "vector"
-                logging.info("EpisodicMemory: Vector mode enabled")
-            except Exception as e:
-                logging.warning(f"EpisodicMemory vector init failed: {e}")
-                self._mode = "memory"
-        else:
-            self._mode = "memory"
-            logging.debug(
-                "EpisodicMemory: memory mode (semantic/vector search disabled; "
-                "install chromadb + sentence-transformers to enable)"
-            )
+        self._mode: str = "memory"
 
         self.load()
 
@@ -481,25 +347,7 @@ class EpisodicMemory:
             metadata=metadata or {}
         )
 
-        # Generate embedding
-        text_to_embed = f"{summary} {task_type}"
-        if self._has_embedder():
-            record.embedding = self.embedding_model.encode(text_to_embed).tolist()
-
         self.episodes[record.id] = record
-
-        # Vector storage
-        if self._mode == "vector" and record.embedding:
-            self.collection.add(
-                ids=[record.id],
-                embeddings=[record.embedding],
-                documents=[json.dumps(asdict(record))],
-                metadatas=[{
-                    "task_type": task_type,
-                    "importance": importance,
-                    "created_at": record.created_at
-                }]
-            )
 
         # Prune if over limit
         if len(self.episodes) > self.max_episodes:
@@ -515,39 +363,15 @@ class EpisodicMemory:
         k: int = 10,
         min_similarity: float = 0.6
     ) -> List[Tuple[MemoryRecord, float]]:
-        """Retrieve similar episodes"""
-        if self._mode == "vector":
-            query_embedding = self.embedding_model.encode(query).tolist()
-            where = {"task_type": task_type} if task_type else None
-
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=k * 2,
-                where=where,
-                include=["embeddings", "documents", "metadatas", "distances"]
-            )
-
-            episodes = []
-            for i, doc in enumerate(results['documents'][0]):
-                data = json.loads(doc)
-                rec = MemoryRecord(**data)
-                dist = results['distances'][0][i]
-                similarity = 1.0 - dist
-
-                if similarity >= min_similarity:
-                    episodes.append((rec, similarity))
-
-            return episodes[:k]
-        else:
-            # Fallback: keyword search in summaries
-            query_lower = query.lower()
-            results = []
-            for ep in self.episodes.values():
-                if task_type and ep.task_type != task_type:
-                    continue
-                if query_lower in ep.summary.lower() or query_lower in ep.content.lower():
-                    results.append((ep, 0.8))
-            return sorted(results, key=lambda x: x[1], reverse=True)[:k]
+        """Retrieve similar episodes (keyword matching)."""
+        query_lower = query.lower()
+        results = []
+        for ep in self.episodes.values():
+            if task_type and ep.task_type != task_type:
+                continue
+            if query_lower in ep.summary.lower() or query_lower in ep.content.lower():
+                results.append((ep, 0.8))
+        return sorted(results, key=lambda x: x[1], reverse=True)[:k]
 
     def retrieve_by_id(self, memory_id: str) -> Optional[MemoryRecord]:
         """Retrieve by ID"""
@@ -567,27 +391,17 @@ class EpisodicMemory:
         filtered.sort(key=lambda x: x.created_at, reverse=True)
         return filtered[:n]
 
-    def _has_embedder(self) -> bool:
-        return hasattr(self, 'embedding_model') and self.embedding_model is not None
-
     def _prune_old(self):
         """Remove oldest episodes to stay under limit"""
         if len(self.episodes) <= self.max_episodes:
             return
-
         sorted_by_date = sorted(
             self.episodes.values(),
             key=lambda x: x.created_at
         )
         to_remove = sorted_by_date[:len(self.episodes) - self.max_episodes]
-
         for ep in to_remove:
             del self.episodes[ep.id]
-            if self._mode == "vector":
-                try:
-                    self.collection.delete(ids=[ep.id])
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    pass
 
     def save(self):
         """Save to disk"""
@@ -707,14 +521,13 @@ class MemoryManager:
         self,
         kg_storage: str = "./data/kg_store",
         episodic_storage: str = "./data/episodic_store",
-        embedding_model: str = "all-MiniLM-L6-v2",
         file_memory_path: str = "./data/memory.md",
         user_memory_path: str = "./data/user.md",
         sqlite_session_path: str = "./data/sessions.db",
         project_root: Optional[str] = None,
     ):
-        self.kg = KnowledgeGraph(storage_path=kg_storage, embedding_model=embedding_model)
-        self.episodic = EpisodicMemory(storage_path=episodic_storage, embedding_model=embedding_model)
+        self.kg = KnowledgeGraph(storage_path=kg_storage)
+        self.episodic = EpisodicMemory(storage_path=episodic_storage)
         self.compressor = ContextCompressor()
         self.logger = logging.getLogger("MemoryManager")
 
@@ -1051,7 +864,6 @@ class MemoryManager:
 def create_memory_manager(
     kg_storage: str = "./data/kg_store",
     episodic_storage: str = "./data/episodic_store",
-    embedding_model: str = "all-MiniLM-L6-v2",
     llm_client: Optional[Any] = None,
     file_memory_path: str = "./data/memory.md",
     user_memory_path: str = "./data/user.md",
@@ -1062,7 +874,6 @@ def create_memory_manager(
     return MemoryManager(
         kg_storage=kg_storage,
         episodic_storage=episodic_storage,
-        embedding_model=embedding_model,
         file_memory_path=file_memory_path,
         user_memory_path=user_memory_path,
         sqlite_session_path=sqlite_session_path,
