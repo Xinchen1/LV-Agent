@@ -231,25 +231,15 @@ class _FileStatCache:
 
 
 class FastReadCache:
-    """Fast reading for long articles: chunk, embed, cache locally, retrieve on demand."""
+    """Fast reading for long articles: chunk and cache locally, retrieve on demand."""
 
     def __init__(self, cache_dir: Optional[str] = None):
         if cache_dir is None:
             cache_dir = Path(__file__).resolve().parents[2] / "data" / "fast_read_cache"
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._model = None
-        self._model_loaded = False
 
-    def _embedding_model(self):
-        if not self._model_loaded:
-            self._model_loaded = True
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer("all-MiniLM-L6-v2")
-            except Exception:
-                self._model = None
-        return self._model
+    
 
     def _file_key(self, path: str) -> str:
         p = Path(path)
@@ -284,10 +274,6 @@ class FastReadCache:
         return chunks
 
     def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
-        model = self._embedding_model()
-        if model:
-            embs = model.encode(texts, show_progress_bar=False)
-            return embs.tolist()
         return None
 
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
@@ -332,12 +318,9 @@ class FastReadCache:
             raise ValueError("file is empty or unreadable")
         key = self._file_key(path)
         chunks = self._chunk_text(text)
-        embeddings = self._embed(chunks)
         data = {
             "path": str(Path(path).resolve()),
             "chunks": chunks,
-            "embeddings": embeddings if embeddings is not None else [],
-            "model": "sentence-transformers" if self._embedding_model() else "keyword-fallback",
             "chunk_count": len(chunks),
         }
         cache_path = self.cache_dir / f"{key}.json"
@@ -351,12 +334,6 @@ class FastReadCache:
             return None
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
-            embeddings = data.get("embeddings")
-            chunks = data.get("chunks", [])
-            if embeddings and len(embeddings) == len(chunks):
-                first_len = len(embeddings[0]) if embeddings[0] else 0
-                if any(len(e) != first_len for e in embeddings):
-                    return None
             return data
         except Exception:
             return None
@@ -365,17 +342,8 @@ class FastReadCache:
         cache = self.load_cache(path)
         if cache is None:
             return ""
-        chunks = cache["chunks"]
-        embeddings = cache.get("embeddings")
-        has_embeddings = bool(embeddings and len(embeddings) == len(chunks) and embeddings[0])
-        if has_embeddings:
-            q_emb = self._embed([query])
-            if q_emb:
-                scored = [(self._cosine_similarity(q_emb[0], emb), c) for emb, c in zip(embeddings, chunks)]
-            else:
-                scored = [(self._keyword_score(query, c), c) for c in chunks]
-        else:
-            scored = [(self._keyword_score(query, c), c) for c in chunks]
+        chunks = cache.get("chunks", [])
+        scored = [(self._keyword_score(query, c), c) for c in chunks]
         scored.sort(key=lambda x: x[0], reverse=True)
         parts = []
         for score, chunk in scored[:top_k]:

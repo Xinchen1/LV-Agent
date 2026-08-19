@@ -287,7 +287,6 @@ class OpenMythosAgent:
                 raw_mm = MemoryManager(
                     kg_storage=self.config.memory.kg_storage_path,
                     episodic_storage=self.config.memory.episodic_storage_path,
-                    embedding_model=self.config.memory.embedding_model,
                     file_memory_path=self.config.memory.file_memory_path,
                     user_memory_path=self.config.memory.user_memory_path,
                     sqlite_session_path=self.config.memory.sqlite_session_path,
@@ -312,7 +311,6 @@ class OpenMythosAgent:
                     wiki_manager = create_wiki_manager(
                         kg_storage=self.config.memory.kg_storage_path,
                         episodic_storage=self.config.memory.episodic_storage_path,
-                        embedding_model=self.config.memory.embedding_model,
                         llm_client=llm_client,
                     )
                     self._wiki_manager = wiki_manager
@@ -370,7 +368,6 @@ class OpenMythosAgent:
                 self.memskill_engine = MemSkillEngine(
                     llm_call=_memskill_llm_call,
                     skills_dir=self.config.memory.kg_storage_path.replace("kg_store", "memory_skills"),
-                    embedding_model=self.config.memory.embedding_model,
                     top_k=getattr(self.config.memory, "memskill_top_k", 3),
                     hard_case_buffer_size=getattr(self.config.memory, "memskill_hard_case_buffer", 50),
                     evolution_interval=getattr(self.config.memory, "memskill_evolution_interval", 5),
@@ -393,7 +390,6 @@ class OpenMythosAgent:
 
             self.skill_engine = SkillEngine(
                 skills_dir="./data/skills",
-                embedding_model=self.config.memory.embedding_model,
                 llm_call=_skill_llm_call,
             )
             # DSH: 绑定工具注册表, 让声明了 tool_spec 的技能可动态注册为可调用工具.
@@ -3160,6 +3156,69 @@ class OpenMythosAgent:
 
         return StreamRouter(user_callback, reasoning_parts, content_parts)
 
+    # ============ 策略自动选择 ============
+
+    def _select_strategy(self, task: str, mode: str, code_mode: bool) -> 'ReasoningStrategy':
+        """根据任务特征自动选择推理策略。
+
+        优先级：手动覆盖 > reflection模式(用配置默认值) > 任务自适应分类
+        """
+        from .reasoning import ReasoningStrategy
+        # 遵循"船长OS"理念：转弯要慢（复杂任务+深度策略），直道要快（简单任务+轻量策略）
+        if self._strategy_override:
+            try:
+                return ReasoningStrategy(self._strategy_override)
+            except ValueError:
+                pass
+
+        t = task.lower()
+        # 扩展对话 / 闲聊 → 零样本，省 token
+        if any(k in t for k in ("早", "晚安", "谢谢", "你好", "hi ", "hello", "好的", "ok", "了解", "明白")):
+            if len(t) < 30:
+                return ReasoningStrategy.ZERO_SHOT
+
+        # 代码任务 → 超智能代理，带反思+重规划
+        if code_mode or any(k in t for k in (
+            "代码", "函数", "class", "重构", "debug", "fix", "实现", "coding",
+            "写一个", "改一下", "修复", "实现", "build", "implement", "refactor"
+        )):
+            return ReasoningStrategy.SUPER_AGENT
+
+        # 多路径探索（方案对比、多种可能）→ 树状思维
+        if any(k in t for k in ("比较", "对比", "方案", "哪种", "多个方案", "优缺点", "alternatives", "compare")):
+            return ReasoningStrategy.TREE_OF_THOUGHTS
+
+        # 验证/校验类 → 验证策略
+        if any(k in t for k in ("验证", "核实", "检查是否正确", "verify", "check if", "confirm")):
+            return ReasoningStrategy.VERIFICATION
+
+        # 工具密集型检索（搜索+抓取+汇总）→ ReAct
+        if any(k in t for k in (
+            "搜索", "查找", "搜一下", "查一下", "抓取", "下载", "search", "find",
+            "web_search", "scrape", "crawl", "爬取", "web 搜索"
+        )):
+            return ReasoningStrategy.REACT
+
+        # 深度研究/调研/报告 → 超级代理（需要多步规划）
+        if any(k in t for k in ("深度", "调研", "研究", "报告", "分析", "deep", "research", "分析报告")):
+            return ReasoningStrategy.SUPER_AGENT
+
+        # 复杂多步任务（写+创建+修改组合） → 超级代理
+        multi_step = any(k in t for k in (
+            "搜索", "查找", "写", "创建", "修改", "新建", "下载",
+            "search", "find", "write", "create", "modify", "download",
+            "分析", "总结", "调研", "研究", "加", "添加", "优化", "重构", "修复", "实现"
+        ))
+        if multi_step:
+            return ReasoningStrategy.SUPER_AGENT
+
+        # 纯推理/问答 → 思维链
+        if any(k in t for k in ("为什么", "怎么理解", "解释", "什么是", "why", "explain", "什么是")):
+            return ReasoningStrategy.CHAIN_OF_THOUGHT
+
+        # 兜底：超级代理（最安全，不会漏工具）
+        return ReasoningStrategy.SUPER_AGENT
+
     # ============ 核心Agent循环 ============
 
     def run(
@@ -3403,17 +3462,8 @@ class OpenMythosAgent:
 
         # 4. Build initial prompt
         if self.reasoning_engine and self.config.reasoning.enabled:
-            # Use advanced reasoning engine
-            # Default to SUPER_AGENT for the adaptive meta-loop (reflection + replanning).
-            # Reflection mode keeps the configured strategy so it can be explicitly studied.
-            reasoning_strategy = ReasoningStrategy.SUPER_AGENT
-            if mode == 'reflection':
-                reasoning_strategy = ReasoningStrategy(self.config.reasoning.default_strategy)
-            if self._strategy_override:
-                try:
-                    reasoning_strategy = ReasoningStrategy(self._strategy_override)
-                except ValueError:
-                    pass
+            # Use advanced reasoning engine — strategy auto-selected by task type
+            reasoning_strategy = self._select_strategy(task, mode, code_mode)
             # Retrieve strategy advice from past successes
             strategy_advice = self.strategy_db.get_advice_for_task(task) if self.strategy_db else ""
             context_parts = []

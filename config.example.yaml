@@ -3,24 +3,24 @@
 
 agent:
   # 模型后端选择
-  backend: "deepseek"  # "deepseek"、"openai"、"openrouter"、"anthropic" 或 "openmythos"
+  backend: "nim"  # "nim" 或 "openmythos"
 
   # ═══════════════════════════════════════════════════════════════
-  # DeepSeek API 配置（推荐，OpenAI 兼容）
+  # NVIDIA NIM API 配置
   # ═══════════════════════════════════════════════════════════════
-  deepseek:
+  nim:
     # 方式1：直接填写（注意不要提交到git）
-    # api_key: "sk-你的密钥"
+    # api_key: "nvapi-你的密钥"
 
     # 方式2：使用环境变量（推荐，更安全）
-    # export DEEPSEEK_API_KEY="your_key_here"
-    api_key: "${DEEPSEEK_API_KEY:-}"  # 留空则使用环境变量
+    # export NIM_API_KEY="your_key_here"
+    api_key: "${NIM_API_KEY:-}"  # 留空则使用环境变量
 
-    base_url: "https://api.deepseek.com"
-    model: "deepseek-chat"  # 或 "deepseek-reasoner"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    model: "google/gemma-4-31b-it"  # 可选模型见下方
     temperature: 1.0
     top_p: 0.95
-    max_tokens: 8192
+    max_tokens: 16384
 
   # ═══════════════════════════════════════════════════════════════
   # OpenMythos本地模型配置（仅当backend: openmythos时使用）

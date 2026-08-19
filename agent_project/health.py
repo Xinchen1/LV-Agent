@@ -85,10 +85,6 @@ class ModuleHealthChecker:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _vector_deps(self) -> "tuple[bool, bool]":
-        """向量检索依赖可用性 (chromadb + sentence-transformers). 供多个模块复用."""
-        return self._importable("chromadb"), self._importable("sentence_transformers")
-
     @staticmethod
     def _importable(module_name: str) -> bool:
         try:
@@ -106,16 +102,7 @@ class ModuleHealthChecker:
     def _check_experience(self) -> ModuleHealth:
         if not (self._enabled("memory") or self._enabled("reflection")):
             return ModuleHealth("experience", ModuleStatus.DISABLED)
-        has_chroma, has_st = self._vector_deps()
-        if has_chroma and has_st:
-            return ModuleHealth("experience", ModuleStatus.READY, dependency="chromadb, sentence-transformers")
-        return ModuleHealth(
-            "experience",
-            ModuleStatus.DEGRADED,
-            dependency="chromadb, sentence-transformers",
-            fallback="JSON file store",
-            install_hint="pip install chromadb sentence-transformers",
-        )
+        return ModuleHealth("experience", ModuleStatus.READY)
 
     def _check_strategy(self) -> ModuleHealth:
         try:
@@ -154,16 +141,13 @@ class ModuleHealthChecker:
     def _check_memory(self) -> ModuleHealth:
         if not self._enabled("memory"):
             return ModuleHealth("memory", ModuleStatus.DISABLED)
-        has_chroma, has_st = self._vector_deps()
         try:
             from .memory import create_memory_manager
             from .wiki_memory import LLMWikiManager
             return ModuleHealth(
                 "memory",
-                ModuleStatus.READY if (has_chroma and has_st) else ModuleStatus.DEGRADED,
-                dependency="chromadb, sentence-transformers" if not (has_chroma and has_st) else None,
-                fallback="keyword + JSON" if not (has_chroma and has_st) else None,
-                install_hint="pip install chromadb sentence-transformers" if not (has_chroma and has_st) else None,
+                ModuleStatus.READY,
+                fallback="keyword + JSON",
             )
         except Exception as e:
             return ModuleHealth("memory", ModuleStatus.DEGRADED, fallback="keyword + JSON", error=str(e))
@@ -189,16 +173,9 @@ class ModuleHealthChecker:
     def _check_memskill(self) -> ModuleHealth:
         if not self._enabled("memory"):
             return ModuleHealth("memskill", ModuleStatus.DISABLED)
-        has_st = self._importable("sentence_transformers")
         try:
             from .memskill import MemSkillEngine
-            return ModuleHealth(
-                "memskill",
-                ModuleStatus.READY if has_st else ModuleStatus.DEGRADED,
-                dependency="sentence-transformers" if not has_st else None,
-                fallback="keyword matching" if not has_st else None,
-                install_hint="pip install sentence-transformers" if not has_st else None,
-            )
+            return ModuleHealth("memskill", ModuleStatus.READY, fallback="keyword matching")
         except Exception as e:
             return ModuleHealth("memskill", ModuleStatus.DEGRADED, fallback="keyword matching", error=str(e))
 
