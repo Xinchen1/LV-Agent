@@ -124,9 +124,8 @@ class SelfImprovementConfig(BaseModel):
 
 
 class ExperienceConfig(BaseModel):
-    storage_type: str = "chromadb"
+    storage_type: str = "memory"
     vector_db_path: str = "./data/experience_store"
-    embedding_model: str = "all-MiniLM-L6-v2"
     max_episodes: int = 10000
     auto_save: bool = True
     save_interval: int = 10
@@ -158,7 +157,6 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     kg_storage_path: str = "./data/kg_store"
     episodic_storage_path: str = "./data/episodic_store"
-    embedding_model: str = "all-MiniLM-L6-v2"
     max_episodes: int = 10000
     auto_extract_entities: bool = True
     context_compression: bool = True

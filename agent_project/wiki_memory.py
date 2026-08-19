@@ -15,10 +15,9 @@ LLM Wiki Memory — Karpathy-style graph memory
    - 不存在没有标题/正文的"孤立节点"
 
 3. 存储
-   - ChromaDB（可选）存 page 的 *content embedding*
-   - JSON 存 pages 全文（可 diff、可读、可检查）
-   - graph json 存 edges（link pairs）
-   - 降级路径：无 chromadb 时退回 keyword exact match + in-memory
+    - JSON 存 pages 全文（可 diff、可读、可检查）
+    - graph json 存 edges（link pairs）
+    - 降级路径：keyword exact match + in-memory
 
 4. LLM 集成
    - 页面创建/更新 由 LLM 生成自然语言摘要
@@ -28,22 +27,12 @@ LLM Wiki Memory — Karpathy-style graph memory
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import uuid, json, re, time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from collections import defaultdict
-
-# ──────────────────── optional deps ────────────────────
-try:
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-    _HAS_VECTOR = True
-except ImportError:
-    _HAS_VECTOR = False
 
 from pydantic import BaseModel
 
@@ -213,7 +202,7 @@ class WikiGraph:
     存储
     -----
     - self._pages : Dict[id -> WikiPage]   内存主存
-    - chromadb collection "wiki_pages"     向量（存 section 拼接文本）
+    - chromadb collection "wiki_pages" (legacy; now uses memory-only mode)
     - links 存在每个页面自身，同时维护 _backlinks 全局索引
 
     检索
@@ -225,7 +214,6 @@ class WikiGraph:
     """
 
     def __init__(self, storage_path: str = "./data/wiki_store",
-                 embedding_model: str = "all-MiniLM-L6-v2",
                  device: str = "cpu"):
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
@@ -235,41 +223,8 @@ class WikiGraph:
         self._tag_index: Dict[str, Set[str]] = defaultdict(set)
         self._backlinks: Dict[str, Set[str]] = defaultdict(set)  # id -> incoming id set
 
-        # vector (lazy init: do not load SentenceTransformer at startup)
-        self._embedding_model_name = embedding_model
-        self._embedding_device = device
-        self._embedding_model = None
-        self._client = None
-        self._collection = None
-        self._mode: str = "vector" if _HAS_VECTOR else "memory"
-
-        if _HAS_VECTOR:
-            try:
-                self._client = chromadb.PersistentClient(path=str(self.storage_path))
-                self._collection = self._client.get_or_create_collection(
-                    name="wiki_pages",
-                    metadata={"hnsw:space": "cosine"},
-                )
-            except Exception as exc:
-                print(f"  \033[2mwiki memory: vector client failed ({exc}), using memory mode\033[0m")
-                self._mode = "memory"
+        self._mode: str = "memory"
         self._load_from_disk()
-
-    # ----------------------------------------------------------------
-    # init
-    # ----------------------------------------------------------------
-    def _ensure_embedding_model(self):
-        """Lazy-load SentenceTransformer when first needed."""
-        if self._embedding_model is not None or not _HAS_VECTOR:
-            return
-        try:
-            self._embedding_model = SentenceTransformer(
-                self._embedding_model_name, device=self._embedding_device
-            )
-        except Exception as exc:
-            print(f"  \033[2mwiki memory: embedding model load failed ({exc}), using memory mode\033[0m")
-            self._mode = "memory"
-            self._embedding_model = None
 
     # ----------------------------------------------------------------
     # CRUD
@@ -297,13 +252,7 @@ class WikiGraph:
         for tag in page.tags:
             self._tag_index[tag].add(page.id)
 
-        # rebuild backlinks for all pages (cheap for small graphs)
         self._rebuild_backlinks()
-
-        # vector upsert
-        if self._mode == "vector" and self._collection and page.content.strip():
-            self._vector_upsert(page)
-
         self._save_to_disk()
         return page.id
 
@@ -326,11 +275,6 @@ class WikiGraph:
         self._title_index.pop(page.title.lower(), None)
         for tag in page.tags:
             self._tag_index[tag].discard(page_id)
-        if self._mode == "vector" and self._collection:
-            try:
-                self._collection.delete(ids=[page_id])
-            except Exception:
-                pass
         self._rebuild_backlinks()
         self._save_to_disk()
         return True
@@ -362,9 +306,7 @@ class WikiGraph:
     def semantic_search(self, query: str, k: int = 10,
                         page_type: Optional[str] = None,
                         min_similarity: float = 0.35) -> List[Tuple[WikiPage, float]]:
-        """全页面语义检索（优先向量，降级 keyword）。返回 [(page, score)]。"""
-        if self._mode == "vector" and self._collection:
-            return self._vector_search(query, k, page_type, min_similarity)
+        """Keyword search over pages. Returns [(page, score)]."""
         return self._keyword_search(query, k, page_type)
 
     def find_pages(self, title: Optional[str] = None, tag: Optional[str] = None,
@@ -500,9 +442,6 @@ class WikiGraph:
             for tag in page.tags:
                 self._tag_index[tag].add(page.id)
 
-        # Note: ChromaDB collection is persistent; re-upserting every page at
-        # startup would force-load the embedding model and block agent launch.
-        # We only rebuild the backlink index from the in-memory graph here.
         self._rebuild_backlinks()
 
     @staticmethod
@@ -544,68 +483,6 @@ class WikiGraph:
             for linked_id in page.links:
                 if linked_id in self._pages:
                     self._backlinks[linked_id].add(page.id)
-
-    def _vector_upsert(self, page: WikiPage):
-        if not self._collection:
-            return
-        self._ensure_embedding_model()
-        if self._mode != "vector":
-            return
-        page.access()
-        doc = page.content
-        embedding: Optional[List[float]] = None
-        if self._embedding_model:
-            try:
-                embedding = self._embedding_model.encode(doc).tolist()
-            except Exception:
-                pass
-        page.embedding = embedding
-        try:
-            self._collection.upsert(
-                ids=[page.id],
-                embeddings=[embedding] if embedding else None,
-                documents=[doc],
-                metadatas=[{
-                    "title": page.title,
-                    "page_type": page.page_type,
-                    "created_at": page.created_at,
-                    "last_accessed": page.last_accessed,
-                    "tags": ",".join(page.tags),
-                }],
-            )
-        except Exception:
-            pass
-
-    def _vector_search(self, query: str, k: int, page_type: Optional[str],
-                       min_similarity: float) -> List[Tuple[WikiPage, float]]:
-        self._ensure_embedding_model()
-        if self._mode != "vector" or not self._collection or not self._embedding_model:
-            return self._keyword_search(query, k, page_type)
-        where = {"page_type": page_type} if page_type else None
-        try:
-            q_emb = self._embedding_model.encode(query).tolist()
-        except Exception:
-            return self._keyword_search(query, k, page_type)
-
-        results = self._collection.query(
-            query_embeddings=[q_emb], n_results=k * 2, where=where,
-            include=["documents", "embeddings", "metadatas", "distances"],
-        )
-        out: List[Tuple[WikiPage, float]] = []
-        docs = results.get("documents", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        for i, doc in enumerate(docs):
-            dist = dists[i] if i < len(dists) else 1.0
-            sim = 1.0 - dist
-            if sim < min_similarity:
-                continue
-            title = metas[i].get("title", "") if i < len(metas) else ""
-            pid = self._title_index.get(title.lower())
-            if pid and pid in self._pages:
-                out.append((self._pages[pid], sim))
-        out.sort(key=lambda x: x[1], reverse=True)
-        return out[:k]
 
     def _keyword_search(self, query: str, k: int,
                         page_type: Optional[str]) -> List[Tuple[WikiPage, float]]:
@@ -957,11 +834,9 @@ class LLMWikiManager:
     """
 
     def __init__(self, storage_path: str = "./data/wiki_store",
-                 embedding_model: str = "all-MiniLM-L6-v2",
                  llm_client: Optional["LLMClient"] = None,
                  device: str = "cpu"):
-        self.graph = WikiGraph(storage_path=storage_path,
-                               embedding_model=embedding_model, device=device)
+        self.graph = WikiGraph(storage_path=storage_path, device=device)
         self.llm = llm_client
         self._llm_enabled = llm_client is not None
 
@@ -1283,22 +1158,14 @@ def _build_episode_snippet(text: str) -> str:
 # ===================================================================
 
 def create_memory_manager(kg_storage: str = "./data/kg_store",
-                          episodic_storage: str = "./data/episodic_store",
-                          embedding_model: str = "all-MiniLM-L6-v2",
-                          llm_client: Optional["LLMClient"] = None,
-                          file_memory_path: str = "./data/memory.md",
-                          user_memory_path: str = "./data/user.md",
-                          sqlite_session_path: str = "./data/sessions.db",
-                          project_root: Optional[str] = None) -> "LLMWikiManager":
-    """
-    工厂函数，签名保持与原 create_memory_manager 兼容。
-    llm_client 可选传，不传则走 keyword-only 降级模式。
-    file/session memory arguments are accepted for API compatibility but ignored
-    by the wiki backend; use memory.MemoryManager for those layers.
-    """
+                           episodic_storage: str = "./data/episodic_store",
+                           llm_client: Optional["LLMClient"] = None,
+                           file_memory_path: str = "./data/memory.md",
+                           user_memory_path: str = "./data/user.md",
+                           sqlite_session_path: str = "./data/sessions.db",
+                           project_root: Optional[str] = None) -> "LLMWikiManager":
     return LLMWikiManager(
         storage_path=kg_storage,
-        embedding_model=embedding_model,
         llm_client=llm_client,
     )
 

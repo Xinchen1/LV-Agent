@@ -26,21 +26,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict, deque
+from pydantic import BaseModel, Field
 
 try:
     import yaml
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
-
-try:
-    from sentence_transformers import SentenceTransformer
-    _HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    _HAS_SENTENCE_TRANSFORMERS = False
-
-from pydantic import BaseModel, Field
-
 
 logger = logging.getLogger("memskill")
 
@@ -412,62 +404,16 @@ class SkillBank:
 class SkillController:
     """根据当前上下文选择最相关的 Top-K 记忆技能。"""
 
-    def __init__(self, bank: SkillBank, embedding_model: str = "all-MiniLM-L6-v2", top_k: int = 3):
+    def __init__(self, bank: SkillBank, top_k: int = 3):
         self.bank = bank
-        self.embedding_model_name = embedding_model
         self.top_k = top_k
-        self._model: Optional[SentenceTransformer] = None
-        self._model_lock = threading.Lock()
-
-    def _embedding_model(self) -> Optional[SentenceTransformer]:
-        if not _HAS_SENTENCE_TRANSFORMERS:
-            return None
-        with self._model_lock:
-            if self._model is None:
-                try:
-                    self._model = SentenceTransformer(self.embedding_model_name, device="cpu")
-                except Exception as e:
-                    logger.warning(f"Failed to load embedding model: {e}")
-            return self._model
-
-    def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
-        model = self._embedding_model()
-        if model is None:
-            return None
-        try:
-            embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
-            return embeddings.tolist()
-        except Exception as e:
-            logger.warning(f"Embedding failed: {e}")
-            return None
 
     def select(self, context: str) -> List[Tuple[MemorySkill, float]]:
         """返回 (skill, score) 列表，按相关性降序。"""
         skills = self.bank.list_skills()
         if not skills:
             return []
-
-        # 预计算/补全技能嵌入
-        texts = [s.embedding_text() for s in skills]
-        embeddings = self._embed(texts)
-        if embeddings is None:
-            # 降级：基于关键词匹配
-            return self._keyword_select(skills, context)
-
-        for skill, emb in zip(skills, embeddings):
-            skill.embedding = emb
-
-        ctx_embedding = self._embed([context])
-        if ctx_embedding is None:
-            return self._keyword_select(skills, context)
-        ctx_vec = ctx_embedding[0]
-
-        scored = []
-        for skill in skills:
-            score = self._cosine_similarity(ctx_vec, skill.embedding or [])
-            scored.append((skill, score))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:self.top_k]
+        return self._keyword_select(skills, context)
 
     def _keyword_select(self, skills: List[MemorySkill], context: str) -> List[Tuple[MemorySkill, float]]:
         ctx_words = set(re.findall(r"\w+", context.lower()))
@@ -481,17 +427,6 @@ class SkillController:
             scored.append((skill, score))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:self.top_k]
-
-    @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
-        if len(a) != len(b) or not a:
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(x * x for x in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
 
 
 # =============================================================================
@@ -643,16 +578,13 @@ class SkillDesigner:
         self,
         bank: SkillBank,
         llm_call: Callable[[str, float, int], str],
-        embedding_model: str = "all-MiniLM-L6-v2",
         hard_case_buffer_size: int = 50,
         evolution_interval: int = 5,
     ):
         self.bank = bank
         self.llm_call = llm_call
-        self.embedding_model_name = embedding_model
         self.hard_case_buffer: deque[HardCase] = deque(maxlen=hard_case_buffer_size)
         self.evolution_interval = evolution_interval
-        self._model: Optional[SentenceTransformer] = None
         self._evolution_count = 0
 
     def add_case(
@@ -714,48 +646,10 @@ class SkillDesigner:
         return new_skills
 
     def _cluster_cases(self, cases: List[HardCase], min_cluster_size: int = 2) -> List[List[HardCase]]:
-        """基于嵌入相似度对困难案例做简单聚类。
-
-        无向量库或嵌入聚类失败时无法计算相似度: 若仍返回单例簇, 会被下方
-        `len(cluster) >= min_cluster_size` 全部过滤, 导致进化永远无产出。
-        因此回退为"整批作为单个候选簇"交给 LLM 判断是否值得沉淀技能
-        (maybe_evolve 已保证批次 >= evolution_interval 个失败案例)。
-        """
+        """Simple clustering: group all cases into one batch since no embeddings."""
         if len(cases) < min_cluster_size:
             return []
-
-        if not _HAS_SENTENCE_TRANSFORMERS:
-            return [list(cases)]
-
-        try:
-            model = SentenceTransformer(self.embedding_model_name, device="cpu")
-            texts = [f"{c.task}\n{c.outcome}\n{c.trajectory_summary}" for c in cases]
-            embeddings = model.encode(texts, show_progress_bar=False)
-
-            # 简单的贪心聚类
-            clusters: List[List[int]] = []
-            used = set()
-            threshold = 0.72
-            for i in range(len(cases)):
-                if i in used:
-                    continue
-                cluster = [i]
-                used.add(i)
-                for j in range(i + 1, len(cases)):
-                    if j in used:
-                        continue
-                    sim = self._cosine_similarity(embeddings[i].tolist(), embeddings[j].tolist())
-                    if sim >= threshold:
-                        cluster.append(j)
-                        used.add(j)
-                clusters.append(cluster)
-
-            result = [[cases[i] for i in cluster] for cluster in clusters if len(cluster) >= min_cluster_size]
-            # 嵌入聚类未产出 >=2 的簇时, 同样回退为整批一个簇, 避免进化空转
-            return result or [list(cases)]
-        except Exception as e:
-            logger.warning(f"Clustering failed: {e}")
-            return [list(cases)]
+        return [list(cases)]
 
     def _propose_skill(self, cluster: List[HardCase]) -> Optional[MemorySkill]:
         """让 LLM 从聚类中提出新技能或技能改进。"""
@@ -848,25 +742,14 @@ class SkillDesigner:
         return True
 
     @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
-        if len(a) != len(b) or not a:
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(x * x for x in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
-
-def _bump_version(version: str) -> str:
-    """简单版本号 +1，例如 0.1.0 -> 0.2.0。"""
-    parts = version.split(".")
-    try:
-        parts[-1] = str(int(parts[-1]) + 1)
-    except Exception:
-        parts = ["0", "1", "0"]
-    return ".".join(parts[:3])
+    def _bump_version(version: str) -> str:
+        """简单版本号 +1，例如 0.1.0 -> 0.2.0。"""
+        parts = version.split(".")
+        try:
+            parts[-1] = str(int(parts[-1]) + 1)
+        except Exception:
+            parts = ["0", "1", "0"]
+        return ".".join(parts[:3])
 
 
 # =============================================================================
@@ -883,18 +766,16 @@ class MemSkillEngine:
         self,
         llm_call: Callable[[str, float, int], str],
         skills_dir: str = "./data/memory_skills",
-        embedding_model: str = "all-MiniLM-L6-v2",
         top_k: int = 3,
         hard_case_buffer_size: int = 50,
         evolution_interval: int = 5,
     ):
         self.bank = SkillBank(skills_dir=skills_dir)
-        self.controller = SkillController(self.bank, embedding_model=embedding_model, top_k=top_k)
+        self.controller = SkillController(self.bank, top_k=top_k)
         self.executor = SkillExecutor(llm_call=llm_call)
         self.designer = SkillDesigner(
             self.bank,
             llm_call=llm_call,
-            embedding_model=embedding_model,
             hard_case_buffer_size=hard_case_buffer_size,
             evolution_interval=evolution_interval,
         )
@@ -1068,3 +949,13 @@ class MemSkillEngine:
                 if tool:
                     tools.append(str(tool))
         return f"steps={len(steps)}, tools={','.join(tools[:5])}"
+
+
+def _bump_version(version: str) -> str:
+    """简单版本号 +1，例如 0.1.0 -> 0.2.0。"""
+    parts = version.split(".")
+    try:
+        parts[-1] = str(int(parts[-1]) + 1)
+    except Exception:
+        parts = ["0", "1", "0"]
+    return ".".join(parts[:3])

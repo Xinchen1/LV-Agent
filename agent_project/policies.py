@@ -907,7 +907,7 @@ class ThinkingPolicy(ABC):
         ...
 
     @abstractmethod
-    def parse_output(self, output: str, ctx: ExecutionContext) -> PolicyOutput:
+    def parse_output(self, output: Optional[str], ctx: ExecutionContext) -> PolicyOutput:
         ...
 
     def next_prompt(self, ctx: ExecutionContext, last_output: str) -> Optional[str]:
@@ -927,7 +927,7 @@ class ReActPolicy(ThinkingPolicy):
     def first_prompt(self, ctx: ExecutionContext) -> str:
         return self._build_react_prompt(ctx.task, ctx.available_tools, ctx.code_mode, ctx.extra_context)
 
-    def parse_output(self, output: str, ctx: ExecutionContext) -> PolicyOutput:
+    def parse_output(self, output: Optional[str], ctx: ExecutionContext) -> PolicyOutput:
         return self._route_react_output(output)
 
     def next_prompt(self, ctx: ExecutionContext, last_output: str) -> Optional[str]:
@@ -999,7 +999,7 @@ Rules:
 - NEVER use python_exec to create, modify, or overwrite files.
 - VERIFY WITH THE RIGHT TOOL: Use file_ops verify for syntax checks, not python_exec.
 - IF A TOOL FAILS, pivot immediately; do NOT retry the exact same failed call more than once.
-- If you see 'SYSTEM STOP: You already executed...', do NOT repeat that tool call.
+- If you see 'SYSTEM SKIP: You already executed...', do NOT repeat that tool call.
 """
         if extra_context:
             base += f"\n\n{extra_context}\n"
@@ -1023,7 +1023,9 @@ Rules:
     # Output routing
     # ------------------------------------------------------------------
 
-    def _route_react_output(self, output: str) -> PolicyOutput:
+    def _route_react_output(self, output: Optional[str]) -> PolicyOutput:
+        if not output:
+            return PolicyOutput(reasoning="", final_answer="", done=False)
         final_markers = [
             "FINAL ANSWER:", "Final Answer:", "最终答案：", "最终答案:",
             "总结：", "结论：", "综上所述", "最终建议",
