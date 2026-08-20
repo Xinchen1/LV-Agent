@@ -72,3 +72,4 @@ rust_file_ops/target/
 *.pre_restore_*
 # Additional backup patterns
 *_backup.py
+electron.pid
