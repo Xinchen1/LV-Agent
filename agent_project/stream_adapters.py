@@ -311,6 +311,7 @@ class RichStreamAdapter(StreamAdapter):
         self._render_lock = threading.Lock()
         self._stop_spinner_event = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
+        register_active_adapter(self)
 
         self._current_action = "thinking"
         self._action_since = time.time()
@@ -430,6 +431,16 @@ class RichStreamAdapter(StreamAdapter):
             if self._live is not None:
                 self._live.stop()
                 self._live = None
+
+    def pause_for_input(self) -> None:
+        """Stop the spinner cleanly so a blocking input() prompt is stable on screen."""
+        self._stop_thinking()
+
+    def resume_after_input(self) -> None:
+        """Restart the spinner after input() returns, if a task is still in flight."""
+        if self._live is None and not self._has_content:
+            self._start_thinking()
+            self._update_thinking(force=True)
 
     def _print_tool_call(self, text: str) -> None:
         self._stop_thinking()
@@ -914,6 +925,27 @@ def _style_inline_hl(H, text: str) -> str:
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
+_ACTIVE_RICH_ADAPTER: Optional["RichStreamAdapter"] = None
+
+
+def register_active_adapter(adapter: "RichStreamAdapter") -> None:
+    """Register the currently-used Rich adapter for global pause/resume."""
+    global _ACTIVE_RICH_ADAPTER
+    _ACTIVE_RICH_ADAPTER = adapter
+
+
+def pause_active_spinner() -> None:
+    """Pause the active rich spinner so raw input() won't race the Live redraw."""
+    if _ACTIVE_RICH_ADAPTER is not None:
+        _ACTIVE_RICH_ADAPTER.pause_for_input()
+
+
+def resume_active_spinner() -> None:
+    """Resume the active rich spinner after input() returns."""
+    if _ACTIVE_RICH_ADAPTER is not None:
+        _ACTIVE_RICH_ADAPTER.resume_after_input()
+
 
 def select_stream_adapter(
     mode: Optional[str] = None,
