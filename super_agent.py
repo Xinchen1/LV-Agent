@@ -221,32 +221,13 @@ class SuperAgentCLI:
     ]
 
     def _setup_command_completion(self):
-        """用 readline 提供命令补全: 输入 / 后按 Tab 弹出可用命令选项."""
-        if not sys.stdout.isatty() or not sys.stdin.isatty():
-            return
-        try:
-            import readline
-        except Exception:
-            return
-        commands = self._COMMANDS
+        """命令补全初始化.
 
-        def completer(text: str, state: int):
-            if not text.startswith("/"):
-                return None
-            matches = [c for c in commands if c.startswith(text)]
-            return matches[state] + " " if state < len(matches) else None
-
-        try:
-            readline.set_completer(completer)
-            readline.parse_and_bind("tab: complete")
-            readline.set_completer_delims(" \t\n")
-            # 关键: 启用 bracketed paste, 让多行粘贴作为一次完整输入(而非第一个换行就截断)
-            try:
-                readline.parse_and_bind("set-bracketed-paste on")
-            except Exception:
-                pass
-        except Exception:
-            pass
+        已禁用 readline: 底层 ``_read_input_complete`` 使用 termios+cbreak
+        手动读取 stdin 并自行处理 bracketed paste / 换行提交，
+        readline 初始化会改变终端状态并产生冲突（导致 Enter 无效、粘贴丢失）。
+        """
+        pass
 
     def _select_runner(self):
         """选择任务执行入口 (legacy loop)."""
@@ -941,6 +922,7 @@ class SuperAgentCLI:
         import termios
         import tty
         import select
+        import time
 
         fd = sys.stdin.fileno()
         old_attr = None
@@ -953,10 +935,19 @@ class SuperAgentCLI:
             except Exception:
                 return ""
 
+        # 主动启用 bracketed paste: 让支持它的终端用 ESC[200~...ESC[201~ 包裹粘贴内容
+        try:
+            sys.stdout.write("\x1b[?2004h")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
         buf = bytearray()
         in_paste = False
         pasted = False  # 本次输入是否经历过 bracketed paste
         echoed = 0  # 已回显的字节数
+        last_read = time.monotonic()  # 上次收到数据的时间(用于粘贴洪泛检测)
+        flood_pending_newline = False  # 洪泛期间遇到的换行不提交, 等流稳定再提交
         try:
             while True:
                 r, _, _ = select.select([fd], [], [], 0.2)
@@ -965,6 +956,7 @@ class SuperAgentCLI:
                 chunk = os.read(fd, 4096)
                 if not chunk:
                     continue
+                last_read = time.monotonic()
 
                 # ---- 逐字节状态机: 区分粘贴内容与普通输入 ----
                 i = 0
@@ -983,8 +975,10 @@ class SuperAgentCLI:
                             i += 6
                             continue
                         # 方向键: ESC[A 上, ESC[B 下(翻输入历史)
-                        if chunk[i+1:i+2] == b"[" and chunk[i+2:i+3] in (b"A", b"B", b"C", b"D"):
-                            key = chunk[i+2]
+                        if i + 2 < n and chunk[i+1:i+2] == b"[":
+                            key_slice = chunk[i+2:i+3]
+                            if key_slice in (b"A", b"B"):
+                                key = key_slice[0]
                             if key == b"A" and self._input_history:  # 上箭头 → 上一条
                                 if self._history_idx < 0:
                                     self._history_idx = len(self._input_history) - 1
@@ -1066,6 +1060,11 @@ class SuperAgentCLI:
         except Exception:
             pass
         finally:
+            try:
+                sys.stdout.write("\x1b[?2004l")
+                sys.stdout.flush()
+            except Exception:
+                pass
             try:
                 if old_attr is not None:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
