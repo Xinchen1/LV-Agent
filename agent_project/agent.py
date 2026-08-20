@@ -1121,6 +1121,18 @@ class OpenMythosAgent:
         t = task.strip()
         tl = t.lower()
 
+        # -2) 显式"查询我的记忆/关于我"意图 → 特殊标记, 禁止转去 web_search
+        #     这类问题不依赖外部网络, 答案来自注入的记忆上下文。
+        #     必须排在 web_search 意图(含"是什么"匹配)之前, 否则会被误判成搜索。
+        #     排除"X是什么意思"(问词义, 应走 QA 定义类回答)与"搜索/查一下"(明确要联网)。
+        if re.search(
+            r'(我的记忆|记得我|记住我|关于我|了解我|我的情况|我的背景|我们聊过|你记得|你的记忆里|在你记忆|核心记忆|你了解我|还记得我|记不记得我|你认识我吗|你知道我)',
+            t, re.IGNORECASE,
+        ) and not any(k in tl for k in ("搜索", "查一下", "查下", "查询", "最新", "新闻", "search")) and not re.search(
+            r'(是什么意思|什么含义|是什么概念|什么意思)', t, re.IGNORECASE,
+        ) and not re.match(r'^(什么(是|叫|叫做)|啥(是|叫)|什么是|啥是)\s*\S+', t, re.IGNORECASE):
+            return ("__memory_query__", {}, 0.95, "detected memory-query intent (answer from injected memory, no web search)")
+
         # -1) 看/读文件夹意图: "看下 X 文件夹/目录" → 定位并在当前目录下 list
         if any(k in tl for k in ("看下", "看一下", "看看", "查看", "浏览", "读一下", "读取", "打开") ) and any(
             k in tl for k in ("文件夹", "目录", "folder", "dir", "目录结构", "里面", "内容")
@@ -1847,7 +1859,14 @@ class OpenMythosAgent:
         """判断是否需要注入长时记忆/语义记忆上下文.
 
         Turbo 模式: 首次对话或简单问答跳过记忆注入,减少首次响应延迟.
+        例外: "我的记忆/你记得我/关于我"等显式查询记忆的请求, 即使是简单问答
+        也必须注入记忆召回——否则会被当作无记忆问题直接回答或误触发搜索。
         """
+        # 显式"查询记忆/关于我"类请求 → 必须注入记忆召回
+        if re.search(r'(我的记忆|记得我|记住我|关于我|了解我|我的情况|我的背景|我们聊过|你记得|你的记忆里|在你记忆|核心记忆|你了解我|还记得我|记不记得我|你认识我吗|你知道我)',
+                     task, re.IGNORECASE) and not re.search(r'(是什么意思|什么含义|是什么概念|什么意思)', task, re.IGNORECASE) \
+                and not re.match(r'^(什么(是|叫|叫做)|啥(是|叫)|什么是|啥是)\s*\S+', task, re.IGNORECASE):
+            return True
         # 首次对话: 不注入历史记忆
         if not getattr(self, 'conversation_history', None):
             return False
@@ -2264,6 +2283,7 @@ class OpenMythosAgent:
         actions = []
         final_answer = ""
         ambiguous_reply = ""
+        _memory_query_mode = False
 
         # 意图分类器兜底: LLM 没生成有效工具调用、生成错误工具, 或生成的工具与
         # 用户意图明显冲突(如"查新闻"却去 find 全盘扫描)时,
@@ -2289,8 +2309,13 @@ class OpenMythosAgent:
             if _classifier_override:
                 tool_name, intent_args, conf, reason = classified
                 self.logger.info(f"intent classifier: {tool_name} (conf={conf}, {reason})")
+                # 记忆查询意图: 不执行任何工具, 直接用注入的记忆上下文回答。
+                # (答案已在 memory_context 中; 若记忆为空则自然说明"暂无记忆")。
+                if tool_name == "__memory_query__":
+                    _memory_query_mode = True
+                    action = None
                 # 创建文件意图: 需要确认文件名, 若分类器提取不到就提示而非乱建
-                if tool_name == "file_ops" and intent_args.get("action") == "list" and intent_args.get("path"):
+                elif tool_name == "file_ops" and intent_args.get("action") == "list" and intent_args.get("path"):
                     # 文件夹读取意图: 用真实目录解析(大小写不敏感), 解析不到才用原始名
                     resolved_folder = self._recent_folder_from_history(task)
                     if resolved_folder:
@@ -2378,6 +2403,13 @@ class OpenMythosAgent:
                 from .tools import ToolCall
                 action = ToolCall(tool_name='file_ops', arguments={'action': 'list', 'path': folder})
 
+        # 记忆查询模式: 清除 LLM 可能误生成的 web_search 等工具调用,
+        # 直接基于注入的记忆上下文(memory_context)回答, 绝不联网搜索。
+        if _memory_query_mode:
+            if action is not None and action.tool_name not in ("__memory_query__",):
+                self.logger.info(f"memory query: suppressing tool {action.tool_name} (answer from memory)")
+            action = None
+
         if action:
             # 目录/文件列表等原始输出不适合直接播放, 需要总结后再给用户。
             # 执行前根据工具与参数预判, 避免先播完原始列表又播一遍总结。
@@ -2458,6 +2490,43 @@ class OpenMythosAgent:
                         final_answer = self._tool_failure_fallback(task, tool_result)
         else:
             final_answer = answer_text
+
+        # 记忆查询兜底: 即使 LLM 没从注入记忆里组织答案(如回复"没有记忆"),
+        # 也直接从 memory_context 提取可见信息给用户, 避免空答或误称"无记忆"。
+        if _memory_query_mode:
+            try:
+                _mem_bits = []
+                for _label, _sec in (
+                    ("user_profile", "User Profile"),
+                    ("memory", "Relevant Memory"),
+                ):
+                    for _m in re.finditer(
+                        rf"## {_label}:\n(.*?)(?=\n## |\Z)", memory_context, flags=re.DOTALL
+                    ):
+                        _content = _m.group(1).strip()
+                        if _content and not _content.startswith("<!--") and "no " not in _content.lower()[:20]:
+                            _mem_bits.append(_content)
+                if _mem_bits:
+                    _joined = "\n\n".join(_mem_bits)[:1200]
+                    _fallback = (
+                        f"根据我保存的记忆,关于你的信息有:\n\n{_joined}\n\n"
+                        "(以上来自我的长期记忆。如果你觉得有出入或想补充,告诉我即可。)"
+                    )
+                    # 仅当模型回答是"无记忆"式的空泛回复时才覆盖, 否则保留模型基于记忆的回答
+                    _is_empty_claim = (
+                        not answer_text.strip()
+                        or any(
+                            k in answer_text for k in (
+                                "没有记忆", "无记忆", "没有保存", "不保存", "no memory", "don't have",
+                                "不会保存", "无法提供", "没有存储", "不记得",
+                            )
+                        )
+                    )
+                    if _is_empty_claim:
+                        final_answer = _fallback
+                        self.logger.info("memory query: injected fallback answer from saved memory")
+            except Exception as e:
+                self.logger.debug(f"memory query fallback failed {e}")
 
         # 超短歧义输入: 用澄清/问候回复, 不被模型的幻觉工具文本覆盖
         if ambiguous_reply:
@@ -2627,6 +2696,21 @@ class OpenMythosAgent:
         # 之前, 造成"输出结束后卡顿"。
         try:
             self._update_user_profile_async(task, final_answer)
+        except Exception:
+            pass
+
+        # 快车道也写入长期记忆(之前 fast path 直接 return, 从不 consolidate,
+        # 导致简单问答中的用户事实/偏好永远进不了长期记忆库)。
+        # consolidate 内部异步执行, 不阻塞返回; importance 闸门会过滤闲聊。
+        try:
+            if self.context_engine and self.config.memory.enabled:
+                self.context_engine.consolidate(task, {
+                    'task': task,
+                    'final_answer': final_answer,
+                    'success': True,
+                    'actions': actions,
+                    'metadata': {'mode': 'fast', 'fast_path': True},
+                })
         except Exception:
             pass
 
