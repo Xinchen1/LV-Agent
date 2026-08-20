@@ -608,15 +608,14 @@ class ExecutionEngine:
         if not ctx.monitor_enabled:
             return
         ctx.monitor_rounds += 1
-        # 频率控制: 每 2 步检查一次, 避免过度干预
-        if ctx.monitor_rounds % 2 != 0:
+        # 频率控制: 每 N 步检查一次, 避免过度干预
+        freq = getattr(ctx, "monitor_frequency", 3)
+        if ctx.monitor_rounds % freq != 0:
             return
         hint = self._rule_monitor(ctx)
+        # LLM monitor 仅在规则层发现异常时才触发, 不轮询空转
         if hint is None and ctx.max_steps >= 8 and len(ctx.steps) >= 3:
-            # 规则没发现, 但复杂任务已有多个步骤时, 用 LLM 分支 agent 感知
-            # (降低频率: 每 4 轮才做一次 LLM 感知, 省 token)
-            if ctx.monitor_rounds % 4 == 0:
-                hint = self._llm_monitor(ctx)
+            hint = self._llm_monitor(ctx)
         if hint:
             ctx.monitor_hints.append(hint)
             if ctx.stream_callback:
