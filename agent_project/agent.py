@@ -2295,6 +2295,11 @@ class OpenMythosAgent:
             c_tool, c_args, c_conf, c_reason = classified
             if action is None or not TOOLS_REGISTRY.get(action.tool_name):
                 _classifier_override = True
+            elif c_tool == "__memory_query__":
+                # 记忆查询意图: 无论 LLM 生成了什么工具(如误判成 web_search),
+                # 都必须强制拦截, 改由记忆上下文回答, 绝不联网搜索。
+                self.logger.info(f"memory query override: model chose {action.tool_name}, forcing memory answer")
+                _classifier_override = True
             else:
                 # 模型生成的工具与意图严重冲突 → 强制纠正
                 a_name = action.tool_name
