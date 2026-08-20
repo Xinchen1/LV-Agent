@@ -639,9 +639,52 @@ class ContextEngine:
 
     def observe_user(self, task: str):
         self.working_memory.add("user", task, "message")
-
     def observe_assistant(self, text: str):
         self.working_memory.add("assistant", text, "message")
+
+    def compress_working_memory(self, target_tokens: Optional[int] = None) -> int:
+        """把工作记忆里超出预算的旧事件压缩成摘要, 防止长会话爆上下文.
+
+        返回被压缩的事件数; 0 表示无需压缩。
+        仅在事件超预算时动作, 普通规模会话零开销。
+        """
+        if not self.enabled or self.working_memory is None:
+            return 0
+        try:
+            events = self.working_memory.get_events()
+            if not events:
+                return 0
+            budget = target_tokens or int(getattr(self, "working_budget", 1500))
+            current = self.working_memory.format_for_prompt(max_tokens=budget * 4)
+            if _estimate_tokens(current) <= budget:
+                return 0
+            # 保留最近 1/3 事件, 把更旧的部分压缩为摘要塞回
+            keep = max(10, len(events) // 3)
+            old = events[:-keep]
+            recent = events[-keep:]
+            if not old:
+                return 0
+            summary = ""
+            try:
+                if self.compressor is not None:
+                    summary = self.compressor.compress_events(old, target_tokens=min(256, budget // 4))
+            except Exception:
+                pass
+            with self.working_memory._lock:
+                new_events = recent[:]
+                if summary:
+                    new_events.insert(0, WorkingMemoryEvent(
+                        role="assistant",
+                        content=f"[压缩的早前对话] {summary}"[:2000],
+                        event_type="summary",
+                        metadata={"compressed": len(old)},
+                    ))
+                self.working_memory.events = new_events
+            return len(old)
+        except Exception as e:
+            logger = __import__("logging").getLogger("context_engine")
+            logger.warning(f"compress_working_memory failed: {e}")
+            return 0
 
     def seed_history(self, turns: List[Dict[str, Any]]) -> None:
         """从持久化对话历史回填工作记忆, 让进程重启后仍能记住跨会话对话.
