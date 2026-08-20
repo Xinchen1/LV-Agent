@@ -2173,15 +2173,24 @@ class OpenMythosAgent:
             # 仅在交互式深度思考(非简单问答)时透出, 保证简洁输出。
             # reasoning 到达时给一个轻量"思考中"状态, 避免用户看到空白以为卡死。
             _thinking_shown = {"v": False}
+            _streamed_content = {"v": False}  # 是否已实时透出过正文(用于避免重复追加)
             def _buffer_user_cb(kind, text):
                 if kind in ('tool_call', 'tool_result', 'error'):
                     stream_callback(kind, text)
                 elif kind == 'status':
                     stream_callback(kind, text)
                 elif kind == 'reasoning' and not _thinking_shown["v"]:
+                    # 思考过程只显示一次"thinking"轻提示(保持 fast path 简洁)
                     _thinking_shown["v"] = True
                     stream_callback('status', 'thinking')
-                # 'reasoning' 与 'content' 的正文都不实时透出, 由最终清洗后的答案统一重放
+                elif kind == 'content':
+                    # 正文实时透出: 让用户逐字看到模型输出, 不再等整轮结束才一次性蹦出。
+                    # 同时标记 content_parts 已被流式累积, 供最终答案组装使用。
+                    _clean = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    if _clean:
+                        _streamed_content["v"] = True
+                        stream_callback('content', _clean)
+                # 'reasoning' 不逐字透出(fast path 保持简洁), 但 'content' 实时逐字显示
 
             router = self._create_stream_router(_buffer_user_cb, reasoning_parts, content_parts)
             internal_callback = router.on_token
@@ -2265,7 +2274,10 @@ class OpenMythosAgent:
                 reasoning_parts.append(reasoning_text)
                 content_parts = [answer_text]
             else:
-                content_parts.append(raw_answer)
+                # content 已由流式路由实时透出时不再重复追加, 避免与透出内容重复。
+                # (streaming 时 content_parts 已被 router 记录; 非 streaming 时此处是唯一来源)
+                if not content_parts or not _streamed_content["v"]:
+                    content_parts.append(raw_answer)
 
         answer_text = "".join(content_parts).strip()
         # 当模型只返回 reasoning 或内容未被路由时,回退到原始输出(去掉 think 标签)
@@ -2681,8 +2693,10 @@ class OpenMythosAgent:
             except Exception as e:
                 self.logger.debug(f"promise retry failed {e}")
 
-        # 清洗后平滑重放干净答案(实时流已缓冲, 此处统一输出, 避免 think 残留/回声)
-        if stream_callback and final_answer:
+        # 清洗后平滑重放干净答案(非实时流式时统一输出, 避免 think 残留/回声)。
+        # 若正文已由实时流逐字透出(_streamed_content), 则不再重放, 防止双重显示。
+        _already_streamed = bool(stream_callback) and bool(locals().get("_streamed_content", {}).get("v", False))
+        if stream_callback and final_answer and not _already_streamed:
             for i in range(0, len(final_answer), 8):
                 stream_callback("content", final_answer[i:i + 8])
                 time.sleep(0.003)
@@ -3246,16 +3260,16 @@ class OpenMythosAgent:
                             self.buffer = ''
 
             def finalize(self):
-                if not self.buffer:
-                    return
-                if self.state == 'think':
-                    self._emit('reasoning', self.buffer)
-                elif self.state == 'tool_call_raw':
-                    # Preserve raw tool call for parser but don't leak it as content
-                    self._append('content', self.buffer)
-                else:
-                    self._emit('content', self.buffer)
-                self.buffer = ''
+                if self.buffer:
+                    if self.state == 'think':
+                        self._emit('reasoning', self.buffer)
+                    elif self.state == 'tool_call_raw':
+                        # Preserve raw tool call for parser but don't leak it as content
+                        self._append('content', self.buffer)
+                    else:
+                        # content 态残留 buffer 尚未逐字透出过, emit 补上(避免丢尾)
+                        self._emit('content', self.buffer)
+                    self.buffer = ''
 
         return StreamRouter(user_callback, reasoning_parts, content_parts)
 
