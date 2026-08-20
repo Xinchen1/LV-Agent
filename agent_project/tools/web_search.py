@@ -296,29 +296,57 @@ class WebSearchTool(BaseTool):
                     # In sequential fallback we stop at the first real provider
                     break
         else:
-            # 并发收集, 严格控制总时长: 已有足够结果或到时间即返回, 不等慢 provider
+            # 并发收集, 动态等待: 每 2s 检查一次, 已有足够结果即提前返回, 不等慢 provider
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
             try:
                 futures = {
                     executor.submit(self._call_provider, provider, query, max_results): provider
                     for provider in provider_list
                 }
-                # 单次等待, 总预算 10s; 到点即收已完成的, 未完成直接放弃
-                done, not_done = concurrent.futures.wait(futures, timeout=10)
-                for future in done:
-                    provider = futures[future]
-                    try:
-                        results, error = future.result()
-                        if error:
-                            errors.append(f"{provider}: {error}")
-                        if self._is_real_results(results):
-                            provider_results[provider] = results
-                    except Exception as e:
-                        errors.append(f"{provider}: {e}")
+                deadline = time.monotonic() + 10
+                poll_interval = 2
+                done_set = set()
+                while time.monotonic() < deadline and len(done_set) < len(futures):
+                    newly_done, _ = concurrent.futures.wait(
+                        futures, timeout=poll_interval, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    done_set.update(newly_done)
+                    # 检查是否已拿到足够真结果, 无需再等
+                    any_real = False
+                    for future in done_set:
+                        provider = futures[future]
+                        try:
+                            results, error = future.result()
+                            if error:
+                                errors.append(f"{provider}: {error}")
+                            if self._is_real_results(results):
+                                provider_results[provider] = results
+                                any_real = True
+                        except Exception as e:
+                            errors.append(f"{provider}: {e}")
+                    if any_real:
+                        break
+                # 收尾: 处理剩余已完成 future(避免漏掉并发完成的)
+                remaining = set(futures.keys()) - done_set
+                for future in remaining:
+                    if future.done():
+                        done_set.add(future)
+                for future in done_set:
+                    if future in futures and futures[future] not in provider_results:
+                        provider = futures[future]
+                        try:
+                            results, error = future.result()
+                            if error:
+                                errors.append(f"{provider}: {error}")
+                            if self._is_real_results(results) and provider not in provider_results:
+                                provider_results[provider] = results
+                        except Exception as e:
+                            errors.append(f"{provider}: {e}")
+                # 未完成 future 不阻塞, 直接取消后台线程
+                not_done = set(futures.keys()) - done_set
                 for future in not_done:
                     future.cancel()
             finally:
-                # 不等待慢线程, 立即返回
                 executor.shutdown(wait=False, cancel_futures=True)
 
         return provider_results, errors
