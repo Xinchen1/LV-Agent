@@ -61,10 +61,19 @@ def console_approval(effect: Effect, reason: str, timeout: Optional[float] = Non
     )
 
     try:
+        from ..stream_adapters import pause_active_spinner, resume_active_spinner
+    except Exception:
+        pause_active_spinner = resume_active_spinner = lambda: None
+
+    pause_active_spinner()
+    try:
         answer = input("   Allow? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
+        resume_active_spinner()
         _console.print("   [red]denied[/red]")
         return False
+    finally:
+        resume_active_spinner()
 
     ok = answer in ("y", "yes")
     _console.print("   [green]allowed[/green]" if ok else "   [red]denied[/red]")
