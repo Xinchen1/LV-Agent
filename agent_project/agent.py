@@ -2961,10 +2961,19 @@ class OpenMythosAgent:
         store = getattr(raw_mm, "session_store", None)
         if store is None or not task:
             return ""
-        try:
-            turns = store.search(task, session_id="", k=k * 6)
-        except Exception:
-            return ""
+        # 时间回溯类查询("昨天/前天/上次/之前/我们聊了什么/之前聊过什么"等):
+        # 关键词匹配召回不到(历史内容不含这些时间词), 直接按时间倒序取最近对话。
+        _time_recall = re.search(r'(昨天|前天|昨天|前天|上次|上回|之前|前些天|前几天|前两|前几次|我们聊|聊过|聊了|聊什么|说过|之前聊)', task)
+        if _time_recall:
+            try:
+                turns = store.recent(session_id="", n=k * 4)
+            except Exception:
+                turns = []
+        else:
+            try:
+                turns = store.search(task, session_id="", k=k * 6)
+            except Exception:
+                return ""
         scored = []
         for t in turns:
             if getattr(t, "session_id", None) == self.session_id:
