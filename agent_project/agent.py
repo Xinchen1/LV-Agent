@@ -2147,16 +2147,16 @@ class OpenMythosAgent:
                 pf = self.context_engine.user_profile.format(max_tokens=300)
                 if pf and pf.strip():
                     context_parts.append(pf)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"profile context failed: {e}")
         # 快车道也做跨会话历史召回, 简单问"我之前说的XX"也能想起
         # (用更高相关性门槛+最多1条, 避免无关旧对话干扰简单问答)
         try:
             past = self._recall_past_conversations(task, k=1, min_relevance=0.25)
             if past:
                 context_parts.append(past)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"past conversation recall failed: {e}")
         if context_parts:
             system_parts.append("\n" + "\n\n".join(context_parts))
         prompt = "\n".join(system_parts) + f"\n\nUser: {task}\nAssistant:"
@@ -2696,17 +2696,10 @@ class OpenMythosAgent:
         completed_at = datetime.now()
         duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-        # 快车道也学习用户偏好(之前 fast path 不更新画像, 随口说的偏好全丢了)。
-        # 异步后台执行: 内部可能做一次 LLM 抽取, 若同步执行会阻塞在返回提示符
-        # 之前, 造成"输出结束后卡顿"。
-        try:
-            self._update_user_profile_async(task, final_answer)
-        except Exception:
-            pass
-
         # 快车道也写入长期记忆(之前 fast path 直接 return, 从不 consolidate,
         # 导致简单问答中的用户事实/偏好永远进不了长期记忆库)。
-        # consolidate 内部异步执行, 不阻塞返回; importance 闸门会过滤闲聊。
+        # consolidate 内部异步执行(含用户画像更新 + importance 闸门过滤闲聊),
+        # 不阻塞返回。这是记忆写入的唯一入口, 避免多路重复写画像。
         try:
             if self.context_engine and self.config.memory.enabled:
                 self.context_engine.consolidate(task, {
@@ -2716,6 +2709,18 @@ class OpenMythosAgent:
                     'actions': actions,
                     'metadata': {'mode': 'fast', 'fast_path': True},
                 })
+        except Exception:
+            pass
+
+        # 会话 token 预算守卫: 快车道也要防止长会话悄悄涨爆上下文。
+        # 超过阈值时触发工作记忆压缩(截断/摘要旧事件), 记录状态供 UI 提示。
+        try:
+            _max_ctx = getattr(self.config.memory, "max_context_tokens", 6000) if getattr(self.config, "memory", None) else 6000
+            _used = int(self.session_token_usage.get("total", 0))
+            if _used >= _max_ctx and self.context_engine is not None:
+                _compressed = self.context_engine.compress_working_memory()
+                self.logger.info(f"context guard: {_used}/{_max_ctx} tokens, compressed working memory")
+                self.session_token_usage["compressed"] = True
         except Exception:
             pass
 
@@ -2731,7 +2736,7 @@ class OpenMythosAgent:
             }],
             'thinking_steps': 1,
             'outer_loops': 1,
-            'final_reward': 1.0,
+            'final_reward': self._compute_fast_reward(final_answer, actions),
             'success': True,
             'session_token_usage': self.session_token_usage,
             'final_answer': final_answer,
@@ -4801,13 +4806,75 @@ class OpenMythosAgent:
             '[TOOL:file_ops] {"action": "list", "path": "~/Desktop"} [/TOOL]'
         )
 
+    def _compute_fast_reward(self, final_answer: str, actions: List[Dict[str, Any]]) -> float:
+        """快车道奖励: 基于产出质量 + 工具成败 + 置信度, 不再硬编码满分."""
+        try:
+            reward = 0.7
+            conf = getattr(self, "_last_confidence", 0.5)
+            if isinstance(conf, (int, float)) and 0 <= conf <= 1:
+                reward *= (0.6 + 0.4 * conf)
+            answer = str(final_answer or "").strip()
+            if not answer:
+                reward *= 0.4
+            elif len(answer) < 5:
+                reward *= 0.7
+            if actions:
+                failed = sum(1 for a in actions if isinstance(a, dict) and not a.get("success", True))
+                reward *= max(0.3, 1.0 - 0.5 * failed / max(1, len(actions)))
+            return max(0.0, min(1.0, reward))
+        except Exception:
+            return 0.7
+
     def _compute_reward(self, trajectory: Dict) -> float:
-        """计算奖励"""
-        if trajectory['success']:
-            return 1.0
-        else:
-            # 可以基于步骤数、工具使用等给出部分奖励
-            return 0.1 * (trajectory['outer_loops'] / self.config.max_outer_loops)
+        """计算奖励(供经验/反思飞轮消费).
+
+        信号分层(0~1):
+        - 基础: success 布尔(0.0 / 0.5)
+        - 质量: final_reward / quality_score(若已由推理引擎给出) 加权
+        - 置信度: _last_confidence(内部评估) 轻度加权
+        - 工具成败: 动作里失败数越多, 奖励越扣
+        - 产出长度惩罚: 空答案或明显截断降权
+        该分数驱动 _should_reflect/_trigger_self_improvement 的决策,
+        必须反映真实执行质量而非"成功就满分"。
+        """
+        try:
+            success = bool(trajectory.get("success", False))
+            reward = 0.5 if success else 0.0
+
+            # 质量信号: 优先用已算好的 final_reward/quality_score(0~1 归一化)
+            q = trajectory.get("final_reward")
+            if q is None:
+                q = (trajectory.get("metadata") or {}).get("quality_score")
+            if isinstance(q, (int, float)) and q > 0:
+                try:
+                    reward = 0.4 + 0.6 * max(0.0, min(1.0, float(q)))
+                except Exception:
+                    pass
+                if not success:
+                    reward *= 0.5
+
+            # 置信度: 内部评估(0~1), 低置信削弱奖励
+            conf = getattr(self, "_last_confidence", 0.5)
+            if isinstance(conf, (int, float)) and 0 <= conf <= 1:
+                reward *= (0.6 + 0.4 * conf)
+
+            # 工具成败: 动作列表中失败的工具调用降低奖励
+            actions = trajectory.get("actions") or []
+            if actions:
+                failed = sum(1 for a in actions if isinstance(a, dict) and not a.get("success", True))
+                reward *= max(0.2, 1.0 - 0.4 * failed / max(1, len(actions)))
+
+            # 产出质量: 空答案/明显异常降权
+            final_answer = str(trajectory.get("final_answer", "") or "").strip()
+            if not final_answer:
+                reward *= 0.5
+            elif len(final_answer) < 5:
+                reward *= 0.7
+
+            return max(0.0, min(1.0, reward))
+        except Exception:
+            # 兜底: 计算失败时退化为布尔奖励, 不崩溃
+            return 1.0 if trajectory.get("success") else 0.0
 
     def _store_experience(self, trajectory: Dict[str, Any]):
         """存储经验并提取可复用教训"""
@@ -4835,20 +4902,38 @@ class OpenMythosAgent:
         )
 
     def _infer_task_type(self, task: str) -> str:
-        """推断任务类型"""
+        """推断任务类型(中英文关键词, 供经验库聚类/复用)."""
         task_lower = task.lower()
+        # 英文关键词
         if 'weather' in task_lower:
             return 'weather_query'
-        elif any(kw in task_lower for kw in ['calculate', 'math', 'compute']):
+        elif any(kw in task_lower for kw in ['calculate', 'math', 'compute', 'calculator']):
             return 'calculation'
-        elif any(kw in task_lower for kw in ['file', 'read', 'write']):
-            return 'file_operation'
-        elif 'search' in task_lower:
+        elif any(kw in task_lower for kw in ['search', 'look up', 'find out', 'news']):
             return 'web_search'
-        elif 'api' in task_lower:
+        elif any(kw in task_lower for kw in ['api']):
             return 'api_call'
-        elif 'python' in task_lower or 'code' in task_lower:
+        elif any(kw in task_lower for kw in ['python', 'code', 'program', 'script']):
             return 'code_execution'
+        elif any(kw in task_lower for kw in ['file', 'read', 'write', 'folder', 'directory']):
+            return 'file_operation'
+        # 中文关键词(绝大多数用户输入)
+        if any(k in task for k in ('天气', '气温', '下雨', '台风')):
+            return 'weather_query'
+        elif any(k in task for k in ('算', '计算', '求和', '多少加', '几加', '几乘', '加减乘除', '汇率换算', '单位换算')):
+            return 'calculation'
+        elif any(k in task for k in ('搜索', '查找', '查一下', '查询', '搜一下', '找一下', '新闻', '资讯', '股价', '行情', '最新')):
+            return 'web_search'
+        elif any(k in task for k in ('代码', '编程', '脚本', 'python', '写程序', '实现一个', '函数', 'bug', '报错', '调试', '重构')):
+            return 'code_execution'
+        elif any(k in task for k in ('文件', '文件夹', '目录', '读取', '写入', '保存', '删除', '移动', '复制', '重命名', '查看', '打开')):
+            return 'file_operation'
+        elif any(k in task for k in ('分析', '比较', '对比', '评估', '总结', '研究', '调研', '报告')):
+            return 'analysis'
+        elif any(k in task for k in ('我的记忆', '记得', '关于我', '我们聊过', '之前聊', '对话历史')):
+            return 'memory_query'
+        elif any(k in task for k in ('你好', '嗨', 'hello', '谢谢', '再见', '在吗')):
+            return 'greeting'
         else:
             return 'general'
 
