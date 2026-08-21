@@ -944,10 +944,10 @@ class SuperAgentCLI:
 
         buf = bytearray()
         in_paste = False
-        pasted = False  # 本次输入是否经历过 bracketed paste
-        echoed = 0  # 已回显的字节数
-        last_read = time.monotonic()  # 上次收到数据的时间(用于粘贴洪泛检测)
-        flood_pending_newline = False  # 洪泛期间遇到的换行不提交, 等流稳定再提交
+        pasted = False
+        echoed = 0
+        last_read = time.monotonic()
+        _esc_prefix_pending = b""
         try:
             while True:
                 r, _, _ = select.select([fd], [], [], 0.2)
@@ -958,55 +958,80 @@ class SuperAgentCLI:
                     continue
                 last_read = time.monotonic()
 
-                # ---- 逐字节状态机: 区分粘贴内容与普通输入 ----
+# ---- 逐字节状态机: 区分粘贴内容与普通输入 ----
                 i = 0
                 n = len(chunk)
+                # 粘贴 escape 序列可能被 select+os.read 切开，
+                # 若上一轮末尾留下一个不完整的 ESC[200~ 前缀，在此处补齐
+                if _esc_prefix_pending:
+                    # 尝试与当前 chunk 前几个字节拼成 ESC[200~
+                    probe = _esc_prefix_pending + chunk[:5 - len(_esc_prefix_pending)]
+                    if probe == b"\x1b[200~":
+                        in_paste = True
+                        pasted = True
+                        consumed = 5 - len(_esc_prefix_pending)
+                        i = consumed
+                        _esc_prefix_pending = b""
+                    else:
+                        # 不是完整的 bracketed paste 开启标记，丢弃残留前缀
+                        _esc_prefix_pending = b""
                 while i < n:
                     b = chunk[i]
                     if b == 0x1b:  # ESC
-                        # 尝试匹配 ESC[200~ / ESC[201~
-                        if chunk[i:i+6] == b"\x1b[200~":
+                        remaining = n - i
+                        if remaining >= 6 and chunk[i:i+6] == b"\x1b[200~":
                             in_paste = True
                             pasted = True
                             i += 6
                             continue
-                        if chunk[i:i+6] == b"\x1b[201~":
+                        if remaining >= 6 and chunk[i:i+6] == b"\x1b[201~":
                             in_paste = False
+                            flood_pending_newline = False
                             i += 6
                             continue
-                        # 方向键: ESC[A 上, ESC[B 下(翻输入历史)
-                        if i + 2 < n and chunk[i+1:i+2] == b"[":
-                            key_slice = chunk[i+2:i+3]
-                            if key_slice in (b"A", b"B"):
-                                key = key_slice[0]
-                            if key == b"A" and self._input_history:  # 上箭头 → 上一条
-                                if self._history_idx < 0:
-                                    self._history_idx = len(self._input_history) - 1
-                                else:
-                                    self._history_idx = max(0, self._history_idx - 1)
-                                self._apply_history_line(buf, self._input_history[self._history_idx])
-                            elif key == b"B" and self._input_history:  # 下箭头 → 下一条/新输入
-                                self._history_idx += 1
-                                if self._history_idx >= len(self._input_history):
-                                    self._history_idx = -1
-                                    self._apply_history_line(buf, "")
-                                else:
-                                    self._apply_history_line(buf, self._input_history[self._history_idx])
-                            # C/D 左右箭头: 忽略(简单实现, 不支持光标移动)
-                            i += 3
-                            continue
-                        # 其他 ESC 序列: 跳过 ESC 本身
+                        # 收集 ESC 后面的剩余字节, 判断是不是可能是被切开的
+                        # ESC[200~ 共 6 字节; 如果剩余不足 6 字节, 暂存等到下次 read
+                        tail = chunk[i+1:i+6]
+                        # 尝试匹配已收到的尾部 + 下一个字节 (下一轮再读)
+                        # 这里只处理当前 chunk 里能完整匹配的情况
+                        if chunk[i:i+2] == b"\x1b[":
+                            # 可能是方向键 ESC Ax (已至少拿到 ESC[)
+                            if remaining >= 3:
+                                key_byte = chunk[i+2:i+3]
+                                if key_byte in (b"A", b"B"):
+                                    key = key_byte[0]
+                                    if key == 65 and self._input_history:
+                                        if self._history_idx < 0:
+                                            self._history_idx = len(self._input_history) - 1
+                                        else:
+                                            self._history_idx = max(0, self._history_idx - 1)
+                                        self._apply_history_line(buf, self._input_history[self._history_idx])
+                                    elif key == 66 and self._input_history:
+                                        self._history_idx += 1
+                                        if self._history_idx >= len(self._input_history):
+                                            self._history_idx = -1
+                                            self._apply_history_line(buf, "")
+                                        else:
+                                            self._apply_history_line(buf, self._input_history[self._history_idx])
+                                i += 3
+                                continue
+                            else:
+                                # 方向键被截断: 缓存等下一轮
+                                _esc_prefix_pending = chunk[i:]
+                                break
+                        # 其他单字节 ESC 序列(不含完整方向键)直接跳过
                         i += 1
+                        _esc_prefix_pending = b""
                         continue
+                    # 普通粘贴中换行已被 in_paste 分支累积, 不在此提交
                     if in_paste:
-                        # 粘贴内容: 原样累积(含换行); 不回显(等提交后统一显示),
-                        # 同时推进 echoed, 避免后续普通输入误触发回显
                         buf += chunk[i:i+1]
                         echoed = len(buf)
                         i += 1
                         continue
                     # 普通输入(粘贴模式下的换行已由 in_paste 分支累积, 不在此提交)
                     if b == 0x0a or b == 0x0d:  # 回车提交
+                        # 粘贴中换行不提交: in_paste 情况下上面分支已处理
                         self._last_input_pasted = pasted
                         sys.stdout.write("\r\n")
                         sys.stdout.flush()
