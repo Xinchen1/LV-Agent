@@ -104,14 +104,11 @@ class SearchCache:
             q = q.replace(w, "")
         # 3. 去空格
         q = q.replace(" ", "")
-        # 4. 保序去重(不再全字符排序: 排序会打乱中文词序, 使 "X 报告" 与 "X 产品"
-        #    的精确键混淆, 反而降低命中率)。这里仅去掉相邻重复字符, 保留词序,
-        #    让语义近似的查询(实体相同、角度词不同)通过 find_similar 兜底。
-        _deduped: list = []
-        for _ch in q:
-            if not _deduped or _ch != _deduped[-1]:
-                _deduped.append(_ch)
-        q = "".join(_deduped)
+        # 4. 排序字符(词序无关: "天气北京"=="北京的天气", "人工智能趋势"=="趋势人工智能")
+        #    注意: 不在此剥离角度词(报告/产品/市场等) —— "AI新闻" 与 "AI趋势" 是
+        #    不同主题需区分; 深度研究中同实体多角度的去重由 find_similar/_semantic_ngrams
+        #    的 core 指纹完成, 精确键保持主题完整。
+        q = "".join(sorted(q))
         return hashlib.sha256(q.encode()).hexdigest()[:32]
 
     # ------------------------------------------------------------------
