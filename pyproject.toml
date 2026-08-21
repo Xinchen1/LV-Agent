@@ -6,14 +6,14 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "openmythos-agent"
+name = "lv-agent"
 version = "0.1.0"
-description = "Deep-thinking agent using OpenMythos recurrent architecture"
-authors = ["Your Name <you@example.com>"]
+description = "Terminal-native deep-thinking agent: recurrent reasoning, real tools, memory & self-learning"
+authors = ["cleveris research"]
 readme = "README.md"
 license = "MIT"
-homepage = "https://github.com/yourusername/openmythos-agent"
-repository = "https://github.com/yourusername/openmythos-agent"
+homepage = "https://github.com/Xinchen1/LV-Agent"
+repository = "https://github.com/Xinchen1/LV-Agent"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
