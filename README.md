@@ -68,7 +68,7 @@ LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循
 ### 1. Install
 
 ```bash
-git clone https://github.com/<your-username>/LV-Agent.git
+git clone https://github.com/Xinchen1/LV-Agent.git
 cd LV-Agent
 python -m venv .venv
 source .venv/bin/activate    # macOS/Linux
@@ -155,6 +155,23 @@ python -m pytest tests/ -v
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+## Trademark Notice
+
+**"LV Agent"**, **"Lux Vita"**, **"Lv Agent"**, and the **cleveris research**
+name and logo are trademarks of **cleveris research**.
+
+The MIT license applies to the *code* only. It does NOT grant you the right
+to use these trademarks, product names, logos, or the "cleveris research"
+brand for:
+- Endorsing, marketing, or selling your own derivative works
+- Creating confusion about the origin of the software
+- Registering or claiming these names as your own
+
+If you distribute a fork or modified version, you must:
+1. Keep this notice and the original copyright lines intact
+2. Not imply that cleveris research endorses your fork
+3. Not use the "LV Agent" or "Lux Vita" branding on non-official builds
 
 ---
 
