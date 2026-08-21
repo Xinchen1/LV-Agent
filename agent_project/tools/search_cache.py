@@ -104,8 +104,14 @@ class SearchCache:
             q = q.replace(w, "")
         # 3. 去空格
         q = q.replace(" ", "")
-        # 4. 排序字符(词序无关: "人工智能趋势"=="趋势人工智能")
-        q = "".join(sorted(q))
+        # 4. 保序去重(不再全字符排序: 排序会打乱中文词序, 使 "X 报告" 与 "X 产品"
+        #    的精确键混淆, 反而降低命中率)。这里仅去掉相邻重复字符, 保留词序,
+        #    让语义近似的查询(实体相同、角度词不同)通过 find_similar 兜底。
+        _deduped: list = []
+        for _ch in q:
+            if not _deduped or _ch != _deduped[-1]:
+                _deduped.append(_ch)
+        q = "".join(_deduped)
         return hashlib.sha256(q.encode()).hexdigest()[:32]
 
     # ------------------------------------------------------------------
@@ -124,11 +130,14 @@ class SearchCache:
 
     @classmethod
     def _semantic_ngrams(cls, query: str) -> frozenset:
-        """生成查询的语义指纹: 英文 token + 中文核心字 n-gram + 中英等价词归一.
+        """生成查询的语义指纹: 英文 token + 中文核心字 n-gram + 核心实体标记.
 
         - 英文: 小写 token + 相邻 2-gram, 并归一常见等价词(ai↔人工智能)
         - 中文: 去掉单字停用词后取相邻 2-gram("人工智能"→{人智,智能})
-        这样 "AI新闻" 与 "人工智能新闻" 共享 {智能,新闻} 等, 可近似匹配。
+        - 核心实体标记 "core:<剥离角度词后的主体>": 让 "实在智能 报告" 与
+          "实在智能 产品" 都收敛到 core:实在智能, 同实体不同角度的查询高度近似。
+        这样 "AI新闻" 与 "人工智能新闻" 共享 {智能,新闻}, "X报告" 与 "X产品"
+        共享 core:X, 均可近似匹配。
         """
         q = query.lower().strip()
         ngrams = set()
@@ -147,7 +156,12 @@ class SearchCache:
         # 中文: 先剔除常见口语虚词(词级), 再取相邻 2-gram
         _zh_noise = ("今天", "昨天", "明天", "什么", "怎么", "为什么", "有没有",
                      "一下", "最近", "现在", "关于", "有关", "方面", "内容", "最新",
-                     "呢", "吗", "呀", "啊", "哦", "嗯", "的", "了", "和", "与")
+                     "呢", "吗", "呀", "啊", "哦", "嗯", "的", "了", "和", "与",
+                     # 研究角度词: 深度研究中 "X报告/X产品/X市场" 只是角度变化,
+                     # 不构成核心语义差异, 剔除后同实体查询收敛到同一指纹
+                     "报告", "产品", "市场", "竞品", "趋势", "数据", "技术",
+                     "案例", "风险", "最新动态", "资料", "信息", "新闻", "动态",
+                     "价格", "行情", "分析", "简介", "背景", "概述", "详情")
         zh = "".join(ch for ch in normalized if "\u4e00" <= ch <= "\u9fff" and ch not in cls._STOP)
         for w in _zh_noise:
             zh = zh.replace(w, "")
@@ -156,6 +170,20 @@ class SearchCache:
                 ngrams.add("z:" + zh[i:i + 2])
         elif zh:
             ngrams.add("z:" + zh)
+        # 核心实体标记: 剥离角度词后的主体, 每个 segment 独立成 core 元素,
+        # 让 "实在智能 报告" 与 "实在智能 产品" 共享 core:实在智能。
+        _core_parts = []
+        for _seg in _re.split(r"[\s,，。;；]+", normalized):
+            _s = _seg.strip()
+            for w in _zh_noise:
+                _s = _s.replace(w, "")
+            _s = "".join(ch for ch in _s if ch not in cls._STOP and not ch.isspace())
+            if len(_s) >= 2:
+                _core_parts.append(_s)
+        for _cp in _core_parts:
+            ngrams.add("core:" + _cp)
+        if not _core_parts and zh:
+            ngrams.add("core:" + zh)
         return frozenset(ngrams)
 
     @staticmethod
@@ -167,7 +195,15 @@ class SearchCache:
         union = len(a | b)
         if union == 0:
             return 0.0
-        return inter / union
+        base = inter / union
+        # 核心实体标记相同 → 大幅加分: "X 报告" vs "X 产品" 共享 core:X
+        _ac = {g for g in a if g.startswith("core:")}
+        _bc = {g for g in b if g.startswith("core:")}
+        if _ac and _bc and (_ac & _bc):
+            base = max(base, 0.9)
+        elif _ac and _bc and not (_ac & _bc):
+            base = min(base, 0.3)  # 核心实体不同 → 显著降权, 避免误合并
+        return base
 
     def find_similar(self, query: str, threshold: float = 0.6, max_scan: int = 60) -> Optional[CacheEntry]:
         """在缓存中找语义近似(非精确)的条目.
@@ -220,10 +256,11 @@ class SearchCache:
                 best = entry
         return best
 
-    def get(self, query: str, threshold: float = 0.6) -> Optional[List[Dict[str, Any]]]:
+    def get(self, query: str, threshold: float = 0.5) -> Optional[List[Dict[str, Any]]]:
         """增强版 get: 精确键 优先, 语义近似 兜底.
 
-        threshold: 语义命中的最小相似度(默认 0.6).
+        threshold: 语义命中的最小相似度(默认 0.5, 中文场景下 0.6 偏严,
+        对 "X 报告 / X 产品 / X 市场" 这类同实体多角度查询 0.5 能更好命中).
         """
         # 精确键(原逻辑)
         key = self._key(query)
