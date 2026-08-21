@@ -1,180 +1,178 @@
-<div align="center">
+# LV Agent
 
-<img src="assets/portrait.png" width="240" height="240" alt="Lv Agent" />
-
-# Lv Agent
-
-**Lux Vita · 光与生命**
-
-**by cleveris research**
-
-[**cleveris-research.pages.dev**](https://cleveris-research.pages.dev/)
-
-*Deep thinking, real tools. Recurrent reasoning · tool-driven · self-learning*
-
-**Capabilities**<br>
-Multi-turn deep reasoning for complex problems<br>
-Real tools for live information<br>
-Continuous self-learning, smarter over time
-
-**Mission**<br>
-Open-source AI at the core<br>
-AI that is easier for everyone to use<br>
-A small step toward intelligence equality
-
-以开源人工智能为核心，希望让更多人能方便地用上人工智能，为智能平权尽一份力
-
-</div>
+> 终端原生智能体框架。Deep thinking, real tools.
 
 ---
 
-LV Agent 是一个**终端原生的深度思考 AI 智能体**。它结合了循环深度推理、真实工具调用、长期记忆与自我学习，在终端里提供多轮推理与工具协作的交互体验。项目仍在持续改进中，期待与大家一起成长。
+## 项目简介
 
-## Features
+LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一些思路，也是我研究机构 **Cleveris Research** 的作品。
 
-**Reasoning & Planning**
-- **Multi-strategy reasoning**: CoT, ReAct, Self-Consistency, Verification, Zero-shot
-- **Adaptive loop control**: adjusts thinking depth by task complexity
-- **Task planning**: MCTS, graph-based planning, key-path analysis
-- **Self-correction**: quality monitoring + automatic parameter tuning
+它通过**多轮 LLM 调用 + 工具循环 + 自我修正**，实现"逐步深入思考"的过程。目前项目还很早期，有不少不足，期待与大家一起交流进步。
 
-**Memory & Learning**
-- **Knowledge graph**: structured long-term memory
-- **Episodic memory**: recalls past conversations across sessions
-- **Self-learning**: learns from successes/failures and improves over time
-- **Context compression**: keeps long sessions within token budget
+---
 
-**Tools**
-- **Web search & fusion**: multi-source search with scoring/reranking
-- **File ops**: read / write / list / grep / analyze
-- **Code execution**: python / bash / file execution with sandbox
-- **Git ops**: clone / commit / push / pull
-- **Browser**: Playwright automation, web page fetching
-- **Database & Telegram**: structured DB queries, Telegram bot mode
-- **Weather / Calculator / URL unfurl / GitHub search**
+## 核心特性
 
-**Terminal UI**
-- **Status bar** with context bar & tool cards
-- **Multiple themes**
-- **Deep-research live panel** with progress tracking
-- **Dashboard**: `/dashboard` Ctrl+`\`
+### 推理与规划
 
-**Backends**
-- DeepSeek, OpenAI, Anthropic, OpenRouter, Ollama
-- Streaming with native reasoning-content display
+| 特性 | 说明 |
+|------|------|
+| **多策略推理** | CoT / ReAct / Self-Consistency / Verification / MCTS |
+| **自适应循环控制** | 简单问题少轮调用，难题多轮调用 |
+| **任务规划** | 支持 adaptive / MCTS / graph / key_path 多种策略 |
+| **自我修正** | 质量评估 + 自动修正 + 参数自适应调整 |
 
-## Quick Start
+### 工具链
 
-### 1. Install
+- **Web 搜索** — 多查询融合
+- **文件操作** — 读 / 写 / grep / glob（Rust 加速可选）
+- **代码执行** — Python / Bash，timeout 隔离
+- **GitHub 搜索、PDF 读取、天气查询、网页抓取**
+- **Telegram Bot 集成**（可独立运行）
+
+### 记忆与上下文
+
+- **知识图谱** — 实体-关系结构化长期记忆
+- **经历记忆** — 跨会话向量相似度检索
+- **记忆技能** — 从对话中提取可复用的策略（`/learn` + `/memskill`）
+- **上下文压缩** — 长会话自动归纳，512 token 预算内保留核心信息
+
+### Harness 运行时
+
+- **事件溯源** — 执行过程可追溯、可重放
+- **会话持久化** — SQLite 存储，支持历史会话选择（`/sessions`）
+- **预算控制** — token 消耗 + 时间双重限制
+- **工具确认** — 危险操作前请求用户批准
+- **检查点** — 执行中断后可恢复
+
+### 终端体验
+
+- 头像像素画启动画面（Braille 渲染）
+- 底部状态栏：token 占用 / 上下文进度
+- 输入历史翻页 / Ctrl+S 草稿暂存 / Ctrl+\ Dashboard
+- 实时流式输出 + 深色 / 浅色主题
+
+---
+
+## 技术架构
+
+### API 模式（主流使用方式）
+
+```
+用户输入
+    ↓
+Planner 分解任务 → 分配 thinking loops
+    ↓
+[循环推理引擎]
+    ├→ LLM 调用 （策略：CoT / ReAct / MCTS / Self-Consistency）
+    ├→ 工具执行 → 观察结果 → 继续推理
+    ├→ 自我修正 → 质量不达标则重答
+    └→ ACT 自适应停止（达到质量阈值即退出循环）
+    ↓
+上下文压缩（长会话自动归纳）
+    ↓
+最终回答
+```
+
+### 深度研究模式
+
+```
+深度研究请求
+    ↓
+多角度搜索（多 query 并行）
+    ↓
+网页正文抓取 + 评分排序
+    ↓
+信息综合 + 信源评估
+    ↓
+生成 HTML 报告 → 自动打开浏览器
+```
+
+### 本地模型模式（实验性）
+
+```
+输入 → [Prelude] → [Recurrent Block 循环 T 次] → [Coda] → 输出
+
+特性：
+- 同一组权重循环多次，像人一样"反复思考"
+- MoE 稀疏专家、LoRA 深度适配、LTI 稳定注入
+- 需要本地 GPU / Metal 加速
+```
+
+---
+
+## 快速开始
 
 ```bash
 git clone https://github.com/Xinchen1/LV-Agent.git
 cd LV-Agent
-python -m venv .venv
-source .venv/bin/activate    # macOS/Linux
+python -m venv .venv && source .venv/bin/activate
 pip install -e .
-```
-
-### 2. Configure
-
-```bash
 cp config.example.yaml config.yaml
-# or set env vars
-export DEEPSEEK_API_KEY="your_key_here"
+python super_agent.py
 ```
 
-### 3. Run
-
-```bash
-lv                      # global launcher: type "lv" to start from any directory
-# or
-python super_agent.py   # interactive CLI
-# or
-python -m agent_project --task "Your task"
-```
-
-> **Tip**: add the repo to your `PATH` (or symlink `lv` into `/usr/local/bin`) so you can just type `lv` anywhere to launch.
-
-## Usage
-
-- **Interactive**: type tasks directly; `!command` runs shell; `@file` attaches file content
-- **Deep research**: `深度研究 <topic>` or `/deep <topic>` opens a live progress panel and auto-opens the HTML report
-- **Commands**: `/model`, `/theme`, `/tools`, `/plan`, `/sessions`, `/dashboard`, `/drafts`, `/compress`, `/help`
-- **Shortcuts**: `Ctrl+S` draft, `Ctrl+\` dashboard, `ESC` interrupt
-
-## Backend Configuration
-
-```yaml
-agent:
-  backend: "deepseek"   # deepseek | openai | openrouter | anthropic | ollama
-  deepseek:
-    api_key: "${DEEPSEEK_API_KEY:-}"
-    base_url: "https://api.deepseek.com"
-    model: "deepseek-chat"   # or "deepseek-reasoner"
-```
-
-See `config.example.yaml` for all options.
-
-## Architecture
-
-```
-User Input → Input Handler → Command Parser
-  ├─ Slash Commands ( /model /tools ... )
-  ├─ Shell Mode ( !command )
-  ├─ File Ref ( @file )
-  └─ Agent Loop ( Perceive → Think → Act → Observe )
-       └─ Tool Execution → Renderer → ANSI Terminal
-```
-
-## Project Structure
-
-```
-agent_project/
-├── super_agent.py          # Interactive CLI entry
-├── agent_project/          # Core package
-│   ├── agent.py            # Main Agent
-│   ├── reasoning.py        # Reasoning engine
-│   ├── planning.py         # Task planner
-│   ├── memory.py           # Knowledge graph + memory
-│   ├── self_correction.py  # Self-correction
-│   ├── model_backends.py   # DeepSeek/OpenAI/Anthropic backends
-│   ├── stream_adapters.py  # Terminal rendering
-│   ├── ui/                 # Terminal UI (theme/status bar/cards)
-│   └── tools/              # Tool ecosystem
-├── tests/                  # Test suite
-├── assets/portrait.png     # The boy portrait
-└── config.example.yaml     # Example config
-```
-
-## Testing
-
-```bash
-python -m pytest tests/ -v
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE)
-
-## Trademark Notice
-
-**"LV Agent"**, **"Lux Vita"**, **"Lv Agent"**, and the **cleveris research**
-name and logo are trademarks of **cleveris research**.
-
-The MIT license applies to the *code* only. It does NOT grant you the right
-to use these trademarks, product names, logos, or the "cleveris research"
-brand for:
-- Endorsing, marketing, or selling your own derivative works
-- Creating confusion about the origin of the software
-- Registering or claiming these names as your own
-
-If you distribute a fork or modified version, you must:
-1. Keep this notice and the original copyright lines intact
-2. Not imply that cleveris research endorses your fork
-3. Not use the "LV Agent" or "Lux Vita" branding on non-official builds
+**支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
 
 ---
 
-**Lv Agent · Lux Vita · by cleveris research**
+## 已实现的开箱功能
 
-*Open-source AI at the core — great AI for everyone, intelligence for all*
+### 内置命令
+
+| 命令 | 功能 |
+|------|------|
+| `/deep_research` | 多角度搜索 + 自动生成 HTML 报告 |
+| `!命令` | 直接执行 shell 命令 |
+| `@文件` | 把文件内容注入到输入 |
+| `/model` | 实时切换模型 |
+| `/strategy` | 切换推理策略 |
+| `/compress` | 手动压缩上下文 |
+| `/learn` | 从当前对话中学习记忆技能 |
+| `/memskill` | 管理已学习的策略（list / evolve / snapshot / restore） |
+| `/sessions` | 浏览历史会话 |
+| `/dashboard` | 打开 Agent 状态面板 |
+| `/drafts` | 查看暂存的输入草稿 |
+
+### 快捷键
+
+| 快捷键 | 动作 |
+|--------|------|
+| `Ctrl+S` | 暂存当前输入草稿 |
+| `Ctrl+\` | 打开 Dashboard |
+| `ESC` | 中断正在运行的任务（深度研究等长任务） |
+| `↑↓` | 翻页输入历史 |
+
+---
+
+## 未来规划
+
+### 仍在探索的方向
+
+- 接入更多搜索源
+- 更丰富的工具（数据库 / Git 操作 / 浏览器自动化）
+- 更强的推理策略（Best-of-N / 投票机制）
+
+### 中期探索
+
+- 记忆检索改进（混合向量 + 关键词召回）
+- 多模态支持（图像理解输入）
+- 插件系统（MCP 协议初步支持）
+
+### 长期方向
+
+- 本地循环模型与 API 模型的深度融合
+- 更智能的自主规划能力
+
+---
+
+## 链接
+
+- **GitHub：** https://github.com/Xinchen1/LV-Agent
+- **推荐后端：** DeepSeek Chat / DeepSeek Reasoner（开箱即用）
+- **本地离线：** Ollama + `qwen2.5-coder:7b`（断网可用）
+
+---
+
+> 项目在成长，期待与各位交流。
