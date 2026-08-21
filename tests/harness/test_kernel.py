@@ -142,7 +142,7 @@ def test_workspace_escape_asks_not_denies():
     assert k.evaluate(eff_inside).decision is Decision.ALLOW
 
     # 工作区外写 → ASK (用户确认)
-    eff_out = make_effect("file_ops", {"action": "write", "path": "/Users/mac/.zshrc", "content": "x"})
+    eff_out = make_effect("file_ops", {"action": "write", "path": "/tmp/outside_workspace/test.txt", "content": "x"})
     assert k.evaluate(eff_out).decision is Decision.ASK, "工作区外写应询问而非直接拦截"
 
     # 系统敏感路径 → DENY

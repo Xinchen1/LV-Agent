@@ -108,7 +108,7 @@ def test_read_folder_markdown_is_instance_method():
     a = make_agent()
     a.conversation_history = []
     try:
-        out = a._read_folder_markdown("/Users/mac/Desktop/grok-build")
+        out = a._read_folder_markdown("/tmp/nonexistent-grok-build")
         assert out == "" or isinstance(out, str)
     except TypeError as e:
         assert False, f"实例调用 _read_folder_markdown 报错: {e}"
@@ -322,7 +322,7 @@ def test_intent_mismatch_overrides_wrong_tool():
     a = object.__new__(OpenMythosAgent)
     a.logger = logging.getLogger("test")
 
-    action = ToolCall(tool_name="bash_exec", arguments={"command": "find /Users/mac -name '*ai*'"})
+    action = ToolCall(tool_name="bash_exec", arguments={"command": "find /home/dev -name '*ai*'"})
     classified = a._classify_intent("查下ai 方面新闻")
     assert classified and classified[0] == "web_search"
     c_tool, c_args, c_conf, c_reason = classified
@@ -420,14 +420,14 @@ def test_pronoun_resolves_relative_path_to_absolute():
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
     a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
-    os.chdir("/Users/mac/Downloads/Obsidian Vault")
+    os.chdir(os.path.expanduser("~"))
 
     a.conversation_history = [
-        {"user": "分析super ide", "assistant": "已用 project_context 查看 ../IDE/super-ide, 结构如下: docs/goai/作品简介。"},
+        {"user": "分析super ide", "assistant": "已用 project_context 查看 ../projects/super-ide, 结构如下: docs/goai/作品简介。"},
     ]
     recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
     r = a._resolve_pronoun_to_entity("要你 分析它,输出分析报告", recent)
-    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应解析出绝对路径: {r!r}"
+    assert "super-ide" in r, f"应解析出包含 super-ide 的绝对路径: {r!r}"
     assert "-build" not in r, f"不应匹配到 super-ide-build: {r!r}"
 
 
@@ -437,26 +437,28 @@ def test_pronoun_resolves_absolute_path():
     a = object.__new__(OpenMythosAgent)
     a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
     a.conversation_history = [
-        {"user": "分析super ide", "assistant": "project_context path=/Users/mac/Downloads/IDE/super-ide OK"},
+        {"user": "分析super ide", "assistant": "project_context path=/home/dev/projects/super-ide OK"},
     ]
     recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
     r = a._resolve_pronoun_to_entity("分析它", recent)
-    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应使用绝对路径: {r!r}"
+    assert r and "/home/dev/projects/super-ide" in r, f"应使用绝对路径: {r!r}"
 
 
-def test_pronoun_resolves_entity_name_via_dir_locate():
+def test_pronoun_resolves_entity_name_via_dir_locate(tmp_path):
     """历史只有实体名时, 应通过 _locate_project_dir 定位真实目录."""
     import os
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
     a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
-    os.chdir("/Users/mac/Downloads/Obsidian Vault")
+    # 在临时目录下建一个 super-ide 目录, 使 _locate_project_dir(cwd=tmp_path) 能定位到
+    os.chdir(tmp_path)
+    (tmp_path / "super-ide").mkdir()
     a.conversation_history = [
         {"user": "分析super ide", "assistant": "用 project_context 查看了 super-ide"},
     ]
     recent = "\n".join(t.get("user", "") + "\n" + t.get("assistant", "") for t in a.conversation_history)
     r = a._resolve_pronoun_to_entity("要你 分析它", recent)
-    assert r and "/Users/mac/Downloads/IDE/super-ide" in r, f"应定位到真实目录: {r!r}"
+    assert r and "super-ide" in r, f"应定位到真实目录: {r!r}"
 
 
 def test_resolved_analysis_task_not_simple():
@@ -464,5 +466,5 @@ def test_resolved_analysis_task_not_simple():
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
     a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
-    resolved = "要你 分析 '/Users/mac/Downloads/IDE/super-ide', 输出分析报告"
+    resolved = "要你 分析 '/home/dev/super-ide', 输出分析报告"
     assert not a._is_simple_query(resolved), "含'分析'+路径+报告的任务不应走 fast path"
