@@ -521,7 +521,7 @@ def test_fast_path_does_not_emit_reasoning():
 
     src = inspect.getsource(OpenMythosAgent._run_simple)
     # _buffer_user_cb 只透出工具/状态事件 + 轻量 thinking 提示, 不透出 reasoning 正文
-    assert "'reasoning' 与 'content' 的正文都不实时透出" in src, "应注释明确不透出 reasoning 正文"
+    assert "reasoning 到达时给一个轻量\"思考中\"状态" in src or "'reasoning' 与 'content' 的正文都不实时透出" in src, "应注释明确不透出 reasoning 正文"
     # 不应再直接透出 reasoning 原文(旧的 simulate_stream_tokens reasoning 透出)
     assert "simulate_stream_tokens(reasoning_text" not in src, "不应把 reasoning 原文流式透出"
     # 应有轻量 thinking 状态避免假死
@@ -696,11 +696,11 @@ def test_tool_parser_multiline_tool_json():
     from agent_project.policies import ToolCallParser
 
     # 用户实际场景: 带前缀 + 跨行 JSON
-    out = '先检查目录。[TOOL:bash_exec]\n{"command": "cd /Users/mac/Downloads/IDE/super-ide && pwd && ls -la | head -50"}'
+    out = '先检查目录。[TOOL:bash_exec]\n{"command": "cd /home/dev/projects/super-ide && pwd && ls -la | head -50"}'
     calls = ToolCallParser.parse_all(out)
     assert len(calls) == 1, f"应解析出 1 个工具调用, 实际: {calls}"
     assert calls[0][0] == "bash_exec"
-    assert "cd /Users/mac/Downloads/IDE/super-ide" in calls[0][1]["command"]
+    assert "cd /home/dev/projects/super-ide" in calls[0][1]["command"]
 
     # 无前缀 + 跨行
     out2 = '[TOOL:web_search]\n{"query": "AI 新闻"}'
@@ -876,7 +876,7 @@ def test_analysis_task_short_answer_forced_full_report():
 
     eng = ExecutionEngine(model_backend=FB(), config=cfg)
     eng.logger = logging.getLogger("test")
-    ctx = ExecutionContext(task="分析 /Users/mac/Downloads/IDE/super-ide, 输出分析报告",
+    ctx = ExecutionContext(task="分析 /home/dev/projects/super-ide, 输出分析报告",
                            available_tools=TOOLS_REGISTRY.get_tools_dict(), config=cfg, max_steps=8)
     ctx.monitor_enabled = False
     tr = eng.run(ReActPolicy(), ctx)
