@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .evidence import EvidenceLedger, claim_tokens, _data_numbers
 from .tools import TOOLS_REGISTRY, ToolResult
+from .tools.search_cache import SearchCache
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +593,27 @@ Rules:
         all_results: List[Dict[str, Any]] = []
         deep_cap = self.cfg.max_search_results_per_query
 
+        # ---- Query-level semantic dedup: 同一核心实体 + 相似角度的查询只搜一次 ----
+        # 例如 "实在智能 报告 / 实在智能 产品 / 实在智能 市场" 共享核心实体,
+        # 若语义指纹高度重叠则只保留一个, 减少重复搜索与 token 消耗。
+        if len(queries) > 1:
+            try:
+                _kept: List[str] = []
+                for _q in queries:
+                    _dup = False
+                    for _k in _kept:
+                        _a = SearchCache._semantic_ngrams(_q)
+                        _b = SearchCache._semantic_ngrams(_k)
+                        if SearchCache._similarity(_a, _b) >= 0.55:
+                            _dup = True
+                            break
+                    if not _dup:
+                        _kept.append(_q)
+                if _kept:
+                    queries = _kept
+            except Exception:
+                pass
+
         def _search_once(q: str) -> List[Dict[str, Any]]:
             """单次搜索调用(带短超时保护)."""
             try:
@@ -639,6 +661,7 @@ Rules:
 
         # Limit concurrency to avoid overwhelming providers
         max_workers = min(len(queries), 6)
+        executed_queries: List[str] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_search_one, q): q for q in queries}
             for future in as_completed(futures):
@@ -647,6 +670,7 @@ Rules:
                     results = future.result()
                     self._emit(stream_callback, "tool_result", f"search '{q}' -> {len(results)} results")
                     all_results.extend(results)
+                    executed_queries.append(q)
                 except Exception as e:
                     self._emit(stream_callback, "tool_result", f"search '{q}' failed: {e}")
 

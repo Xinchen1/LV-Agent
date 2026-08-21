@@ -181,20 +181,21 @@ class WebSearchTool(BaseTool):
                 fusion_max = max(effective_max_results * 2, 8)
                 fetch_max = self.max_fetch_urls
 
-            # 1. Cache check (deep mode bypasses shallow cache to ensure breadth)
-            if not is_deep:
-                cached = self.cache.get(query)
-                if cached:
-                    return ToolResult(
-                        success=True,
-                        output=json.dumps(cached[:effective_max_results], indent=2, ensure_ascii=False),
-                        metadata={
-                            "query": query,
-                            "provider": "cache",
-                            "num_results": len(cached[:effective_max_results]),
-                            "cached": True,
-                        },
-                    )
+            # 1. Cache check (deep mode also consults cache; only full cache hits
+            #    from a near-identical query bypass the search to save tokens/time.
+            #    Deep queries still fall through to live search when there is no hit.)
+            cached = self.cache.get(query, threshold=0.5)
+            if cached:
+                return ToolResult(
+                    success=True,
+                    output=json.dumps(cached[:effective_max_results], indent=2, ensure_ascii=False),
+                    metadata={
+                        "query": query,
+                        "provider": "cache",
+                        "num_results": len(cached[:effective_max_results]),
+                        "cached": True,
+                    },
+                )
 
             # 2. Gather results from providers
             # 意图感知: 中文查询优先国内源, 英文查询优先国际源(提高相关性)
