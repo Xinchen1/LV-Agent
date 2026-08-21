@@ -252,6 +252,7 @@ class SuperAgentCLI:
         if minimal:
             print("Lv agent · Lux Vita (光与生命)")
             print("-" * 40)
+            print("Captain OS · 转弯要慢，直道要快")
             print("Open-source AI at the core — great AI for everyone, intelligence for all")
             return
 
@@ -279,6 +280,7 @@ class SuperAgentCLI:
             "",
             _style("Deep thinking, real tools.", "1", "188"),
             _style("Recurrent reasoning · tool-driven · self-learning", "38;5;245"),
+            _style("Captain OS · 转弯要慢，直道要快", "38;5;220"),
             "",
             _style("Capabilities", "1", "188"),
             _style("  · Multi-turn deep reasoning for complex problems", "38;5;251"),
