@@ -1711,6 +1711,7 @@ class SuperAgentCLI:
         except Exception:
             pass
         try:
+            start_ts = time.time()
             result = self._run_with_progress(
                 self._select_runner(),
                 task,
@@ -1718,6 +1719,18 @@ class SuperAgentCLI:
                 mode=getattr(self, 'output_mode', None),
             )
             self._finish_result(result)
+            # Auto evaluation logging
+            try:
+                from agent_project.evaluator import log_episode, summary_quality_check
+                strategy = getattr(self, '_last_strategy', 'unknown')
+                tools_used = result.get('tools_used', [])
+                final_answer = result.get('final_answer', '')
+                summary_ok = summary_quality_check(final_answer, ['公司概况','核心产品','技术里程碑'])
+                latency_ms = int((time.time() - start_ts) * 1000)
+                tokens = result.get('tokens_used', 0)
+                log_episode(strategy, tools_used, summary_ok, latency_ms, tokens)
+            except Exception:
+                pass
             return 0
         except Exception as e:
             import traceback
