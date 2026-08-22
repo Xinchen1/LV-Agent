@@ -66,7 +66,7 @@ class WebSearchTool(BaseTool):
             self.providers = ["duckduckgo", "360", "bing", "google"]
 
         self.max_results_default = self.cfg.get("max_results", 5)
-        self.quality_threshold = self.cfg.get("quality_threshold", 0.3)
+        self.quality_threshold = self.cfg.get("quality_threshold", 0.6)
         self.use_playwright = self.cfg.get("use_playwright", False)
         self.sequential_fallback = self.cfg.get("sequential_fallback", False)
         self.max_fetch_urls = self.cfg.get("max_fetch_urls", 3)

@@ -33,7 +33,7 @@ class SearchScorer:
         self,
         domain_trust: Optional[Dict[str, float]] = None,
         query: str = "",
-        quality_threshold: float = 0.3,
+        quality_threshold: float = 0.6,
     ):
         self.domain_trust = domain_trust or {}
         self.query = query.lower()
