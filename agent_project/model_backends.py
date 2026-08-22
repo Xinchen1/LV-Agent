@@ -387,6 +387,7 @@ class OpenAIBackend:
 
         # Lazy load openai client
         self._client = None
+        self._consecutive_errors = 0
 
         print(_style("  OpenAI-compatible backend", "2"))
         print(f"    {_style('model', '2')} {model}")
@@ -683,6 +684,8 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                         except Exception:
                             pass
 
+                # success -> reset error counter
+                self._consecutive_errors = 0
                 return "\n".join(collected_parts).strip()
 
             except Exception as e:
@@ -700,6 +703,15 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     time.sleep(wait)
                     continue
                 # Other retryable errors.
+                self._consecutive_errors += 1
+                # If consecutive connection errors, force client rebuild
+                if self._consecutive_errors >= 2:
+                    try:
+                        self._client = None
+                        self._ensure_connection()
+                        print(_style("  connection errors detected, rebuilt client", "2"))
+                    except Exception:
+                        pass
                 if attempt < max_attempts - 1:
                     wait = 2 ** attempt
                     print(_style(f"  API error, retrying in {wait}s: {e}", "2"))

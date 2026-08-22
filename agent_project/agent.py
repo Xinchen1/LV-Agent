@@ -2220,9 +2220,23 @@ class OpenMythosAgent:
         raw_answer = None
         try:
             if hasattr(self.backend, "generate_native"):
+                # Tool affordance filtering for better accuracy
+                try:
+                    from .tool_affordance import filter_tools_by_affordance
+                    all_tools = TOOLS_REGISTRY.list_tools()
+                    filtered_names = filter_tools_by_affordance(task, all_tools, top_k=7, min_score=0.15)
+                    # Build filtered openai tools list
+                    all_openai = TOOLS_REGISTRY.get_openai_tools()
+                    name_to_tool = {t["function"]["name"]: t for t in all_openai}
+                    tools_for_llm = [name_to_tool[n] for n in filtered_names if n in name_to_tool]
+                    # Fallback to all tools if filtering too aggressive
+                    if not tools_for_llm:
+                        tools_for_llm = all_openai
+                except Exception:
+                    tools_for_llm = TOOLS_REGISTRY.get_openai_tools()
                 native = self.backend.generate_native(
                     prompt,
-                    tools=TOOLS_REGISTRY.get_openai_tools(),
+                    tools=tools_for_llm,
                     n_loops=1,
                     temperature=self.config.temperature,
                     max_tokens=fast_max_tokens,
@@ -4748,8 +4762,20 @@ class OpenMythosAgent:
             future = executor.submit(tool.execute, **args)
             try:
                 result = future.result(timeout=timeout)
+                # Record reliability for affordance model
+                try:
+                    from .tool_affordance import record_tool_result
+                    record_tool_result(tool_call.tool_name, bool(result.success))
+                except Exception:
+                    pass
                 return result
             except TimeoutError:
+                # Record failure
+                try:
+                    from .tool_affordance import record_tool_result
+                    record_tool_result(tool_call.tool_name, False)
+                except Exception:
+                    pass
                 return ToolResult(
                     success=False, output="",
                     error=f"Tool '{tool_call.tool_name}' timed out after {timeout}s"
