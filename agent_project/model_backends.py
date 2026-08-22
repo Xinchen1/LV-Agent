@@ -416,6 +416,11 @@ class OpenAIBackend:
                         kwargs["http_client"] = httpx.Client(
                             trust_env=False,
                             timeout=httpx.Timeout(self.timeout, connect=10.0),
+                            # Connection pool keep-alive: prevent stale connections after idle
+                            limits=httpx.Limits(
+                                max_keepalive_connections=5,
+                                keepalive_expiry=30.0,
+                            ),
                         )
                     except ImportError:
                         pass
@@ -513,6 +518,17 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
 """
 
         return base + depth_guide
+
+    def _ensure_connection(self) -> None:
+        """Lightweight health check: recreate client if connection is stale."""
+        try:
+            # Use a minimal request to verify connection (models.list is cheap)
+            # Timeout short to avoid blocking; ignore errors (will retry with fresh client)
+            self.client.models.list()
+        except Exception:
+            # Connection likely stale (idle timeout, proxy down, Ollama unloaded model)
+            # Force recreate on next property access
+            self._client = None
 
     def generate(
         self,
@@ -641,6 +657,8 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                 pass
 
         # Retry logic with smart status-code handling.
+        # Ensure connection is fresh (handles idle timeout, proxy down, Ollama model unload)
+        self._ensure_connection()
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
@@ -711,6 +729,8 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             可能无 tool_calls 键或为空列表.
         """
         try:
+            # Ensure connection is fresh (handles idle timeout, proxy down, Ollama model unload)
+            self._ensure_connection()
             messages = [
                 {"role": "system", "content": self._build_system_prompt(n_loops)},
                 {"role": "user", "content": prompt},
