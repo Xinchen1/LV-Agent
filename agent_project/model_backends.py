@@ -476,6 +476,8 @@ Guidelines:
 3. After receiving observation, analyze it and decide next step.
 4. Continue until task is complete.
 5. When the user asks to create/write/save a new article or file, call file_ops with action="write", then verify by reading it back.
+6. FILE READ BEFORE SUMMARIZE: If user asks to summarize/extract/提炼要点 from a file, you MUST first call file_ops action='read' with the exact path, get the file content, then summarize. NEVER summarize from memory or from a directory listing alone. Directory listing is not content.
+7. MEMORY RECALL DISCIPLINE: When a local file exists in the working directory, prioritize fresh file_ops read over experience memory. Do not hallucinate content from past episodes.
 
 CONTEXT COMPREHENSION:
 - When the user provides a long pasted text, large codebase, or multi-turn conversation, first identify and summarize the key context: the user's goal, constraints, prior decisions, and any unresolved questions.
