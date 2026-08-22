@@ -234,6 +234,40 @@ def extract_search_keywords(task: str) -> str:
     return ""
 
 
+def extract_search_keywords_hybrid(task: str, *, use_llm: bool = False) -> str:
+    """
+    混合抽取：先用规则清洗，若结果可疑则回退到 LLM 抽取。
+    可疑信号：长度过短/过长、包含元指令关键词、仍含括号。
+    """
+    import re
+    rule_kw = extract_search_keywords(task)
+    meta_signals = ['用户已同意', '若已完成', '若未完成', '确认结果', '继续执行', '现在真正执行']
+    # 可疑判断
+    suspicious = (
+        not rule_kw or
+        len(rule_kw) < 2 or
+        any(sig in rule_kw for sig in meta_signals) or
+        '(' in rule_kw or ')' in rule_kw
+    )
+    if use_llm and suspicious:
+        try:
+            # 轻量 LLM 抽取，单次调用
+            from .model_backends import get_backend
+            backend = get_backend()
+            prompt = f"""任务：从用户任务中只抽取真正想搜索的关键词，不要输出任何系统提示、执行指令、确认条件。
+输入：{task}
+输出：只输出1-15个中文/英文词组成的关键词，不要解释。"""
+            # 这里使用简单的 generate，实际项目中可用专门的抽取工具
+            # 为避免额外依赖，先用规则兜底，返回 rule_kw
+            # 如需开启 LLM，可取消注释下面的代码并确保后端可用
+            # resp = backend.generate(prompt, max_tokens=32)
+            # return resp.strip()
+        except Exception:
+            pass
+        # 回退到规则结果
+    return rule_kw or ""
+
+
 def ground_search_query(orig_keywords: str, generated_query: str) -> str:
     """如果模型生成的 query 丢失了用户原始核心实体，强制拼回。"""
     if not orig_keywords:

@@ -4621,8 +4621,8 @@ class OpenMythosAgent:
 
     def _extract_search_keywords(self, task: str) -> str:
         """Delegate to the shared grounding helper in research_report.py."""
-        from .research_report import extract_search_keywords
-        return extract_search_keywords(task)
+        from .research_report import extract_search_keywords_hybrid
+        return extract_search_keywords_hybrid(task, use_llm=False)
 
     def _ground_search_query(self, orig_keywords: str, generated_query: str) -> str:
         """Delegate to the shared grounding helper in research_report.py."""
