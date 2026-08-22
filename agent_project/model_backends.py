@@ -856,9 +856,11 @@ def get_backend():
     except Exception:
         cfg_base_url = cfg_model = cfg_api_key = None
     # 3) 优先级合并
-    base_url = pref_data.get('base_url') or cfg_base_url or os.getenv('OPENAI_BASE_URL', 'http://localhost:11434/v1')
-    model = pref_data.get('model') or cfg_model or os.getenv('OPENAI_MODEL', 'qwen2.5-coder:7b')
+    base_url = pref_data.get('base_url') or cfg_base_url or os.getenv('OPENAI_BASE_URL', '')
+    model = pref_data.get('model') or cfg_model or os.getenv('OPENAI_MODEL', '')
     api_key = pref_data.get('api_key') or cfg_api_key or os.getenv('OPENAI_API_KEY', '')
+    if not base_url or not model:
+        raise RuntimeError('模型后端未配置: 请先执行 /model 选择模型，或设置 OPENAI_BASE_URL / OPENAI_MODEL 环境变量。当前不会回退到本地 Ollama。')
     from .model_backends import OpenAIBackend
     try:
         backend = OpenAIBackend(api_key=api_key or '', base_url=base_url, model=model)
