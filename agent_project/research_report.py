@@ -573,7 +573,19 @@ class ResearchReportGenerator:
         return unique[: self.cfg.max_search_queries]
 
     def _generate_query_variants(self, topic: str, orig_keywords: str) -> List[str]:
-        """Ask the LLM for complementary search queries."""
+        """Ask the LLM for complementary search queries using multi-round keyword generation."""
+        # 先用 LLM 多查询生成
+        try:
+            from .research_report import generate_search_queries_llm
+            llm_queries = generate_search_queries_llm(topic, max_queries=self.cfg.max_search_queries)
+            # 做实体接地
+            grounded = [ground_search_query(orig_keywords or topic, q) for q in llm_queries]
+            grounded = [q for q in grounded if q]
+            if grounded:
+                return grounded[: self.cfg.max_search_queries]
+        except Exception:
+            pass
+        # 回退到原有 prompt 方式
         today = datetime.now().strftime("%Y-%m-%d")
         _ctx_note = ""
         if self._context:
