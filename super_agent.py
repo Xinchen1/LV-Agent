@@ -467,44 +467,68 @@ class SuperAgentCLI:
             print(f" /learn failed: {e}")
 
     def handle_model(self, rest: str):
-        """设置或查询模型后端偏好。"""
+        """设置或查询模型后端偏好。支持任意格式持久化。"""
         from pathlib import Path
         import json
         pref_path = Path(__file__).parent / 'data' / 'config' / 'model_prefs.json'
         pref_path.parent.mkdir(parents=True, exist_ok=True)
         parts = rest.strip().split()
-        if not parts or parts[0] in ('show', 'status'):
+        if not parts or parts[0].lower() in ('show', 'status'):
             try:
                 data = json.loads(pref_path.read_text(encoding='utf-8'))
                 print(f" 当前模型偏好: {data}")
             except Exception:
                 print(" 未设置模型偏好，使用 config.yaml")
             return
-        # 解析 name base_url model
-        name = parts[0]
-        # 简单映射
-        mapping = {
-            'nvidia': {
-                'backend': 'openai',
-                'base_url': 'https://integrate.api.nvidia.com/v1',
-                'model': 'meta/muse-glimmer-30b',
-            },
-            'deepseek': {
-                'backend': 'deepseek',
-                'base_url': 'https://api.deepseek.com',
-                'model': 'deepseek-v4-flash',
-            },
-            'ollama': {
-                'backend': 'openai',
-                'base_url': 'http://localhost:11434/v1',
-                'model': 'qwen2.5-coder:7b',
-            },
-        }
-        if name in mapping:
-            pref = mapping[name]
+        # 支持格式:
+        # /model <model_name>
+        # /model <base_url> <model_name>
+        # /model base_url=<url> model=<name>
+        # /model url,model
+        rest_str = rest.strip()
+        pref = {}
+        # 解析 key=value 形式
+        kvs = {}
+        for token in parts:
+            if '=' in token:
+                k,v = token.split('=',1)
+                kvs[k.lower()] = v
+        if 'base_url' in kvs and 'model' in kvs:
+            pref['base_url'] = kvs['base_url']
+            pref['model'] = kvs['model']
+            pref['backend'] = 'openai'
+        elif len(parts) >= 2:
+            # 假设前一个是 base_url 后一个是 model
+            # 如果第一个看起来像 URL 则认为是 base_url
+            if parts[0].startswith('http'):
+                pref['base_url'] = parts[0]
+                pref['model'] = ' '.join(parts[1:])
+                pref['backend'] = 'openai'
+            else:
+                # 兼容逗号分隔
+                if ',' in rest_str:
+                    base, model = rest_str.split(',',1)
+                    pref['base_url'] = base.strip()
+                    pref['model'] = model.strip()
+                    pref['backend'] = 'openai'
+                else:
+                    # 仅模型名
+                    pref['model'] = rest_str
+                    pref['backend'] = 'openai'
         else:
-            # 尝试解析自定义
-            pref = {'backend': 'openai', 'base_url': '', 'model': name}
+            pref['model'] = rest_str
+            pref['backend'] = 'openai'
+        # 预设映射
+        mapping = {
+            'nvidia': {'backend':'openai','base_url':'https://integrate.api.nvidia.com/v1','model':'meta/muse-glimmer-30b'},
+            'deepseek': {'backend':'deepseek','base_url':'https://api.deepseek.com','model':'deepseek-v4-flash'},
+            'ollama': {'backend':'openai','base_url':'http://localhost:11434/v1','model':'qwen2.5-coder:7b'},
+        }
+        # 如果输入是预设名，直接使用
+        key = rest_str.split()[0].lower()
+        if key in mapping:
+            pref = mapping[key]
+        # 保存
         pref_path.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f" 模型偏好已保存: {pref}")
         return
