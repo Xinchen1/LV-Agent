@@ -834,31 +834,41 @@ class DeepSeekBackend(OpenAIBackend):
             print(f"    {_style('proxy', '2')} bypassed (direct connection)")
 
 def get_backend():
-    """Factory to get current backend instance based on config."""
+    """Factory to get current backend instance based on prefs > config > env."""
+    import json, os
+    from pathlib import Path
+    # 1) 偏好文件
+    pref_path = Path(__file__).parent.parent.parent / 'data' / 'config' / 'model_prefs.json'
+    pref_data = {}
     try:
-        from .config import load_config
-        cfg = load_config()
-        backend_name = getattr(cfg, "backend", "openai") or "openai"
+        if pref_path.exists():
+            pref_data = json.loads(pref_path.read_text(encoding='utf-8'))
     except Exception:
-        backend_name = "openai"
-    # Default to OpenAIBackend with config values
+        pref_data = {}
+    # 2) config
     try:
         from .config import load_config
         cfg = load_config()
-        # Try to get agent backend config
         agent_cfg = getattr(cfg, "agent", None)
-        if agent_cfg:
-            api_key = getattr(agent_cfg.openai, "api_key", None)
-            base_url = getattr(agent_cfg.openai, "base_url", "http://localhost:11434/v1")
-            model = getattr(agent_cfg.openai, "model", "qwen2.5-coder:7b")
-        else:
-            api_key = os.getenv("OPENAI_API_KEY", "")
-            base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
-            model = os.getenv("OPENAI_MODEL", "qwen2.5-coder:7b")
-        from .model_backends import OpenAIBackend
-        return OpenAIBackend(api_key=api_key or "", base_url=base_url, model=model)
+        cfg_base_url = getattr(agent_cfg.openai, "base_url", None) if agent_cfg else None
+        cfg_model = getattr(agent_cfg.openai, "model", None) if agent_cfg else None
+        cfg_api_key = getattr(agent_cfg.openai, "api_key", None) if agent_cfg else None
     except Exception:
-        # Fallback dummy
+        cfg_base_url = cfg_model = cfg_api_key = None
+    # 3) 优先级合并
+    base_url = pref_data.get('base_url') or cfg_base_url or os.getenv('OPENAI_BASE_URL', 'http://localhost:11434/v1')
+    model = pref_data.get('model') or cfg_model or os.getenv('OPENAI_MODEL', 'qwen2.5-coder:7b')
+    api_key = pref_data.get('api_key') or cfg_api_key or os.getenv('OPENAI_API_KEY', '')
+    from .model_backends import OpenAIBackend
+    try:
+        backend = OpenAIBackend(api_key=api_key or '', base_url=base_url, model=model)
+        # 打印当前使用模型
+        try:
+            print(f" backend OpenAIBackend · model {model} · base_url {base_url}")
+        except Exception:
+            pass
+        return backend
+    except Exception:
         class DummyBackend:
             def generate(self, prompt, max_tokens=256, temperature=0.3):
                 return ""
