@@ -173,8 +173,8 @@ class WebSearchTool(BaseTool):
             self._recent_sigs.append(sig)
             if len(self._recent_sigs) > 20:
                 self._recent_sigs.pop(0)
-            # 0. 模型先行分析: 只在查询较复杂时触发，避免额外延迟
-            if len(query) > 20 or any(k in query for k in ['最新','新闻','产品','价格']):
+            # 0. 模型先行分析: 只在查询较复杂且不含日期时触发，避免额外延迟
+            if len(query) > 20 and not any(c in query for c in ['2026','2025','-08-','/08/']) and any(k in query for k in ['最新','新闻','产品','价格']):
                 try:
                     from .model_backends import get_backend
                     backend = get_backend()
@@ -271,6 +271,10 @@ class WebSearchTool(BaseTool):
                 if weak_snippets or has_real_urls:
                     self.fetcher.enrich_results(fused, max_urls=fetch_max)
 
+            # 5b. 实体校验过滤，避免模型改写导致无关结果
+            if fused and 'ai' in query.lower() or '人工智能' in query:
+                keywords = ['ai','人工智能','人工智','机器人','大模型','模型','ChatGPT','GPT','LLM']
+                fused = [r for r in fused if any(k in (r.get('title') or '').lower() or k in (r.get('snippet') or '') for k in keywords)]
             final = fused[:effective_max_results]
 
             # 6. Cache final results (deep results cached separately by query)
