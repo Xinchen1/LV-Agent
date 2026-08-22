@@ -3298,7 +3298,7 @@ class OpenMythosAgent:
     def _select_strategy(self, task: str, mode: str, code_mode: bool) -> 'ReasoningStrategy':
         """根据任务特征自动选择推理策略。
 
-        优先级：手动覆盖 > reflection模式(用配置默认值) > 任务自适应分类
+        优先级：手动覆盖 > reflection模式(用配置默认值) > 拓扑图评分 > 任务自适应分类
         """
         from .reasoning import ReasoningStrategy
         # 遵循"船长OS"理念：转弯要慢（复杂任务+深度策略），直道要快（简单任务+轻量策略）
@@ -3307,6 +3307,36 @@ class OpenMythosAgent:
                 return ReasoningStrategy(self._strategy_override)
             except ValueError:
                 pass
+
+        # Topology-guided entry selection with Captain OS weights
+        try:
+            from .topology_builder import build_default_graph
+            from .topology_scheduler import TopologyScheduler
+            graph = build_default_graph()
+            captain_rules = {"slow_turn": 1.2, "fast_straight": 1.3}
+            scheduler = TopologyScheduler(graph, captain_rules)
+            # Choose entry points based on task keywords
+            entries = []
+            t_low = task.lower()
+            if any(k in t_low for k in ("代码","code","implement","debug")):
+                entries.append("strat_fast")
+            if any(k in t_low for k in ("关键","战略","decision","risk","critical","要不要","该不该")):
+                entries.append("strat_mcts")
+            if any(k in t_low for k in ("深度","调研","研究","research","分析")):
+                entries.append("strat_deep")
+            if not entries:
+                entries = ["strat_fast"]
+            plan = scheduler.select_plan(task, entries, {})
+            # Map first strategy node to ReasoningStrategy
+            chosen_ids = [nid for layer in plan for nid in layer if graph.nodes[nid].type == "strategy"]
+            # Heuristic mapping
+            if "strat_mcts" in chosen_ids:
+                return ReasoningStrategy.MONTE_CARLO
+            if "strat_deep" in chosen_ids:
+                return ReasoningStrategy.SUPER_AGENT
+        except Exception:
+            # Fallback to keyword rules
+            pass
 
         t = task.lower()
         # 扩展对话 / 闲聊 → 零样本，省 token
