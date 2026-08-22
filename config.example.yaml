@@ -78,7 +78,8 @@ agent:
       - telegram
     web_search:
       provider: "duckduckgo"
-      max_results: 5
+      providers: ["duckduckgo", "google"]
+      max_results: 3
     python_exec:
       timeout: 10
       allowed_modules: ["math", "json", "datetime", "re", "collections"]
