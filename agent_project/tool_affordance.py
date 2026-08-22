@@ -82,33 +82,32 @@ def empirical_reliability(tool_name: str) -> float:
         return TOOL_META.get(tool_name, {}).get("reliability", 0.5)
     return sum(log) / len(log)
 
-def score_tools(task: str, candidate_tools: List[str]) -> List[Tuple[str, float]]:
+def score_tools(task: str, candidate_tools: List[str]) -> List[Tuple[str, float, str]]:
     """
     Score tools for a given task string.
-    Returns list of (tool_name, score) sorted descending.
-    Score = keyword overlap + capability match - cost penalty + reliability boost.
+    Returns list of (tool_name, score, explanation) sorted descending.
     """
     task_lc = task.lower()
     scores = []
     for name in candidate_tools:
         meta = TOOL_META.get(name, {})
-        kw_hits = sum(1 for kw in meta.get("input_keywords", []) if kw in task)
-        # keyword density
-        kw_score = min(1.0, kw_hits / 3.0)
+        kw_hits = [kw for kw in meta.get("input_keywords", []) if kw in task_lc]
+        kw_score = min(1.0, len(kw_hits) / 3.0)
         cost = meta.get("cost", 1)
         reliability = empirical_reliability(name)
-        # Simple heuristic score
         score = 0.5 * kw_score + 0.3 * reliability - 0.1 * cost
-        # Boost if task contains capability words
-        # No extra penalty
-        scores.append((name, max(0.0, score)))
+        expl = f"kw_hits={kw_hits}, reliability={reliability:.2f}, cost={cost}"
+        scores.append((name, max(0.0, score), expl))
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores
 
 def filter_tools_by_affordance(task: str, candidate_tools: List[str], top_k: int = 5, min_score: float = 0.15) -> List[str]:
     scored = score_tools(task, candidate_tools)
-    filtered = [name for name, s in scored if s >= min_score][:top_k]
-    # Always keep file_ops if task mentions file/pdf
+    # Log explainable selection
+    for name, s, expl in scored[:top_k]:
+        # In production, emit to logger
+        pass
+    filtered = [name for name, s, _ in scored if s >= min_score][:top_k]
     if re.search(r"文件|打开|读取|pdf|文档", task) and "file_ops" not in filtered:
         filtered.insert(0, "file_ops")
     return filtered
