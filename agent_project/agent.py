@@ -3327,13 +3327,14 @@ class OpenMythosAgent:
             if not entries:
                 entries = ["strat_fast"]
             plan = scheduler.select_plan(task, entries, {})
-            # Map first strategy node to ReasoningStrategy
+            # Map first strategy node to ReasoningStrategy via config
             chosen_ids = [nid for layer in plan for nid in layer if graph.nodes[nid].type == "strategy"]
-            # Heuristic mapping
-            if "strat_mcts" in chosen_ids:
-                return ReasoningStrategy.MONTE_CARLO
-            if "strat_deep" in chosen_ids:
-                return ReasoningStrategy.SUPER_AGENT
+            if chosen_ids:
+                try:
+                    from .reasoning_map import map_node_to_reasoning
+                    return map_node_to_reasoning(chosen_ids[0])
+                except Exception:
+                    pass
         except Exception:
             # Fallback to keyword rules
             pass
