@@ -466,6 +466,49 @@ class SuperAgentCLI:
         except Exception as e:
             print(f" /learn failed: {e}")
 
+    def handle_model(self, rest: str):
+        """设置或查询模型后端偏好。"""
+        from pathlib import Path
+        import json
+        pref_path = Path(__file__).parent / 'data' / 'config' / 'model_prefs.json'
+        pref_path.parent.mkdir(parents=True, exist_ok=True)
+        parts = rest.strip().split()
+        if not parts or parts[0] in ('show', 'status'):
+            try:
+                data = json.loads(pref_path.read_text(encoding='utf-8'))
+                print(f" 当前模型偏好: {data}")
+            except Exception:
+                print(" 未设置模型偏好，使用 config.yaml")
+            return
+        # 解析 name base_url model
+        name = parts[0]
+        # 简单映射
+        mapping = {
+            'nvidia': {
+                'backend': 'openai',
+                'base_url': 'https://integrate.api.nvidia.com/v1',
+                'model': 'meta/muse-glimmer-30b',
+            },
+            'deepseek': {
+                'backend': 'deepseek',
+                'base_url': 'https://api.deepseek.com',
+                'model': 'deepseek-v4-flash',
+            },
+            'ollama': {
+                'backend': 'openai',
+                'base_url': 'http://localhost:11434/v1',
+                'model': 'qwen2.5-coder:7b',
+            },
+        }
+        if name in mapping:
+            pref = mapping[name]
+        else:
+            # 尝试解析自定义
+            pref = {'backend': 'openai', 'base_url': '', 'model': name}
+        pref_path.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f" 模型偏好已保存: {pref}")
+        return
+
     def handle_memskill(self, rest: str):
         """管理记忆技能。"""
         if not self.agent or not getattr(self.agent, 'memskill_engine', None):
@@ -1652,6 +1695,11 @@ class SuperAgentCLI:
             elif user_input.lower().startswith('/learn'):
                 rest = user_input[6:].strip()
                 self.handle_learn(rest)
+                continue
+
+            elif user_input.lower().startswith('/model'):
+                rest = user_input[6:].strip()
+                self.handle_model(rest)
                 continue
 
             elif user_input.lower().startswith('/memskill'):
