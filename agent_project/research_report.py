@@ -382,6 +382,18 @@ class ResearchReportGenerator:
                 "final_answer": "无法从任务中识别出研究主题，请明确说明要调研的对象。",
                 "metadata": {"error": "no_topic"},
             }
+        # 实体确认：让模型先确认要搜的核心实体，确保不漂移
+        try:
+            from .model_backends import get_backend
+            backend = get_backend()
+            ent_prompt = f"""任务：{task}
+请从任务中抽取要搜索的核心实体名称，只输出实体名称，不要解释。
+例如输入“搜索实在智能的信息”，输出“实在智能”。"""
+            entity = backend.generate(ent_prompt, max_tokens=32, temperature=0.0).strip()
+            if entity and len(entity) > 1:
+                topic = f"{entity} {topic}"
+        except Exception:
+            pass
 
         self._emit(stream_callback, "status", f"researching: {topic}")
         started_at = time.time()
