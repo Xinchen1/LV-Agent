@@ -23,7 +23,7 @@ class SearchFusion:
     def __init__(
         self,
         domain_trust: Optional[Dict[str, float]] = None,
-        quality_threshold: float = 0.3,
+        quality_threshold: float = 0.6,
     ):
         self.unshortener = URLUnshortener()
         self.scorer = SearchScorer(domain_trust=domain_trust, quality_threshold=quality_threshold)
