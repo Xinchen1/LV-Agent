@@ -16,11 +16,11 @@ from typing import Optional
 
 from .renderer import Renderer
 
-# Soft color thresholds (design tokens)
+# Soft color thresholds (design tokens) - modern teal/orange palette
 _BAR_COLORS = (
-    "38;5;114",   # green < 50%
-    "38;5;220",   # yellow < 80%
-    "38;5;216",   # orange < 95%
+    "38;5;84",    # teal < 50%
+    "38;5;208",   # orange-amber < 80%
+    "38;5;208",   # orange < 95%
     "38;5;203",   # red >= 95%
 )
 _DIM = "38;5;240"

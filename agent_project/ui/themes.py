@@ -46,8 +46,8 @@ BUILTIN_THEMES: Dict[str, Theme] = {
             "ink": "38;5;235",              # near-black #1c1917
             "muted": "38;5;244",            # warm gray #78716c
             "rule": "38;5;252",             # light border #e7e5e4
-            "success": "38;5;71",           # green #4ade80
-            "warning": "38;5;178",          # yellow #facc15
+            "success": "38;5;80",           # teal modern #14b8a6
+            "warning": "38;5;208",          # orange amber #fb923c
             "error": "38;5;167",            # red #f87171
             "accent": "38;5;131",           # terracotta #cc7a60
             "dim": "2",                     # faint
@@ -62,8 +62,8 @@ BUILTIN_THEMES: Dict[str, Theme] = {
             "ink": "38;5;254",              # off-white #f5f5f4
             "muted": "38;5;245",            # warm gray #a8a29e
             "rule": "38;5;240",             # dark border #44403c
-            "success": "38;5;114",          # green #86efac
-            "warning": "38;5;220",          # yellow #fde047
+            "success": "38;5;84",           # teal modern #2dd4bf
+            "warning": "38;5;208",          # orange amber #fb923c
             "error": "38;5;203",            # red #fca5a5
             "accent": "38;5;174",           # terracotta #d6a08a
             "dim": "2",
