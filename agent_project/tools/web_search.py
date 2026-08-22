@@ -173,17 +173,19 @@ class WebSearchTool(BaseTool):
             self._recent_sigs.append(sig)
             if len(self._recent_sigs) > 20:
                 self._recent_sigs.pop(0)
-            # 0. 模型先行分析: 抽取实体并生成准确搜索关键词
-            try:
-                from .model_backends import get_backend
-                backend = get_backend()
-                analysis_prompt = f"""用户原始查询：{query}
+            # 0. 模型先行分析: 只在查询较复杂时触发，避免额外延迟
+            if len(query) > 20 or any(k in query for k in ['最新','新闻','产品','价格']):
+                try:
+                    from .model_backends import get_backend
+                    backend = get_backend()
+                    analysis_prompt = f"""用户原始查询：{query}
 请抽取核心实体和意图，输出一条准确、可直接用于搜索引擎的查询关键词，5-15字。只输出关键词，不要解释。"""
-                refined = backend.generate(analysis_prompt, max_tokens=64, temperature=0.0).strip()
-                if refined and len(refined) > 2 and refined != query:
-                    query = refined
-            except Exception:
-                pass
+                    refined = backend.generate(analysis_prompt, max_tokens=64, temperature=0.0).strip()
+                    if refined and len(refined) > 2 and refined != query:
+                        query = refined
+                except Exception:
+                    # 熔断：模型失败不影响搜索
+                    pass
             # 智能 Query 优化(清理/增强), deep 模式保留原始深度词但同样优化
             if query:
                 smart = self._smart_query(query)
