@@ -83,7 +83,7 @@ agent:
       timeout: 10
       allowed_modules: ["math", "json", "datetime", "re", "collections"]
     file_ops:
-      allowed_dirs: ["./data", "./workspace"]
+      allowed_dirs: ["./data", "./workspace", "/Users/mac/Downloads/Obsidian Vault"]
       max_file_size: 1048576
     weather:
       enabled: true
