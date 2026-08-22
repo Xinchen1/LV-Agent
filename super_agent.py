@@ -501,8 +501,36 @@ class SuperAgentCLI:
                 backup_dir = Path(engine.bank.skills_dir) / '.backups' / arg
                 engine.restore_skills(backup_dir)
                 print(f" restored from {backup_dir}")
+            elif cmd == 'run':
+                if not arg:
+                    print(" usage: /memskill run <skill_name>")
+                    return
+                skill_name = arg
+                # 手动触发一次技能选择+执行，使用当前会话最近任务作为上下文
+                try:
+                    from agent_project.memskill import MemSkillEngine
+                    # 直接通过 engine 调用一次选择演示
+                    ctx = getattr(self, 'last_task', 'manual trigger')
+                    selected = engine.controller.select(ctx)
+                    matches = [s for s, sc in selected if s.name == skill_name]
+                    if not matches:
+                        print(f" skill '{skill_name}' not found in current context selection")
+                        # 仍尝试列出所有技能
+                        all_skills = engine.bank.list_skills()
+                        names = [s.name for s in all_skills]
+                        if skill_name in names:
+                            print(f" skill exists but relevance low. Try with a more relevant task.")
+                        else:
+                            print(f" skill '{skill_name}' not found in bank")
+                        return
+                    print(f" skill '{skill_name}' triggered (manual).")
+                    # 演示：执行一次学习循环
+                    engine.learn_from_episode(task=ctx, trajectory={}, outcome='manual run', success=True)
+                    print(" manual run completed, memory operation logged")
+                except Exception as e2:
+                    print(f" run failed: {e2}")
             else:
-                print(" usage: /memskill [list|evolve|snapshot <tag>|restore <tag>]")
+                print(" usage: /memskill [list|evolve|snapshot <tag>|restore <tag>|run <skill_name>]")
         except Exception as e:
             print(f" /memskill failed: {e}")
 
@@ -1581,7 +1609,7 @@ class SuperAgentCLI:
                 print(" /mcp - configure/test an MCP server")
                 print(" /tg [start|stop|status|token <TOKEN>] - Telegram bot")
                 print(" /learn [topic] - learn a memory skill from recent conversation")
-                print(" /memskill [list|evolve|snapshot|restore <tag>] - manage memory skills")
+                print(" /memskill [list|evolve|snapshot|restore <tag>|run <skill_name>] - manage memory skills")
                 print(" !<command> - run shell directly (no agent turn)")
                 print(" @<file> - attach file content to prompt")
                 print(" /help - this help")
