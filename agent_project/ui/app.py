@@ -73,11 +73,11 @@ class CLIApp:
 
         minimal = not r.theme.supports_color or not sys.stdout.isatty()
         # 自适应头像宽度: 终端越宽, 头像越大, 像素点越多(更细腻)
-        _pw = 34
+        _pw = 20
         if cols >= 150:
-            _pw = 52
+            _pw = 28
         elif cols >= 120:
-            _pw = 44
+            _pw = 24
         banner = render_banner(r, portrait_width=_pw, show_minimal=minimal)
         r.print(banner)
 
@@ -86,8 +86,6 @@ class CLIApp:
             r,
             backend=self._backend_name(),
             model=self._model_name(),
-            tools=self._tool_count(),
-            loops=self._loop_count(),
         )
         r.print(status)
         r.blank()
@@ -214,11 +212,6 @@ class CLIApp:
             except Exception:
                 cwd = "."
             parts.append(r.muted(cwd))
-
-        if cfg.get("show_branch", True):
-            branch = self._git_branch()
-            if branch:
-                parts.append(r.muted(branch))
 
         prompt_text = " → "
         return " ".join(parts) + r.themed(prompt_text, "muted")
