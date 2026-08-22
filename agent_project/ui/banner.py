@@ -125,7 +125,6 @@ def _brand_text(renderer: Renderer) -> str:
         r.themed("Deep thinking, real tools.", "brand"),
         r.themed("循环深度推理 · 工具驱动 · 自我学习", "ink"),
         r.themed("Recurrent deep reasoning · tool-driven · self-learning", "muted"),
-        r.themed("船长OS · 转弯要慢，直道要快", "brand-dim"),
         "",
         r.themed("Capabilities", "brand"),
         r.themed("  · 多轮深度推理，拆解复杂问题", "ink"),
