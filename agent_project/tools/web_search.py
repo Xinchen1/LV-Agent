@@ -87,6 +87,7 @@ class WebSearchTool(BaseTool):
         self.scorer = SearchScorer(domain_trust=self.domain_trust, quality_threshold=self.quality_threshold)
         self.fusion = SearchFusion(domain_trust=self.domain_trust, quality_threshold=self.quality_threshold)
         self.fetcher = WebContentFetcher(use_playwright=self.use_playwright)
+        self._recent_sigs = []
 
     @staticmethod
     def _detect_search_need(query: str) -> Dict[str, Any]:
@@ -165,6 +166,13 @@ class WebSearchTool(BaseTool):
         """
         try:
             is_deep = bool(deep_max_results and int(deep_max_results) > 10)
+            # 0. 重复查询去重
+            sig = f"{query}|{max_results}"
+            if sig in self._recent_sigs:
+                return ToolResult(success=True, output="[]", metadata={"cached": True, "dedup": True})
+            self._recent_sigs.append(sig)
+            if len(self._recent_sigs) > 20:
+                self._recent_sigs.pop(0)
             # 0. 模型先行分析: 抽取实体并生成准确搜索关键词
             try:
                 from .model_backends import get_backend
