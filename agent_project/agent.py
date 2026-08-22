@@ -23,6 +23,7 @@ from .config import AgentConfig
 from .tools import TOOLS_REGISTRY, BaseTool, ToolResult, ToolCall
 from .research_report import is_research_report_task, generate_research_report
 from .health import ModuleHealthChecker, ModuleStatus
+from .evaluator import log_episode, summary_quality_check
 from .execution_engine import ExecutionContext, ExecutionEngine
 from .policies import DirectPolicy
 from .terminal import style as _style
@@ -191,10 +192,10 @@ class OpenMythosAgent:
             else:
                 m = modules[i - 1]
                 color_code = {
-                    ModuleStatus.READY: "32",
-                    ModuleStatus.DEGRADED: "33",
-                    ModuleStatus.DISABLED: "2",
-                    ModuleStatus.FAILED: "31",
+                    ModuleStatus.READY: "38;5;84",      # soft teal
+                    ModuleStatus.DEGRADED: "38;5;208",  # soft orange-amber
+                    ModuleStatus.DISABLED: "38;5;245",  # muted gray
+                    ModuleStatus.FAILED: "38;5;167",    # soft red
                 }.get(m.status, "")
                 print(f"  {_style(line, color_code)}")
                 if self.config.health.show_install_hints and m.install_hint:
