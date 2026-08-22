@@ -161,11 +161,11 @@ def _render_portrait(width_chars: Optional[int] = None) -> str:
 
         # Threshold: near-white background stays blank (more white), darker
         # strokes become block characters. Pick a higher percentile so more of
-        # the paper reads as white.
+        # the paper reads as white. Cleaned up version for sharper silhouette.
         thresh = _otsu_threshold(pixels, len(pixels))
         sorted_px = sorted(pixels)
-        pct = sorted_px[int(len(sorted_px) * 0.65)]
-        thresh = int(max(thresh, pct) * 0.92)
+        pct = sorted_px[int(len(sorted_px) * 0.78)]
+        thresh = int(max(thresh, pct) * 0.96)
 
         # Braille dots: each dot is 1 pixel, so the mosaic blocks are ~3x smaller
         # than the chunky ▀▄█ blocks. White background stays blank (more white).
