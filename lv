@@ -4,6 +4,12 @@
 
 set -e
 
+# Some IDE/agent runtimes (e.g. TRAE) inject PYTHONHOME/PYTHONPATH pointing to
+# their bundled Python, which breaks venv interpreters. Clear them early.
+unset PYTHONHOME PYTHONPATH
+# Clear stale proxy env vars that may point to a dead local proxy (e.g. 127.0.0.1:7890).
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
 # Resolve this script's directory, following symlinks.
 SCRIPT_SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SCRIPT_SOURCE" ]; do

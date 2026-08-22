@@ -944,9 +944,53 @@ class SuperAgentCLI:
         except Exception:
             pass
 
+        _debug_enabled = os.environ.get("LV_INPUT_DEBUG") in ("1", "true", "yes")
+        _debug_path = "/tmp/lv_input_debug.log"
+
+        def _debug(msg: str) -> None:
+            if not _debug_enabled:
+                return
+            try:
+                with open(_debug_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+            except Exception:
+                pass
+
+        def _show_paste_hint(buf: bytearray) -> None:
+            if not buf:
+                return
+            from rich.text import Text
+            line_count = bytes(buf).count(b"\n") + 1
+            char_count = len(buf)
+            word_count = len(bytes(buf).decode("utf-8", errors="replace").split())
+            try:
+                text = Text()
+                text.append("↳ 已粘贴 ", style="bold green")
+                text.append(f"{line_count} 行", style="bold")
+                text.append(" · ", style="dim")
+                text.append(f"{char_count} 字符", style="bold")
+                if word_count > 1:
+                    text.append(f" ({word_count} 词)", style="dim")
+                text.append(" · 按 Enter 提交", style="dim italic")
+                with console.capture() as capture:
+                    console.print(text, end="")
+                hint = capture.get()
+                sys.stdout.write(f"\033[s\033[1B\033[G\033[K  {hint}\033[u")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        if _debug_enabled:
+            try:
+                open(_debug_path, "w").close()
+            except Exception:
+                pass
+            _debug("input loop start")
+
         buf = bytearray()
         in_paste = False
         pasted = False
+        pseudo_paste = False
         echoed = 0
         last_read = time.monotonic()
         _esc_prefix_pending = b""
@@ -959,23 +1003,39 @@ class SuperAgentCLI:
                 if not chunk:
                     continue
                 last_read = time.monotonic()
+                _debug(f"chunk len={len(chunk)} hex={chunk.hex()!r} repr={chunk!r}")
+
+                # 对不支持 bracketed paste 的终端，检测快速多行输入并进入伪粘贴模式
+                if not in_paste and len(chunk) > 1 and (b"\n" in chunk or b"\r" in chunk):
+                    in_paste = True
+                    pasted = True
+                    pseudo_paste = True
+                    _debug("pseudo-paste triggered")
 
 # ---- 逐字节状态机: 区分粘贴内容与普通输入 ----
                 i = 0
                 n = len(chunk)
                 # 粘贴 escape 序列可能被 select+os.read 切开，
-                # 若上一轮末尾留下一个不完整的 ESC[200~ 前缀，在此处补齐
+                # 若上一轮末尾留下一个不完整的 ESC[200~ / ESC[201~ 前缀，在此处补齐
                 if _esc_prefix_pending:
-                    # 尝试与当前 chunk 前几个字节拼成 ESC[200~
-                    probe = _esc_prefix_pending + chunk[:5 - len(_esc_prefix_pending)]
+                    needed = 6 - len(_esc_prefix_pending)
+                    probe = _esc_prefix_pending + chunk[:needed]
                     if probe == b"\x1b[200~":
                         in_paste = True
                         pasted = True
-                        consumed = 5 - len(_esc_prefix_pending)
-                        i = consumed
+                        pseudo_paste = False
+                        i = needed
                         _esc_prefix_pending = b""
+                        _debug("bracketed paste START (from pending)")
+                    elif probe == b"\x1b[201~":
+                        in_paste = False
+                        pseudo_paste = False
+                        i = needed
+                        _esc_prefix_pending = b""
+                        _debug("bracketed paste END (from pending)")
+                        _show_paste_hint(buf)
                     else:
-                        # 不是完整的 bracketed paste 开启标记，丢弃残留前缀
+                        # 不是完整的 bracketed paste 标记，丢弃残留前缀
                         _esc_prefix_pending = b""
                 while i < n:
                     b = chunk[i]
@@ -984,60 +1044,69 @@ class SuperAgentCLI:
                         if remaining >= 6 and chunk[i:i+6] == b"\x1b[200~":
                             in_paste = True
                             pasted = True
+                            pseudo_paste = False
                             i += 6
+                            _debug("bracketed paste START")
                             continue
                         if remaining >= 6 and chunk[i:i+6] == b"\x1b[201~":
                             in_paste = False
-                            flood_pending_newline = False
+                            pseudo_paste = False
                             i += 6
+                            _debug("bracketed paste END")
+                            _show_paste_hint(buf)
                             continue
-                        # 收集 ESC 后面的剩余字节, 判断是不是可能是被切开的
-                        # ESC[200~ 共 6 字节; 如果剩余不足 6 字节, 暂存等到下次 read
-                        tail = chunk[i+1:i+6]
-                        # 尝试匹配已收到的尾部 + 下一个字节 (下一轮再读)
-                        # 这里只处理当前 chunk 里能完整匹配的情况
-                        if chunk[i:i+2] == b"\x1b[":
-                            # 可能是方向键 ESC Ax (已至少拿到 ESC[)
-                            if remaining >= 3:
-                                key_byte = chunk[i+2:i+3]
-                                if key_byte in (b"A", b"B"):
-                                    key = key_byte[0]
-                                    if key == 65 and self._input_history:
-                                        if self._history_idx < 0:
-                                            self._history_idx = len(self._input_history) - 1
-                                        else:
-                                            self._history_idx = max(0, self._history_idx - 1)
+                        # ESC 序列不完整（可能被分在两次 read），缓存等下次 read
+                        if remaining < 6:
+                            _esc_prefix_pending = chunk[i:]
+                            break
+                        # 方向键: ESC[A 上, ESC[B 下(翻输入历史)
+                        if remaining >= 3 and chunk[i:i+2] == b"\x1b[":
+                            key_byte = chunk[i+2:i+3]
+                            if key_byte in (b"A", b"B"):
+                                key = key_byte[0]
+                                if key == 65 and self._input_history:
+                                    if self._history_idx < 0:
+                                        self._history_idx = len(self._input_history) - 1
+                                    else:
+                                        self._history_idx = max(0, self._history_idx - 1)
+                                    self._apply_history_line(buf, self._input_history[self._history_idx])
+                                elif key == 66 and self._input_history:
+                                    self._history_idx += 1
+                                    if self._history_idx >= len(self._input_history):
+                                        self._history_idx = -1
+                                        self._apply_history_line(buf, "")
+                                    else:
                                         self._apply_history_line(buf, self._input_history[self._history_idx])
-                                    elif key == 66 and self._input_history:
-                                        self._history_idx += 1
-                                        if self._history_idx >= len(self._input_history):
-                                            self._history_idx = -1
-                                            self._apply_history_line(buf, "")
-                                        else:
-                                            self._apply_history_line(buf, self._input_history[self._history_idx])
-                                i += 3
-                                continue
-                            else:
-                                # 方向键被截断: 缓存等下一轮
-                                _esc_prefix_pending = chunk[i:]
-                                break
-                        # 其他单字节 ESC 序列(不含完整方向键)直接跳过
+                            i += 3
+                            continue
+                        # 其他 ESC 序列直接跳过 ESC 字节
                         i += 1
-                        _esc_prefix_pending = b""
                         continue
                     # 普通粘贴中换行已被 in_paste 分支累积, 不在此提交
                     if in_paste:
                         buf += chunk[i:i+1]
-                        echoed = len(buf)
+                        # 不更新 echoed，让循环末尾统一回显，避免粘贴内容不可见
                         i += 1
                         continue
                     # 普通输入(粘贴模式下的换行已由 in_paste 分支累积, 不在此提交)
-                    if b == 0x0a or b == 0x0d:  # 回车提交
-                        # 粘贴中换行不提交: in_paste 情况下上面分支已处理
+                    if b == 0x0a or b == 0x0d:  # 回车
+                        # bracketed paste 中的换行是内容；伪粘贴中单独的 Enter 才是提交
+                        if pseudo_paste and n == 1:
+                            self._last_input_pasted = pasted
+                            sys.stdout.write("\r\n")
+                            sys.stdout.flush()
+                            result = bytes(buf).decode("utf-8", errors="replace").strip()
+                            _debug(f"SUBMIT pseudo-paste result={result!r} pasted={pasted}")
+                            return result
+                        if in_paste:
+                            buf += chunk[i:i+1]
+                            continue
                         self._last_input_pasted = pasted
                         sys.stdout.write("\r\n")
                         sys.stdout.flush()
-                        return bytes(buf).decode("utf-8", errors="replace").strip()
+                        result = bytes(buf).decode("utf-8", errors="replace").strip()
+                        _debug(f"SUBMIT normal result={result!r} pasted={pasted}")
+                        return result
                     elif b == 0x7f or b == 0x08:  # 退格
                         if buf:
                             while buf and (buf[-1] & 0xC0) == 0x80:
@@ -1048,6 +1117,15 @@ class SuperAgentCLI:
                             echoed = len(buf)
                             sys.stdout.write("\r\x1b[K" + self._prompt_prefix() + bytes(buf).decode("utf-8", errors="replace"))
                             sys.stdout.flush()
+                    elif b == 0x16:  # Ctrl+V: 读取系统剪贴板并插入
+                        clip_text = self._read_clipboard()
+                        if clip_text:
+                            buf.extend(clip_text.encode("utf-8", errors="replace"))
+                            pasted = True
+                            echoed = len(buf)
+                            sys.stdout.write("\r\x1b[K" + self._prompt_prefix() + bytes(buf).decode("utf-8", errors="replace"))
+                            sys.stdout.flush()
+                        continue
                     elif b == 0x03:  # Ctrl+C
                         sys.stdout.write("\r\n")
                         sys.stdout.flush()
@@ -1084,7 +1162,8 @@ class SuperAgentCLI:
                         sys.stdout.flush()
                     except Exception:
                         pass
-        except Exception:
+        except Exception as exc:
+            _debug(f"EXCEPTION {type(exc).__name__}: {exc}")
             pass
         finally:
             try:
@@ -1099,7 +1178,34 @@ class SuperAgentCLI:
                 pass
 
         self._last_input_pasted = pasted
-        return bytes(buf).decode("utf-8", errors="replace").strip()
+        final = bytes(buf).decode("utf-8", errors="replace").strip()
+        _debug(f"RETURN final={final!r} pasted={pasted}")
+        return final
+
+    def _read_clipboard(self) -> str:
+        """读取系统剪贴板内容（跨平台回退，不引入额外依赖）."""
+        import shutil
+        import subprocess
+
+        candidates = []
+        if sys.platform == "darwin":
+            candidates.append(["pbpaste"])
+        elif sys.platform == "linux":
+            for cmd in (["wl-paste"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "-b", "-o"]):
+                if shutil.which(cmd[0]):
+                    candidates.append(cmd)
+                    break
+        elif sys.platform == "win32":
+            candidates.append(["powershell", "-command", "Get-Clipboard"])
+
+        for cmd in candidates:
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=3)
+                if result.returncode == 0:
+                    return result.stdout.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+        return ""
 
     def _prompt_prefix(self) -> str:
         """输入提示前缀: 三段式「Lv + 路径 → 光标」(参考设计方案).
@@ -1172,9 +1278,18 @@ class SuperAgentCLI:
         value = value.strip()
         # 粘贴确认: 经历过 bracketed paste 或多行内容时, 回显统计, 让用户确认已完整复制
         if value and getattr(self, '_last_input_pasted', False):
+            from rich.text import Text
             line_count = len(value.splitlines())
             char_count = len(value)
-            print(_style(f"  ↳ 已粘贴 {line_count} 行 · {char_count} 字符", "2"), flush=True)
+            word_count = len(value.split())
+            confirm = Text()
+            confirm.append("✓ 已接收粘贴 ", style="bold green")
+            confirm.append(f"{line_count} 行", style="bold")
+            confirm.append(" · ", style="dim")
+            confirm.append(f"{char_count} 字符", style="bold")
+            if word_count > 1:
+                confirm.append(f" ({word_count} 词)", style="dim")
+            console.print(f"  {confirm}")
         return value
 
     def _expand_file_refs(self, text: str) -> str:

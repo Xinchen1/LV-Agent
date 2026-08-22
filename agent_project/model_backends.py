@@ -233,6 +233,11 @@ Guidelines:
 3. After receiving observation, analyze it and decide next step.
 4. Continue until task is complete.
 5. When the user asks to create/write/save a new article or file, call file_ops with action="write", then verify by reading it back.
+
+CONTEXT COMPREHENSION:
+- When the user provides a long pasted text, large codebase, or multi-turn conversation, first identify and summarize the key context: the user's goal, constraints, prior decisions, and any unresolved questions.
+- Before answering, briefly restate your understanding of the context to ensure alignment.
+- If the context exceeds your effective window, focus on the most recent and most relevant parts, and ask the user for clarification rather than hallucinating.
 """
         if n_loops >= 16:
             depth = "VERY HIGH: extensive reasoning, consider 3-5 approaches, self-critique."
@@ -465,6 +470,11 @@ Guidelines:
 3. After receiving observation, analyze it and decide next step.
 4. Continue until task is complete.
 5. When the user asks to create/write/save a new article or file, call file_ops with action="write", then verify by reading it back.
+
+CONTEXT COMPREHENSION:
+- When the user provides a long pasted text, large codebase, or multi-turn conversation, first identify and summarize the key context: the user's goal, constraints, prior decisions, and any unresolved questions.
+- Before answering, briefly restate your understanding of the context to ensure alignment.
+- If the context exceeds your effective window, focus on the most recent and most relevant parts, and ask the user for clarification rather than hallucinating.
 """
 
         # 根据n_loops调整思考深度指导
