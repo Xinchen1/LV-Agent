@@ -1698,6 +1698,18 @@ class SuperAgentCLI:
             print(_style(f"  ↳ 打开报告失败: {e}", "33"), flush=True)
 
     def run_single_task(self, task: str):
+        # Contextual search hook: 先做本地关联搜索，增强查询上下文
+        try:
+            from agent_project.contextual_search_hook import contextual_search
+            ctx = contextual_search(task)
+            if ctx['local_hits']:
+                console.print(f"\n[dim]本地上下文命中 {len(ctx['local_hits'])} 个文件[/dim]")
+                for h in ctx['local_hits'][:3]:
+                    console.print(f"  • {h['path']}")
+                # 用增强查询覆盖原始任务，保留原任务语义
+                task = ctx['enhanced_query']
+        except Exception:
+            pass
         try:
             result = self._run_with_progress(
                 self._select_runner(),
