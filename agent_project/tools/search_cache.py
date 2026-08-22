@@ -202,11 +202,11 @@ class SearchCache:
             base = min(base, 0.3)  # 核心实体不同 → 显著降权, 避免误合并
         return base
 
-    def find_similar(self, query: str, threshold: float = 0.6, max_scan: int = 60) -> Optional[CacheEntry]:
+    def find_similar(self, query: str, threshold: float = 0.95, max_scan: int = 60) -> Optional[CacheEntry]:
         """在缓存中找语义近似(非精确)的条目.
 
         先精确键命中(零开销), 再遍历最近条目做 n-gram 相似度。
-        threshold 0.6 表示核心语义重叠 60% 即视为同一查询。
+        threshold 0.95 表示核心语义重叠 95% 即视为同一查询, 更严格避免误命中。
         返回最相似的未过期条目; 无则 None。
         """
         # 1. 精确键(已有逻辑)
