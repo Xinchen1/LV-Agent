@@ -423,8 +423,9 @@ class SkillController:
             if not skill_words:
                 continue
             overlap = len(ctx_words & skill_words)
-            score = overlap / len(skill_words)
-            scored.append((skill, score))
+            score = overlap / max(1, len(skill_words))
+            if score > 0.05:
+                scored.append((skill, score))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:self.top_k]
 
