@@ -102,12 +102,35 @@ def score_tools(task: str, candidate_tools: List[str]) -> List[Tuple[str, float,
     return scores
 
 def filter_tools_by_affordance(task: str, candidate_tools: List[str], top_k: int = 5, min_score: float = 0.15) -> List[str]:
+    # Base affordance scoring
     scored = score_tools(task, candidate_tools)
+    # Topology augmentation
+    try:
+        from .topology_builder import build_default_graph
+        from .topology_scheduler import TopologyScheduler
+        graph = build_default_graph()
+        scheduler = TopologyScheduler(graph, {"slow_turn":1.2, "fast_straight":1.3})
+        # Build tool nodes map
+        tool_scores = {}
+        for nid, node in graph.nodes.items():
+            if node.type == "tool" and node.name in candidate_tools:
+                # Score via topology heuristic
+                s = scheduler.score_node(node, task, {})
+                tool_scores[node.name] = s
+        # Merge: boost if graph score high
+        merged = []
+        name_to_expl = {n:e for n,_,e in scored}
+        for name, s, expl in scored:
+            graph_s = tool_scores.get(name, 0.0)
+            combined = 0.7*s + 0.3*min(graph_s, 2.0)
+            merged.append((name, combined, expl))
+        merged.sort(key=lambda x: x[1], reverse=True)
+    except Exception:
+        merged = scored
     # Log explainable selection
-    for name, s, expl in scored[:top_k]:
-        # In production, emit to logger
+    for name, s, expl in merged[:top_k]:
         pass
-    filtered = [name for name, s, _ in scored if s >= min_score][:top_k]
+    filtered = [name for name, s, _ in merged if s >= min_score][:top_k]
     if re.search(r"文件|打开|读取|pdf|文档", task) and "file_ops" not in filtered:
         filtered.insert(0, "file_ops")
     return filtered
