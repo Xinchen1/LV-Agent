@@ -467,7 +467,7 @@ class SuperAgentCLI:
             print(f" /learn failed: {e}")
 
     def handle_model(self, rest: str):
-        """设置或查询模型后端偏好。支持任意格式持久化。"""
+        """设置或查询模型后端偏好。支持交互菜单持久化。"""
         from pathlib import Path
         import json
         pref_path = Path(__file__).parent / 'data' / 'config' / 'model_prefs.json'
@@ -480,6 +480,25 @@ class SuperAgentCLI:
             except Exception:
                 print(" 未设置模型偏好，使用 config.yaml")
             return
+        # 如果输入是数字，视为交互选择
+        if parts[0].isdigit():
+            choice = int(parts[0])
+            mapping = {
+                1: {'backend':'anthropic','base_url':'https://api.anthropic.com/v1','model':'claude-3-5-sonnet-20241022'},
+                2: {'backend':'openai','base_url':'https://api.openai.com/v1','model':'gpt-4o'},
+                3: {'backend':'deepseek','base_url':'https://api.deepseek.com','model':'deepseek-v4-flash'},
+                4: {'backend':'openrouter','base_url':'https://openrouter.ai/api/v1','model':'anthropic/claude-sonnet-4'},
+                5: {'backend':'openai','base_url':'http://localhost:11434/v1','model':'qwen2.5-coder:7b'},
+                6: {'backend':'openai','base_url':'https://integrate.api.nvidia.com/v1','model':'meta/muse-glimmer-30b'},
+            }
+            pref = mapping.get(choice)
+            if pref:
+                pref_path.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding='utf-8')
+                print(f" 模型偏好已保存: {pref}")
+                return
+            else:
+                print(" 无效选择")
+                return
         # 支持格式:
         # /model <model_name>
         # /model <base_url> <model_name>
