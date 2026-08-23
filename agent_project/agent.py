@@ -1602,6 +1602,14 @@ class OpenMythosAgent:
     def _summarize_tool_answer(self, task: str, action: Any, raw_output: str,
                                token_callback: Optional[Callable[[int], None]] = None) -> str:
         """基于工具观察生成面向用户问题的自然语言回答, 避免只甩出原始列表."""
+        # 快速路径: 短且可直接展示的结果无需再调用 LLM 总结, 避免额外耗时
+        if len(raw_output) <= 400 and raw_output.count("\n") <= 3:
+            return raw_output.strip()
+        # 缓存键: 同 task + tool + 输出摘要 复用总结结果
+        cache_key = (task.strip()[:120], action.tool_name, hash(raw_output[:2000]))
+        cached = getattr(self, "_tool_summary_cache", {}).get(cache_key)
+        if cached is not None:
+            return cached
         prompt = (
             "You are a helpful assistant. A tool was called to answer the user's question.\n\n"
             f"User question: {task}\n\n"
@@ -1621,7 +1629,13 @@ class OpenMythosAgent:
             self.logger.warning(f"tool summary failed {e}")
             return raw_output
         cleaned = self._clean_fast_answer(answer)
-        return cleaned or raw_output
+        result = cleaned or raw_output
+        cache = getattr(self, "_tool_summary_cache", None)
+        if cache is None:
+            self._tool_summary_cache = {}
+            cache = self._tool_summary_cache
+        cache[cache_key] = result
+        return result
 
     def _resolve_filename_in_task(self, task: str) -> Optional[str]:
         """从简单文件查询中提取文件名并解析为存在的绝对路径."""
@@ -4837,6 +4851,8 @@ class OpenMythosAgent:
 
         if self.context_engine:
             self.context_engine.observe_tool_call(action.tool_name, action.arguments)
+        if stream_callback:
+            self._emit_status(stream_callback, f"executing {action.tool_name}")
         tool_result = self._execute_tool(action)
         self._tool_result_cache[cache_key] = tool_result
         if self.context_engine:

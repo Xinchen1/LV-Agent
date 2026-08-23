@@ -73,3 +73,8 @@ rust_file_ops/target/
 # Additional backup patterns
 *_backup.py
 electron.pid
+
+# Session / personal notes — NEVER commit
+*_session*.md
+session_*.md
+latest_*.md
