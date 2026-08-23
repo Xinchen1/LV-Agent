@@ -41,15 +41,15 @@ BUILTIN_THEMES: Dict[str, Theme] = {
     "light": Theme(
         name="light",
         tokens={
-            "brand": "1;38;5;188",          # bold warm beige #d6a08a
-            "brand-dim": "38;5;186",        # muted gold #e0c097
+            "brand": "1;38;5;98",           # bold violet #7c3aed
+            "brand-dim": "38;5;104",        # muted violet #8b5cf6
             "ink": "38;5;235",              # near-black #1c1917
-            "muted": "38;5;244",            # warm gray #78716c
+            "muted": "38;5;243",            # warm gray #78716c
             "rule": "38;5;252",             # light border #e7e5e4
-            "success": "38;5;80",           # teal modern #14b8a6
-            "warning": "38;5;208",          # orange amber #fb923c
-            "error": "38;5;167",            # red #f87171
-            "accent": "38;5;131",           # terracotta #cc7a60
+            "success": "38;5;36",           # forest mint #059669
+            "warning": "38;5;172",          # amber #d97706
+            "error": "38;5;167",            # coral #dc2626
+            "accent": "38;5;30",            # teal #0d9488
             "dim": "2",                     # faint
             "bold": "1",                    # bold
         },
@@ -57,15 +57,15 @@ BUILTIN_THEMES: Dict[str, Theme] = {
     "dark": Theme(
         name="dark",
         tokens={
-            "brand": "1;38;5;180",          # bold warm beige #d6a08a
-            "brand-dim": "38;5;186",        # muted gold #e0c097
+            "brand": "1;38;5;183",          # bold lavender #a5b4fc
+            "brand-dim": "38;5;146",        # muted periwinkle #c7d2fe
             "ink": "38;5;254",              # off-white #f5f5f4
-            "muted": "38;5;245",            # warm gray #a8a29e
-            "rule": "38;5;240",             # dark border #44403c
-            "success": "38;5;84",           # teal modern #2dd4bf
-            "warning": "38;5;208",          # orange amber #fb923c
-            "error": "38;5;203",            # red #fca5a5
-            "accent": "38;5;174",           # terracotta #d6a08a
+            "muted": "38;5;246",            # warm gray #a8a29e
+            "rule": "38;5;238",             # dark border #3f3f46
+            "success": "38;5;79",           # mint #34d399
+            "warning": "38;5;215",          # soft amber #fbbf24
+            "error": "38;5;210",            # coral #f87171
+            "accent": "38;5;80",            # teal #2dd4bf
             "dim": "2",
             "bold": "1",
         },

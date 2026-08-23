@@ -307,13 +307,14 @@ class RichStreamAdapter(StreamAdapter):
         self._total_tokens = 0
         self._start_time = time.time()
         self._last_render = 0.0
-        self._render_interval = 0.08
+        self._render_interval = 0.10
         self._render_lock = threading.Lock()
         self._stop_spinner_event = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
         register_active_adapter(self)
 
         self._current_action = "thinking"
+        self._current_detail = ""
         self._action_since = time.time()
         self._status_text = ""
 
@@ -323,8 +324,9 @@ class RichStreamAdapter(StreamAdapter):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _set_action(self, action: str) -> None:
+    def _set_action(self, action: str, detail: str = "") -> None:
         self._current_action = action
+        self._current_detail = detail
         self._action_since = time.time()
 
     def _set_status(self, text: str) -> None:
@@ -338,43 +340,47 @@ class RichStreamAdapter(StreamAdapter):
     def _action_label(self) -> str:
         labels = {
             "thinking": "thinking",
-            "tool": "executing tool",
-            "result": "processing result",
-            "answering": "generating answer",
+            "tool": "tool",
+            "result": "result",
+            "answering": "answer",
         }
         elapsed = time.time() - self._action_since
         label = labels.get(self._current_action, self._current_action)
-        # status 可能已含 "thinking (step x/y)", 避免拼出重复的 "thinking · thinking"
         status_text = (self._status_text or "").strip()
+        detail = (self._current_detail or "").strip()
+
         parts = []
         if status_text:
             if "thinking" in status_text.lower() and self._current_action == "thinking":
-                parts.append(status_text)  # status 已含 thinking, 不再重复 label
+                parts.append(status_text)
             else:
                 parts.append(status_text)
-                parts.append(label)
+        elif detail:
+            parts.append(f"{label} {detail}")
         else:
             parts.append(label)
-        spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        spinner = spinner_frames[int(elapsed * 10) % len(spinner_frames)]
-        meta = f"{elapsed:.1f}s · {self._fmt_tokens(self._total_tokens)} tokens"
-        # 工具执行/结果处理时: 用细绿色进度条替代 spinner, 直观提示"正在处理"
-        # 避免长任务(如扫描大量文件)时用户误以为卡住。
+
+        # Compact meta: elapsed + token count
+        meta = f"{elapsed:.1f}s · {self._fmt_tokens(self._total_tokens)}tk"
+
+        # 工具执行/结果处理时: 用紧凑绿色进度条
         if self._current_action in ("tool", "result"):
-            bar = self._thin_green_bar(elapsed)
-            return f"\033[32m{bar}\033[0m \033[2m{' · '.join(parts)} · {meta}\033[0m"
+            bar = self._thin_green_bar(elapsed, width=16)
+            return f"\033[2m{bar}\033[0m \033[2m{' · '.join(parts)} · {meta}\033[0m"
+
+        # Spinner: smooth 8-frame cycle
+        spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
+        spinner = spinner_frames[int(elapsed * 8) % len(spinner_frames)]
         return f"\033[2m{spinner} {' · '.join(parts)} · {meta}\033[0m"
 
     @staticmethod
-    def _thin_green_bar(elapsed: float, width: int = 24) -> str:
-        """细绿色进度条: 一条细线 + 移动的绿色亮点, 表示正在处理."""
-        # 亮点从左到右循环移动
-        pos = int(elapsed * 4) % width
-        track = ["─"] * width
+    def _thin_green_bar(elapsed: float, width: int = 16) -> str:
+        """Compact green marquee bar for in-progress work."""
+        pos = int(elapsed * 5) % width
+        track = ["·"] * width
         track[pos] = "●"
-        # 亮点后加渐变淡绿尾迹(细)
-        for i in range(1, min(4, width - pos)):
-            track[pos + i] = "·"
+        for i in range(1, min(3, width - pos)):
+            track[pos + i] = "•"
         return "".join(track)
 
     def _fold_reasoning(self) -> list[str]:
@@ -412,7 +418,7 @@ class RichStreamAdapter(StreamAdapter):
     def _start_thinking(self) -> None:
         if self._live is not None:
             return
-        self._live = self.Live(self._build_thinking_text(), console=self.console, refresh_per_second=12, transient=True)
+        self._live = self.Live(self._build_thinking_text(), console=self.console, refresh_per_second=8, transient=True)
         self._live.start()
         self._stop_spinner_event.clear()
         self._spinner_thread = threading.Thread(target=self._spinner_loop, daemon=True)
@@ -447,12 +453,14 @@ class RichStreamAdapter(StreamAdapter):
         text = clean_runtime_text(text)
         # 提取工具名: 兼容 "bash_exec(...)" / "bash_exec: {...}" / "bash_exec {...}" 格式
         m = re.match(r'^\s*([a-zA-Z_][\w_]*)\s*[(:{=]', text)
-        self._last_tool_name = m.group(1) if m else text.split("(", 1)[0].strip()[:20]
+        tool_name = m.group(1) if m else text.split("(", 1)[0].strip()[:20]
+        self._last_tool_name = tool_name
+        self._set_action("tool", detail=tool_name)
         if not self._tool_header_printed:
-            print(f"\n\033[2m──── tools ────\033[0m", flush=True)
+            print(f"\n\033[2m─ tools ─\033[0m", flush=True)
             self._tool_header_printed = True
-        # 设计方案: pending 状态前缀 ◌(灰)
-        print(f"  \033[90m◌\033[0m \033[2m{text}\033[0m", flush=True)
+        # 紧凑 pending 前缀
+        print(f" \033[90m◌\033[0m \033[2m{text}\033[0m", flush=True)
 
     def _print_tool_result(self, text: str) -> None:
         self._stop_thinking()

@@ -104,13 +104,25 @@ Planner 分解任务 → 分配 thinking loops
 
 ## 快速开始
 
+### 方式一：一键安装（推荐，全局 `lv` 命令）
+
+```bash
+git clone https://github.com/Xinchen1/LV-Agent.git
+cd LV-Agent
+./install.sh
+source ~/.zshrc   # 或 source ~/.bashrc
+lv                # 任意目录直接启动
+```
+
+### 方式二：手动运行（无需安装）
+
 ```bash
 git clone https://github.com/Xinchen1/LV-Agent.git
 cd LV-Agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp config.example.yaml config.yaml
-python super_agent.py
+./lv            # 或 python super_agent.py
 ```
 
 **支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
