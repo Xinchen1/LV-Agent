@@ -1149,6 +1149,11 @@ class ExecutionEngine:
     def _clean_final_text(text: str) -> str:
         if not text:
             return ""
+        # Strip markdown code blocks (```json ... ``` or ``` ... ```) that may contain tool calls
+        text = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
+        # Strip any remaining ``` markers
+        text = re.sub(r"```\w*\s*", "", text)
+        text = re.sub(r"\s*```", "", text)
         text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"\[TOOL:\w+\].*?\[/TOOL\]", "", text, flags=re.DOTALL)
         text = re.sub(r"\[TOOL:\w+\]\s*\{[^}]*\}", "", text)

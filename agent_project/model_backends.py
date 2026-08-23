@@ -451,23 +451,45 @@ Your core capability: **Deep Reasoning**
 - Consider multiple approaches
 - Plan before executing
 
-NATIVE FUNCTION CALLING:
-When you need to use a tool, the system will provide tool definitions in the API call.
-Use tools naturally when appropriate. The model handles tool calls natively via the API.
+TOOL CALLING FORMAT (MANDATORY):
+When you need to use a tool, output it in this EXACT format:
+
+[TOOL:tool_name]
+{"argument": "value", ...}
+[/TOOL]
+
+Examples:
+[TOOL:web_search]
+{"query": "今天的AAPL收盘价"}
+[/TOOL]
+
+[TOOL:calculator]
+{"expression": "(12+7)*3"}
+[/TOOL]
+
+[TOOL:file_ops]
+{"action": "read", "path": "config.yaml"}
+[/TOOL]
+
+[TOOL:bash_exec]
+{"command": "git clone https://github.com/x/y.git 目标目录"}
+[/TOOL]
+
+[TOOL:python_exec]
+{"code": "print(2**10)"}
+[/TOOL]
+
+[TOOL:glob]
+{"pattern": "**/*.md", "path": "~/Desktop"}
+[/TOOL]
 
 Available tools (use the exact name):
 - web_search: Search the web for the latest/real-time information. (query: string)
-  e.g. web_search(query="今天的AAPL收盘价")
 - calculator: Perform pure arithmetic. (expression: string)
-  e.g. calculator(expression="(12+7)*3")
 - python_exec: Execute Python code for computation/processing. (code: string)
-  e.g. python_exec(code="print(2**10)")
 - file_ops: Read/write/list/search files. (action: "read"|"write"|"list"|"grep", path: string, content?: string)
-  e.g. file_ops(action="read", path="config.yaml") ; 新建文章: file_ops(action="write", path="分析.md", content="...")
 - bash_exec: Run shell commands (install, git clone, build, etc.). (command: string)
-  e.g. bash_exec(command="git clone https://github.com/x/y.git 目标目录")
 - glob: Find files by name pattern. (pattern: string, path?: string)
-  e.g. glob(pattern="**/*.md", path="~/Desktop")
 - api_call: Make HTTP requests to allowed hosts. (url: string, method: string, headers?: dict, data?: dict)
 
 Guidelines:
@@ -526,9 +548,10 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
     def _ensure_connection(self) -> None:
         """Lightweight health check: recreate client if connection is stale."""
         try:
-            # Use a minimal request to verify connection (models.list is cheap)
-            # Timeout short to avoid blocking; ignore errors (will retry with fresh client)
-            self.client.models.list()
+            # Use a minimal request to verify connection with short timeout
+            import httpx
+            resp = httpx.get(f"{self.base_url.rstrip('/')}/models", timeout=5.0)
+            resp.raise_for_status()
         except Exception:
             # Connection likely stale (idle timeout, proxy down, Ollama unloaded model)
             # Force recreate on next property access
@@ -838,7 +861,7 @@ def get_backend():
     import json, os
     from pathlib import Path
     # 1) 偏好文件
-    pref_path = Path(__file__).parent.parent.parent / 'data' / 'config' / 'model_prefs.json'
+    pref_path = Path(__file__).parent.parent / 'data' / 'config' / 'model_prefs.json'
     pref_data = {}
     try:
         if pref_path.exists():

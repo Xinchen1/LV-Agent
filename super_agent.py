@@ -1338,9 +1338,9 @@ class SuperAgentCLI:
                 cwd = "~" + cwd[len(home):]
         except Exception:
             cwd = "~"
-        brand = _style("Lv", "1", "188")
-        path = _style(cwd, "2")
-        arrow = _style("→", "2")
+        brand = _style("Lv", "1;36")
+        path = _style(cwd, "38;5;245")
+        arrow = _style("→", "38;5;245")
         return f"{brand} {path} {arrow} "
 
     def _apply_history_line(self, buf: bytearray, text: str) -> None:
