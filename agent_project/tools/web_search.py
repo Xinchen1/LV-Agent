@@ -158,7 +158,9 @@ class WebSearchTool(BaseTool):
         # 2) 时间补全: 请求含"最新/今年/现在"但无年份 → 补当前年份
         import datetime
         this_year = str(datetime.datetime.now().year)
-        if not re.search(r'(20\d{2})', q):
+        # 同时检测完整日期格式 2026-08-23 / 2026/08/23 / 2026.08.23
+        has_full_date = bool(re.search(r'20\d{2}[-/.]\d{2}[-/.]\d{2}', q))
+        if not re.search(r'(20\d{2})', q) and not has_full_date:
             if re.search(r'(最新|今年|现在|近期|最近|当下)', q):
                 q = f"{q} {this_year}"
 
@@ -190,7 +192,9 @@ class WebSearchTool(BaseTool):
             if len(self._recent_sigs) > 20:
                 self._recent_sigs.pop(0)
             # 0. 模型先行分析: 只在查询较复杂且不含日期时触发，避免额外延迟
-            if len(query) > 20 and not any(c in query for c in ['2026','2025','-08-','/08/']) and any(k in query for k in ['最新','新闻','产品','价格']):
+            # 检测是否包含日期格式: 2026-08-23 / 2026/08/23 / 2026.08.23 / 2026 / 2025 等
+            has_date = bool(re.search(r'20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{2}', query))
+            if len(query) > 20 and not has_date and any(k in query for k in ['最新','新闻','产品','价格']):
                 try:
                     from .model_backends import get_backend
                     backend = get_backend()
