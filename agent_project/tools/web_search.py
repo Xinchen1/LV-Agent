@@ -78,6 +78,9 @@ class WebSearchTool(BaseTool):
         # Resolve effective provider list - default to only DuckDuckGo for speed
         self.providers = self.cfg.get("providers", ["duckduckgo"])
 
+        # News-specific providers (auto-enabled when query contains news keywords)
+        self.news_providers = self.cfg.get("news_providers", ["bing-news", "google-news"])
+
         self.max_results_default = self.cfg.get("max_results", 3)
         self.quality_threshold = self.cfg.get("quality_threshold", 0.6)
         self.use_playwright = self.cfg.get("use_playwright", False)
@@ -282,6 +285,13 @@ class WebSearchTool(BaseTool):
         elif need["lang"] == "en" and "bing" in effective_providers:
             effective_providers = ["bing"] + [p for p in effective_providers if p != "bing"]
 
+        # Auto-enable news providers for news-like queries
+        is_news_query = any(k in query.lower() for k in ['新闻', '最新', 'news', 'latest', '今日', '今日头条', 'breaking', '头条'])
+        if is_news_query:
+            for np in self.news_providers:
+                if np not in effective_providers:
+                    effective_providers.append(np)
+
         errors: List[str] = []
         # Use async collection if aiohttp is available, else fall back to sync
         if _HAS_AIOHTTP:
@@ -350,6 +360,17 @@ class WebSearchTool(BaseTool):
         if fused and ('ai' in query.lower() or '人工智能' in query):
             keywords = ['ai','人工智能','人工智','机器人','大模型','模型','ChatGPT','GPT','LLM']
             fused = [r for r in fused if any(k in (r.get('title') or '').lower() or k in (r.get('snippet') or '') for k in keywords)]
+
+        # Time-word filter for news queries: require time markers in title/snippet
+        if fused and is_news_query:
+            time_keywords = ['2026','2025','2024','今日','今日头条','昨日','刚刚','刚发','刚刚发布','刚刚更新',
+                            '小时前','分钟前','分钟前发布','hours ago','minutes ago','mins ago','hours前','mins前',
+                            'breaking','breaking news','breaking:', '速报','快讯','速递','实时','实时更新',
+                            '刚刚发布','最新消息','最新报道','最新进展']
+            fused = [r for r in fused if any(
+                tk in ((r.get('title') or '') + (r.get('snippet') or '')).lower() 
+                for tk in time_keywords
+            )]
 
         final = fused[:effective_max_results]
 
@@ -955,6 +976,104 @@ class WebSearchTool(BaseTool):
         except Exception as e:
             raise RuntimeError(f"SerpAPI async search failed: {e}") from e
 
+    async def _async_search_bing_news(self, query: str, max_results: int) -> List[dict]:
+        """Bing News search."""
+        url = "https://www.bing.com/news/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_bing_news(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Bing News async search failed: {e}") from e
+
+    async def _async_search_google_news(self, query: str, max_results: int) -> List[dict]:
+        """Google News search."""
+        url = "https://news.google.com/rss/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    xml = await resp.text()
+                    return self._parse_google_news(xml, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Google News async search failed: {e}") from e
+
+    def _parse_bing_news(self, html: str, max_results: int) -> List[dict]:
+        """Parse Bing News HTML results."""
+        BeautifulSoup = self._get_bs()
+        soup = BeautifulSoup(html, "html.parser")
+        results: List[dict] = []
+        for article in soup.select(".news-card, .newsitem, .news-card-body"):
+            title_el = article.select_one(".title a, h3 a, .news-title a")
+            snippet_el = article.select_one(".snippet, .description, .news-snippet")
+            url_el = title_el if title_el else article.select_one("a[href]")
+            
+            title = title_el.get_text(strip=True) if title_el else ""
+            url = title_el.get("href", "") if title_el else (url_el.get("href", "") if url_el else "")
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+            
+            if not title:
+                continue
+                
+            # Ensure absolute URL
+            if url.startswith("/"):
+                url = "https://www.bing.com" + url
+                
+            results.append({
+                "title": title[:160],
+                "snippet": snippet[:240],
+                "url": url,
+            })
+            if len(results) >= max_results:
+                break
+        
+        if not results:
+            # Fallback to generic parsing
+            for item in soup.select(".news-card, .newsitem"):
+                title_el = item.select_one("h3 a, .title a")
+                snippet_el = item.select_one(".snippet, .description")
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                    url = title_el.get("href", "")
+                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                    if title:
+                        results.append({"title": title[:160], "snippet": snippet[:240], "url": url})
+        
+        return results[:max_results]
+
+    def _parse_google_news(self, xml: str, max_results: int) -> List[dict]:
+        """Parse Google News RSS results."""
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml)
+            results: List[dict] = []
+            for item in root.findall(".//item")[:max_results]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                description = item.findtext("description", "").strip()
+                # Clean HTML from description
+                import re
+                description = re.sub(r'<[^>]+>', '', description)
+                if title:
+                    results.append({
+                        "title": title[:160],
+                        "snippet": description[:240],
+                        "url": link,
+                    })
+            return results
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     # Async collection
     # ------------------------------------------------------------------
@@ -977,6 +1096,8 @@ class WebSearchTool(BaseTool):
             "360": self._async_search_360,
             "bing": self._async_search_bing,
             "google": self._async_search_google,
+            "bing-news": self._async_search_bing_news,
+            "google-news": self._async_search_google_news,
             "serpapi": self._async_search_serpapi,
         }
 
