@@ -8,14 +8,30 @@ Pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import os
 import re
 import time
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+# Optional async HTTP
+try:
+    import aiohttp
+    _HAS_AIOHTTP = True
+except ImportError:
+    _HAS_AIOHTTP = False
+
+# Optional fast parser
+try:
+    from bs4 import BeautifulSoup
+    _HAS_LXML = True
+except ImportError:
+    _HAS_LXML = False
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 from .search_cache import SearchCache
 from .search_fusion import SearchFusion
@@ -59,17 +75,14 @@ class WebSearchTool(BaseTool):
         self.api_key = api_key or os.getenv("SERPAPI_KEY")
         self.cfg = config or {}
 
-        # Resolve effective provider list
-        self.providers = self.cfg.get("providers", [provider])
-        if provider in ("duckduckgo", "360") and set(self.providers) <= {"duckduckgo", "360"}:
-            # Legacy / default free-provider set
-            self.providers = ["duckduckgo", "360", "bing", "google"]
+        # Resolve effective provider list - default to only DuckDuckGo for speed
+        self.providers = self.cfg.get("providers", ["duckduckgo"])
 
-        self.max_results_default = self.cfg.get("max_results", 5)
+        self.max_results_default = self.cfg.get("max_results", 3)
         self.quality_threshold = self.cfg.get("quality_threshold", 0.6)
         self.use_playwright = self.cfg.get("use_playwright", False)
         self.sequential_fallback = self.cfg.get("sequential_fallback", False)
-        self.max_fetch_urls = self.cfg.get("max_fetch_urls", 3)
+        self.max_fetch_urls = self.cfg.get("max_fetch_urls", 0)
         self.cache_ttl = self.cfg.get("cache_ttl", 300)
         self.domain_trust = self.cfg.get("domain_trust", {})
 
@@ -88,6 +101,9 @@ class WebSearchTool(BaseTool):
         self.fusion = SearchFusion(domain_trust=self.domain_trust, quality_threshold=self.quality_threshold)
         self.fetcher = WebContentFetcher(use_playwright=self.use_playwright)
         self._recent_sigs = []
+
+        # 内存级缓存：热查询零网络/磁盘/解析
+        self._mem_cache = {}
 
     @staticmethod
     def _detect_search_need(query: str) -> Dict[str, Any]:
@@ -202,12 +218,20 @@ class WebSearchTool(BaseTool):
                 fusion_max = max(effective_max_results * 2, 8)
                 fetch_max = self.max_fetch_urls
 
-            # 1. Cache check (deep mode also consults cache; only full cache hits
-            #    from a near-identical query bypass the search to save tokens/time.
-            #    Deep queries still fall through to live search when there is no hit.)
+            # Memory cache key
+            mem_key = (query, max_results, deep_max_results)
+            if mem_key in self._mem_cache:
+                return self._mem_cache[mem_key]
+
+            # Disk cache check
             cached = self.cache.get(query, threshold=0.5)
             if cached:
-                return ToolResult(
+                # Determine effective_max_results for slicing
+                if is_deep:
+                    effective_max_results = max(1, int(deep_max_results))
+                else:
+                    effective_max_results = max(1, min(int(max_results), 10))
+                result = ToolResult(
                     success=True,
                     output=json.dumps(cached[:effective_max_results], indent=2, ensure_ascii=False),
                     metadata={
@@ -217,84 +241,130 @@ class WebSearchTool(BaseTool):
                         "cached": True,
                     },
                 )
+                self._mem_cache[mem_key] = result
+                return result
 
-            # 2. Gather results from providers
-            # 意图感知: 中文查询优先国内源, 英文查询优先国际源(提高相关性)
-            need = self._detect_search_need(query)
-            effective_providers = list(self.providers)
-            if need["lang"] == "zh" and "360" in effective_providers:
-                effective_providers = ["360"] + [p for p in effective_providers if p != "360"]
-            elif need["lang"] == "en" and "bing" in effective_providers:
-                effective_providers = ["bing"] + [p for p in effective_providers if p != "bing"]
+            # Live search via _search_and_fuse
+            result = self._search_and_fuse(query, max_results, deep_max_results)
+            self._mem_cache[mem_key] = result
+            # Simple LRU eviction
+            if len(self._mem_cache) > 100:
+                oldest = next(iter(self._mem_cache))
+                del self._mem_cache[oldest]
+            return result
+        except Exception as e:
+            return ToolResult(success=False, output="", error=str(e))
+
+    def _search_and_fuse(self, query: str, max_results: int, deep_max_results: Optional[int] = None) -> ToolResult:
+        """Core search pipeline without cache checks."""
+        is_deep = bool(deep_max_results and int(deep_max_results) > 10)
+        # Compute parameters
+        if is_deep:
+            effective_max_results = max(1, int(deep_max_results))
+            max_workers = min(len(self.providers), 8)
+            fusion_max = max(effective_max_results * 2, 8)
+            fetch_max = max(self.max_fetch_urls, 20)
+        else:
+            effective_max_results = max(1, min(int(max_results), 10))
+            max_workers = min(len(self.providers), 4)
+            fusion_max = max(effective_max_results * 2, 8)
+            fetch_max = self.max_fetch_urls
+
+        # Intent detection
+        need = self._detect_search_need(query)
+        effective_providers = list(self.providers)
+        if need["lang"] == "zh" and "360" in effective_providers:
+            effective_providers = ["360"] + [p for p in effective_providers if p != "360"]
+        elif need["lang"] == "en" and "bing" in effective_providers:
+            effective_providers = ["bing"] + [p for p in effective_providers if p != "bing"]
+
+        errors: List[str] = []
+        # Use async collection if aiohttp is available, else fall back to sync
+        if _HAS_AIOHTTP:
+            provider_results, errors = self._run_async(
+                self._async_collect_provider_results(
+                    query, effective_max_results, max_workers=max_workers,
+                    providers=effective_providers, is_deep=is_deep
+                )
+            )
+        else:
             provider_results, errors = self._collect_provider_results(
                 query, effective_max_results, max_workers=max_workers, providers=effective_providers
             )
 
-            # 3. Fallback: if nothing usable, try a relaxed query
-            if not provider_results:
-                relaxed = self._relax_query(query)
-                if relaxed and relaxed != query:
-                    provider_results, extra_errors = self._collect_provider_results(
+        # Fallback
+        if not provider_results:
+            relaxed = self._relax_query(query)
+            if relaxed and relaxed != query:
+                if _HAS_AIOHTTP:
+                    extra_results, extra_errors = self._run_async(
+                        self._async_collect_provider_results(
+                            relaxed, effective_max_results, max_workers=max_workers,
+                            is_deep=is_deep
+                        )
+                    )
+                else:
+                    extra_results, extra_errors = self._collect_provider_results(
                         relaxed, effective_max_results, max_workers=max_workers
                     )
-                    errors.extend(extra_errors)
+                provider_results.update(extra_results)
+                errors.extend(extra_errors)
 
-            if not provider_results:
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error="; ".join(errors) if errors else "No search results returned",
-                )
-
-            # 4. Fuse, score, dedupe, diversify
-            fused = self.fusion.fuse(provider_results, query, max_results=fusion_max)
-
-            # 4b. 意图感知的权威域优先: tech 类 query 时把技术域结果提前
-            if fused and need.get("domain_hint"):
-                pref_domains = [d.strip() for d in need["domain_hint"].split(",")]
-                def _domain_of(url: str) -> str:
-                    from urllib.parse import urlparse
-                    try:
-                        return (urlparse(url).netloc or "").lower()
-                    except Exception:
-                        return ""
-                fused.sort(key=lambda r: not any(
-                    pref in _domain_of(r.get("url", "")) or pref.rstrip("*.") in r.get("url", "")
-                    for pref in pref_domains
-                ))
-
-            # 5. Enrich low-quality snippets with real page content
-            if fused:
-                avg_snippet_len = sum(len((r.get("snippet") or "").strip()) for r in fused) / len(fused)
-                weak_snippets = avg_snippet_len < 80
-                has_real_urls = any(self._looks_like_url(r.get("url", "")) for r in fused[:3])
-                if weak_snippets or has_real_urls:
-                    self.fetcher.enrich_results(fused, max_urls=fetch_max)
-
-            # 5b. 实体校验过滤，避免模型改写导致无关结果
-            if fused and 'ai' in query.lower() or '人工智能' in query:
-                keywords = ['ai','人工智能','人工智','机器人','大模型','模型','ChatGPT','GPT','LLM']
-                fused = [r for r in fused if any(k in (r.get('title') or '').lower() or k in (r.get('snippet') or '') for k in keywords)]
-            final = fused[:effective_max_results]
-
-            # 6. Cache final results (deep results cached separately by query)
-            if final:
-                self.cache.set(query, final)
-
+        if not provider_results:
             return ToolResult(
-                success=True,
-                output=json.dumps(final, indent=2, ensure_ascii=False),
-                metadata={
-                    "query": query,
-                    "providers": list(provider_results.keys()),
-                    "num_results": len(final),
-                    "cached": False,
-                    "deep_mode": is_deep,
-                    "errors": errors if errors else None,
-                },
+                success=False,
+                output="",
+                error="; ".join(errors) if errors else "No search results returned",
             )
-        except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+
+        # Fuse
+        fused = self.fusion.fuse(provider_results, query, max_results=fusion_max)
+
+        # Domain priority
+        if fused and need.get("domain_hint"):
+            pref_domains = [d.strip() for d in need["domain_hint"].split(",")]
+            def _domain_of(url: str) -> str:
+                from urllib.parse import urlparse
+                try:
+                    return (urlparse(url).netloc or "").lower()
+                except Exception:
+                    return ""
+            fused.sort(key=lambda r: not any(
+                pref in _domain_of(r.get("url", "")) or pref.rstrip("*.") in r.get("url", "")
+                for pref in pref_domains
+            ))
+
+        # Enrich snippets
+        if fused:
+            avg_snippet_len = sum(len((r.get("snippet") or "").strip()) for r in fused) / len(fused)
+            weak_snippets = avg_snippet_len < 80
+            has_real_urls = any(self._looks_like_url(r.get("url", "")) for r in fused[:3])
+            if weak_snippets or has_real_urls:
+                self.fetcher.enrich_results(fused, max_urls=fetch_max)
+
+        # Entity filter
+        if fused and ('ai' in query.lower() or '人工智能' in query):
+            keywords = ['ai','人工智能','人工智','机器人','大模型','模型','ChatGPT','GPT','LLM']
+            fused = [r for r in fused if any(k in (r.get('title') or '').lower() or k in (r.get('snippet') or '') for k in keywords)]
+
+        final = fused[:effective_max_results]
+
+        # Disk cache
+        if final:
+            self.cache.set(query, final)
+
+        return ToolResult(
+            success=True,
+            output=json.dumps(final, indent=2, ensure_ascii=False),
+            metadata={
+                "query": query,
+                "providers": list(provider_results.keys()),
+                "num_results": len(final),
+                "cached": False,
+                "deep_mode": is_deep,
+                "errors": errors if errors else None,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Provider collection
@@ -310,7 +380,7 @@ class WebSearchTool(BaseTool):
         """Call all configured providers and return {provider: results} plus errors."""
         provider_results: Dict[str, List[Dict[str, Any]]] = {}
         errors: List[str] = []
-        provider_list = providers or provider_list
+        provider_list = providers or self.providers
 
         if self.sequential_fallback:
             for provider in provider_list:
@@ -319,27 +389,18 @@ class WebSearchTool(BaseTool):
                     errors.append(error)
                 if self._is_real_results(results):
                     provider_results[provider] = results
-                    # In sequential fallback we stop at the first real provider
                     break
         else:
-            # 并发收集, 动态等待: 每 2s 检查一次, 已有足够结果即提前返回, 不等慢 provider
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
             try:
                 futures = {
                     executor.submit(self._call_provider, provider, query, max_results): provider
                     for provider in provider_list
                 }
-                deadline = time.monotonic() + 10
-                poll_interval = 2
-                done_set = set()
-                while time.monotonic() < deadline and len(done_set) < len(futures):
-                    newly_done, _ = concurrent.futures.wait(
-                        futures, timeout=poll_interval, return_when=concurrent.futures.FIRST_COMPLETED
-                    )
-                    done_set.update(newly_done)
-                    # 检查是否已拿到足够真结果, 无需再等
-                    any_real = False
-                    for future in done_set:
+                # Wait for futures as they complete, with a total timeout of 8 seconds.
+                # Stop early once we have at least one real result.
+                try:
+                    for future in concurrent.futures.as_completed(futures, timeout=8):
                         provider = futures[future]
                         try:
                             results, error = future.result()
@@ -347,31 +408,16 @@ class WebSearchTool(BaseTool):
                                 errors.append(f"{provider}: {error}")
                             if self._is_real_results(results):
                                 provider_results[provider] = results
-                                any_real = True
+                                # Early exit: one good provider is enough for normal mode
+                                break
                         except Exception as e:
                             errors.append(f"{provider}: {e}")
-                    if any_real:
-                        break
-                # 收尾: 处理剩余已完成 future(避免漏掉并发完成的)
-                remaining = set(futures.keys()) - done_set
-                for future in remaining:
-                    if future.done():
-                        done_set.add(future)
-                for future in done_set:
-                    if future in futures and futures[future] not in provider_results:
-                        provider = futures[future]
-                        try:
-                            results, error = future.result()
-                            if error:
-                                errors.append(f"{provider}: {error}")
-                            if self._is_real_results(results) and provider not in provider_results:
-                                provider_results[provider] = results
-                        except Exception as e:
-                            errors.append(f"{provider}: {e}")
-                # 未完成 future 不阻塞, 直接取消后台线程
-                not_done = set(futures.keys()) - done_set
-                for future in not_done:
-                    future.cancel()
+                except concurrent.futures.TimeoutError:
+                    pass
+                # Cancel any unfinished futures to free threads quickly
+                for future in futures:
+                    if not future.done():
+                        future.cancel()
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
 
@@ -450,14 +496,10 @@ class WebSearchTool(BaseTool):
     # ------------------------------------------------------------------
 
     def _get_bs(self):
-        try:
-            from bs4 import BeautifulSoup
-        except ImportError as exc:
-            raise ImportError(
-                "beautifulsoup4 is required for real web search parsing. "
-                "Install it with: pip install beautifulsoup4"
-            ) from exc
-        return BeautifulSoup
+        """Return a BeautifulSoup constructor using lxml if available."""
+        # lxml is much faster than html.parser
+        parser = "lxml" if _HAS_LXML else "html.parser"
+        return lambda html: BeautifulSoup(html, parser)
 
     def _search_duckduckgo(self, query: str, max_results: int) -> List[dict]:
         url = "https://html.duckduckgo.com/html/"
@@ -538,7 +580,7 @@ class WebSearchTool(BaseTool):
                     url,
                     params={"q": query},
                     headers=headers,
-                    timeout=10,
+                    timeout=5,
                 )
                 response.raise_for_status()
                 return self._parse_360(response.text, max_results)
@@ -734,7 +776,7 @@ class WebSearchTool(BaseTool):
         for attempt in range(2):
             try:
                 response = self._session.get(
-                    url, params={"q": query}, headers=headers, timeout=10
+                    url, params={"q": query}, headers=headers, timeout=5
                 )
                 response.raise_for_status()
                 return self._parse_bing(response.text, max_results)
@@ -773,7 +815,7 @@ class WebSearchTool(BaseTool):
         for attempt in range(2):
             try:
                 response = self._session.get(
-                    url, params={"q": query, "num": max_results}, headers=headers, timeout=10
+                    url, params={"q": query, "num": max_results}, headers=headers, timeout=5
                 )
                 response.raise_for_status()
                 return self._parse_google(response.text, max_results)
@@ -806,7 +848,7 @@ class WebSearchTool(BaseTool):
             "num": max_results,
         }
         response = requests.get(
-            "https://serpapi.com/search", params=params, timeout=10
+            "https://serpapi.com/search", params=params, timeout=5
         )
         response.raise_for_status()
         data = response.json()
@@ -820,6 +862,196 @@ class WebSearchTool(BaseTool):
                 }
             )
         return results
+
+    # ------------------------------------------------------------------
+    # Async provider implementations (used when aiohttp is available)
+    # ------------------------------------------------------------------
+    async def _async_search_duckduckgo(self, query: str, max_results: int) -> List[dict]:
+        url = "https://html.duckduckgo.com/html/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+            "Referer": "https://duckduckgo.com/",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    html = await resp.text()
+                    return self._parse_duckduckgo(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"DuckDuckGo async search failed: {e}") from e
+
+    async def _async_search_360(self, query: str, max_results: int) -> List[dict]:
+        url = "https://www.so.com/s"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_360(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"360 async search failed: {e}") from e
+
+    async def _async_search_bing(self, query: str, max_results: int) -> List[dict]:
+        url = "https://www.bing.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_bing(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Bing async search failed: {e}") from e
+
+    async def _async_search_google(self, query: str, max_results: int) -> List[dict]:
+        url = "https://www.google.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query, "num": max_results}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_google(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Google async search failed: {e}") from e
+
+    async def _async_search_serpapi(self, query: str, max_results: int) -> List[dict]:
+        if not self.api_key:
+            return []
+        params = {
+            "q": query,
+            "api_key": self.api_key,
+            "engine": "google",
+            "num": max_results,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://serpapi.com/search", params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    data = await resp.json()
+                    results = []
+                    for item in data.get("organic_results", [])[:max_results]:
+                        results.append({
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", ""),
+                            "url": item.get("link", ""),
+                        })
+                    return results
+        except Exception as e:
+            raise RuntimeError(f"SerpAPI async search failed: {e}") from e
+
+    # ------------------------------------------------------------------
+    # Async collection
+    # ------------------------------------------------------------------
+    async def _async_collect_provider_results(
+        self,
+        query: str,
+        max_results: int,
+        max_workers: int = 4,
+        providers: Optional[List[str]] = None,
+        is_deep: bool = False,
+    ) -> Tuple[Dict[str, List[Dict[str, Any]]], List[str]]:
+        """Async version of _collect_provider_results with early exit."""
+        provider_results: Dict[str, List[Dict[str, Any]]] = {}
+        errors: List[str] = []
+        provider_list = providers or self.providers
+
+        # Map provider name to async method
+        async_methods = {
+            "duckduckgo": self._async_search_duckduckgo,
+            "360": self._async_search_360,
+            "bing": self._async_search_bing,
+            "google": self._async_search_google,
+            "serpapi": self._async_search_serpapi,
+        }
+
+        # Create tasks mapping task -> provider
+        task_to_provider = {}
+        for provider in provider_list:
+            method = async_methods.get(provider)
+            if method:
+                task = asyncio.create_task(method(query, max_results))
+                task_to_provider[task] = provider
+            else:
+                errors.append(f"Unknown provider: {provider}")
+
+        # Wait for tasks with early exit on first real result (unless deep mode)
+        try:
+            for coro in asyncio.as_completed(task_to_provider.keys(), timeout=8):
+                task = coro
+                provider = task_to_provider[task]
+                try:
+                    results = await task
+                    if error:
+                        errors.append(f"{provider}: {error}")
+                    if self._is_real_results(results):
+                        provider_results[provider] = results
+                        # Early exit: one good provider is enough for normal mode
+                        if not is_deep:
+                            # Cancel remaining tasks
+                            for t in task_to_provider:
+                                if not t.done():
+                                    t.cancel()
+                            break
+                except Exception as e:
+                    errors.append(f"{provider}: {e}")
+        except asyncio.TimeoutError:
+            # Timeout: collect any completed tasks
+            for task, provider in task_to_provider.items():
+                if task.done() and provider not in provider_results:
+                    try:
+                        results = task.result()
+                        if self._is_real_results(results):
+                            provider_results[provider] = results
+                    except Exception as e:
+                        errors.append(f"{provider}: {e}")
+            # Cancel pending
+            for task in task_to_provider:
+                if not task.done():
+                    task.cancel()
+
+        return provider_results, errors
+
+    # Helper to run async code from synchronous context
+    def _run_async(self, coro):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            # If there's already a running loop, we cannot use asyncio.run.
+            # We'll run in a new thread with a new event loop.
+            import threading
+            result_container = []
+            exc_container = []
+            def runner():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    result_container.append(new_loop.run_until_complete(coro))
+                except Exception as e:
+                    exc_container.append(e)
+                finally:
+                    new_loop.close()
+            t = threading.Thread(target=runner)
+            t.start()
+            t.join()
+            if exc_container:
+                raise exc_container[0]
+            return result_container[0]
+        else:
+            return asyncio.run(coro)
 
 
 if not TOOLS_REGISTRY.get("web_search"):
