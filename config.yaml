@@ -1,0 +1,263 @@
+backend: openai
+model_registry_path: agent_project/config/models.yaml
+openai:
+  api_key: ollama
+  base_url: http://localhost:11434/v1
+  model: qwen2.5-coder:7b
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  timeout: 120
+deepseek:
+  api_key: null
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  timeout: 120
+openrouter:
+  api_key: null
+  base_url: https://openrouter.ai/api/v1
+  model: anthropic/claude-sonnet-4
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  timeout: 120
+anthropic:
+  api_key: null
+  base_url: https://api.anthropic.com/v1
+  model: claude-sonnet-4-20250514
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 120
+openmythos:
+  model_path: null
+  device: cpu
+  dim: 256
+  n_heads: 8
+  n_kv_heads: 2
+  max_seq_len: 4096
+  max_loops: 8
+  prelude_layers: 2
+  coda_layers: 2
+  attn_type: gqa
+  n_experts: 8
+  n_shared_experts: 1
+  n_experts_per_tok: 2
+  expert_dim: 64
+  lora_rank: 8
+  act_threshold: 0.95
+  rope_theta: 500000.0
+  dropout: 0.0
+model:
+  use_local: true
+  model_path: null
+  attention_type: mla
+  dim: 256
+  n_heads: 8
+  max_loop_iters: 16
+  n_experts: 8
+  n_shared_experts: 1
+  n_experts_per_tok: 2
+  expert_dim: 64
+  vocab_size: 32000
+max_outer_loops: 1
+default_thinking_loops: 4
+max_thinking_loops: 16
+temperature: 0.7
+top_k: 50
+act_threshold: 0.7
+fast_mode: true
+reflection:
+  enabled: true
+  frequency: 5
+  min_failures_threshold: 3
+  thinking_loops_for_reflection: 16
+  save_reflections: true
+  reflections_path: ./data/reflections
+self_improvement:
+  enabled: true
+  auto_training: false
+  training:
+    sft_epochs: 1
+    learning_rate: 1.0e-05
+    batch_size: 2
+    gradient_accumulation_steps: 4
+tools:
+  enabled: []
+  web_search:
+    enabled: true
+    provider: duckduckgo
+    max_results: 5
+    providers:
+    - duckduckgo
+    - '360'
+    quality_threshold: 0.3
+    cache_ttl: 300
+    use_playwright: false
+    sequential_fallback: false
+    max_fetch_urls: 3
+    domain_trust:
+      wikipedia.org: 1.0
+      github.com: 0.95
+      zhihu.com: 0.85
+      baike.baidu.com: 0.8
+      news.sina.com.cn: 0.8
+      news.qq.com: 0.8
+      36kr.com: 0.75
+      techcrunch.com: 0.75
+  file_ops:
+    enabled: false
+    allowed_dirs:
+    - ./data
+    - ./workspace
+    max_file_size: 1048576
+  code_exec:
+    enabled: false
+    timeout: 10
+  api_call:
+    enabled: false
+    allowed_hosts: []
+    timeout: 30
+  bash_exec:
+    enabled: true
+    timeout: 120
+    max_timeout: 600
+    default_cwd: ''
+  search_files:
+    enabled: true
+  glob:
+    enabled: true
+  project_context:
+    enabled: true
+    max_depth: 3
+    max_files: 100
+  browser:
+    enabled: false
+  git:
+    enabled: false
+  database:
+    enabled: false
+  telegram:
+    enabled: false
+    bot_token: null
+    allowed_user_ids: []
+    polling: true
+    webhook_url: ''
+    config_path: ./data/telegram
+experience:
+  storage_type: memory
+  vector_db_path: ./data/experience_store
+  max_episodes: 10000
+  auto_save: true
+  save_interval: 10
+strategies:
+  enabled: true
+  db_path: ./data/strategies
+  min_success_rate: 0.7
+  max_strategies_per_type: 50
+logging:
+  level: INFO
+  file: ./logs/agent.log
+  console: false
+  rich_markup: true
+  output_mode: auto
+planning:
+  enabled: true
+  default_strategy: adaptive
+  optimize_plans: true
+  max_subtasks: 10
+reasoning:
+  enabled: true
+  default_strategy: react
+  loop_controller_min_loops: 2
+  loop_controller_max_loops: 16
+  loop_controller_default_loops: 2
+memory:
+  enabled: true
+  kg_storage_path: ./data/kg_store
+  episodic_storage_path: ./data/episodic_store
+  max_episodes: 10000
+  auto_extract_entities: true
+  context_compression: true
+  compression_max_tokens: 512
+  file_memory_path: ./data/memory.md
+  user_memory_path: ./data/user.md
+  sqlite_session_path: ./data/sessions.db
+  importance_threshold: 0.45
+  max_facts_per_turn: 5
+self_correction:
+  enabled: true
+  low_confidence_threshold: 0.6
+  high_error_threshold: 0.3
+  inefficiency_threshold: 0.4
+  intervention_window: 10
+  auto_retraining_threshold: 0.6
+harness:
+  enabled: true
+  policy: safe
+  workspace_root: null
+  audit_log: true
+  allowlist_path: ./data/harness_allowlist.txt
+  prompt_injection_scan: true
+  max_turns: 12
+  max_seconds: 600.0
+  max_tokens: null
+  max_tool_calls: null
+  max_model_retries: 3
+  verify_final_answer: true
+  max_verification_rounds: 2
+  converge_on_stable: true
+health:
+  print_status_on_startup: true
+  show_install_hints: true
+execution:
+  use_legacy: false
+  default_strategy: react
+research:
+  enabled: true
+  max_search_results_per_query: 30
+  max_search_queries: 12
+  max_total_search_results: 200
+  max_urls_to_fetch: 50
+  max_sources_for_report: 50
+  max_thinking_steps: 32
+  verification_rounds: 2
+  report_max_tokens: 8192
+  report_formats:
+  - md
+  - html
+  iterative_rounds: 4
+  enable_follow_up_search: true
+  min_new_sources_per_round: 3
+  max_followup_queries: 4
+  require_citations: true
+  max_sources_for_gap_analysis: 20
+  max_claims_to_verify: 8
+  min_support_for_high_confidence: 3
+  enable_latent_space: false
+mcp:
+  enabled: true
+  servers:
+    filesystem:
+      enabled: true
+      command: npx
+      args:
+      - -y
+      - '@modelcontextprotocol/server-filesystem'
+      - /Users/mac/Desktop
+      env: {}
+      timeout: 60
+      init_timeout: 120
+display: {}
+agent:
+  backend: openai
+  openai:
+    api_key: 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
+    base_url: https://integrate.api.nvidia.com/v1
+    model: nvidia/nemotron-3-super-120b-a12b
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    timeout: 120
