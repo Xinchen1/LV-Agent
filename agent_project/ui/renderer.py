@@ -40,8 +40,10 @@ class Renderer:
 
         return f"\033[{';'.join(resolved)}m{text}\033[0m"
 
-    def themed(self, text: str, token: str) -> str:
+    def themed(self, text: str, token: str, bold: bool = False) -> str:
         """Style text using a named theme token."""
+        if bold:
+            return self.style(text, "bold", token)
         return self.theme.style(text, token)
 
     # ------------------------------------------------------------------
