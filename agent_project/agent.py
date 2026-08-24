@@ -2139,9 +2139,8 @@ class OpenMythosAgent:
             "- FINDING FILES: 用 glob(pattern, path) 定向查找, 不要用 bash find 全盘扫描(会刷屏权限错误)。只在用户明确要求全盘搜索时才用 bash find, 并加 2>/dev/null 屏蔽权限报错。",
             "- CREATING FILES/ARTICLES: 用户说'新建/创建/写一篇/保存一篇文章/把XX放进去'时, 必须直接调用 file_ops(action='write', path='<当前目录/文件名.md>', content='<完整内容>') 真正创建文件。写完用 file_ops(action='read', path=...) 验证内容已写入。绝不能只 list 目录或只说'好的'而不实际 write。",
             "- MODIFYING FILES: 用户说'给XX加功能/改一下/修改/更新/优化XX'时, 必须先 read 目标文件, 然后直接调用 file_ops(action='apply_diff', path=..., diff='<<<<<<< SEARCH\n原文\n=======\n新文\n>>>>>>> REPLACE') 或 file_ops(action='write', path=..., content='完整新内容') 真正修改文件。修改后 read 验证。绝不能只描述'应该怎么改'而不实际执行修改。",
-            "- Final answer must be in concise, natural Chinese (do not repeat tool result verbatim unless asked).",
-            "- 最终完成时, 用大白话/通俗易懂的话总结结论或结果(像跟朋友解释一样, 不用术语堆砌, 让非技术的人也能听懂你做了什么、得到什么)。",
         ]
+        # Note: System prompt is now fully in English as requested. Chinese instructions kept for final answer style only.
         if is_continuation:
             system_parts.append(
                 "The user is CONTINUING a previous discussion. Answer directly from the "
