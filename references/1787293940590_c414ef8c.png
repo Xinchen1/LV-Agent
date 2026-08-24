@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+  <defs>
+    <linearGradient id="tapeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#1c1917"/>
+      <stop offset="50%" style="stop-color:#2d2a26"/>
+      <stop offset="100%" style="stop-color:#1c1917"/>
+    </linearGradient>
+    <linearGradient id="headGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#d6a08a"/>
+      <stop offset="100%" style="stop-color:#cc7a60"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="800" height="450" fill="url(#tapeGrad)"/>
+  
+  <!-- Tape -->
+  <rect x="50" y="180" width="700" height="90" fill="#1c1917" rx="8" stroke="#333" stroke-width="2"/>
+  <rect x="50" y="180" width="700" height="90" fill="none" stroke="#d6a08a" stroke-width="2" rx="8" stroke-dasharray="10,5"/>
+  
+  <!-- Tape cells -->
+  <g id="tapeCells">
+    <rect x="70" y="185" width="80" height="80" fill="#2a2a2a" rx="4"/>
+    <text x="110" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">1</text>
+    <text x="110" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">0</text>
+    
+    <rect x="160" y="185" width="80" height="80" fill="#2a2a2a" rx="4"/>
+    <text x="200" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">0</text>
+    <text x="200" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">1</text>
+    
+    <rect x="250" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="290" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">1</text>
+      <text x="290" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">1</text>
+    
+    <rect x="340" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="380" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">0</text>
+      <text x="380" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">0</text>
+    
+    <rect x="430" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="470" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">1</text>
+      <text x="470" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">0</text>
+    
+    <rect x="520" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="560" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">0</text>
+      <text x="560" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">1</text>
+    
+    <rect x="610" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="650" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">1</text>
+      <text x="650" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">1</text>
+    
+    <rect x="700" y="185" width="80" height="80" fill="#2a2a2a" rx="4">
+      <text x="740" y="235" font-family="monospace" font-size="24" fill="#d6a08a" text-anchor="middle" font-weight="bold">0</text>
+      <text x="740" y="260" font-family="monospace" font-size="10" fill="#888" text-anchor="middle">1</text>
+  </g>
+  
+  <!-- Read/Write head -->
+  <g transform="translate(290, 140)">
+    <rect x="-25" y="-10" width="50" height="50" fill="url(#headGrad)" rx="8" stroke="#d6a08a" stroke-width="2"/>
+    <path d="M -5 15 L 0 5 L 5 15" stroke="#d6a08a" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="0" y="20" font-family="monospace" font-size="12" fill="#1c1917" text-anchor="middle" font-weight="bold">R/W</text>
+    <text x="0" y="40" font-family="monospace" font-size="9" fill="#d6a08a" text-anchor="middle">HEAD</text>
+  </g>
+  
+  <!-- State register -->
+  <rect x="50" y="50" width="180" height="80" fill="#2a2a2a" rx="8" stroke="#d6a08a" stroke-width="2"/>
+  <text x="140" y="80" font-family="monospace" font-size="11" fill="#d6a08a" text-anchor="middle" font-weight="bold">STATE: q₀</text>
+  <text x="140" y="105" font-family="monospace" font-size="9" fill="#888" text-anchor="middle">CURRENT STATE</text>
+  
+  <!-- Transition table -->
+  <rect x="580" y="50" width="170" height="200" fill="#1c1917" rx="8" stroke="#333" stroke-width="1"/>
+  <text x="665" y="75" font-family="monospace" font-size="12" fill="#d6a08a" text-anchor="middle" font-weight="bold">δ TABLE</text>
+  <text x="590" y="100" font-family="monospace" font-size="10" fill="#888">δ(q₀,0) → (q₁,1,R)</text>
+  <text x="590" y="120" font-family="monospace" font-size="10" fill="#888">δ(q₁,1) → (q₂,0,L)</text>
+  <text x="590" y="140" font-family="monospace" font-size="10" fill="#888">δ(q₂,0) → (q₀,1,R)</text>
+  <text x="590" y="160" font-family="monospace" font-size="10" fill="#888">δ(q₀,1) → (q₁,0,L)</text>
+  <text x="590" y="180" font-family="monospace" font-size="10" fill="#888">δ(q₁,0) → (q₃,1,R)</text>
+  <text x="590" y="200" font-family="monospace" font-size="10" fill="#888">δ(q₃,1) → (q₀,0,halt)</text>
+  
+  <!-- Title -->
+  <text x="400" y="30" font-family="monospace" font-size="20" fill="#d6a08a" text-anchor="middle" font-weight="bold">TURING MACHINE</text>
+  <text x="400" y="50" font-size="12" fill="#888" text-anchor="middle">Universal Computation Model → LV Agent Architecture</text>
+  
+  <!-- Arrows showing mapping -->
+  <g stroke="#d6a08a" stroke-width="2" fill="none" stroke-dasharray="5,5">
+    <line x1="230" y1="130" x2="140" y2="130" marker-end="url(#arrowhead)"/>
+    <line x1="400" y1="130" x2="400" y2="180" marker-end="url(#arrowhead)"/>
+    <line x1="750" y1="130" x2="665" y2="150" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d6a08a"/>
+    </marker>
+  </defs>
+  
+  <!-- Labels -->
+  <text x="140" y="300" font-size="11" fill="#888" text-anchor="middle">Tape ↔ Context Window</text>
+  <text x="140" y="320" font-size="11" fill="#888" text-anchor="middle">Head ↔ Tool Execution</text>
+  <text x="665" y="260" font-size="11" fill="#888" text-anchor="middle">δ Function → Tool Router</text>
+  <text x="400" y="420" font-size="11" fill="#888" text-anchor="middle">State Register → Agent State</text>
+</svg>
+PYEOF
