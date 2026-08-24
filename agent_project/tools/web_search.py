@@ -76,7 +76,7 @@ class WebSearchTool(BaseTool):
         self.cfg = config or {}
 
         # Resolve effective provider list - default to only DuckDuckGo for speed
-        self.providers = self.cfg.get("providers", ["duckduckgo"])
+        self.providers = self.cfg.get("providers", ["duckduckgo", "bing", "google"])
 
         # News-specific providers (auto-enabled when query contains news keywords)
         self.news_providers = self.cfg.get("news_providers", ["bing-news", "google-news"])
@@ -458,6 +458,10 @@ class WebSearchTool(BaseTool):
                 return self._search_duckduckgo(query, max_results), None
             if provider == "360":
                 return self._search_360(query, max_results), None
+            if provider == "bing":
+                return self._search_bing(query, max_results), None
+            if provider == "google":
+                return self._search_google(query, max_results), None
             if provider == "serpapi":
                 if not self.api_key:
                     return [], "SerpAPI key not configured"
@@ -783,28 +787,81 @@ class WebSearchTool(BaseTool):
 
         return results[: max(max_results, 1)]
 
-    def _search_serpapi(self, query: str, max_results: int) -> List[dict]:
-        params = {
-            "q": query,
-            "api_key": self.api_key,
-            "engine": "google",
-            "num": max_results,
+    def _search_bing(self, query: str, max_results: int) -> List[dict]:
+        """Bing HTML search fallback."""
+        url = "https://www.bing.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
         }
-        response = requests.get(
-            "https://serpapi.com/search", params=params, timeout=5
-        )
-        response.raise_for_status()
-        data = response.json()
+        last_exception = None
+        for attempt in range(2):
+            try:
+                response = self._session.get(
+                    url, params={"q": query}, headers=headers, timeout=5
+                )
+                response.raise_for_status()
+                return self._parse_bing(response.text, max_results)
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                time.sleep(0.8 * (attempt + 1))
+        raise last_exception or RuntimeError("Bing search failed")
+
+    def _parse_bing(self, html: str, max_results: int) -> List[dict]:
+        BeautifulSoup = self._get_bs()
+        soup = BeautifulSoup(html)
         results = []
-        for item in data.get("organic_results", [])[:max_results]:
-            results.append(
-                {
-                    "title": item.get("title", ""),
-                    "snippet": item.get("snippet", ""),
-                    "url": item.get("link", ""),
-                }
+        for li in soup.select(".b_algo"):
+            title_el = li.select_one("h2 a")
+            snippet_el = li.select_one("p")
+            url_el = li.select_one("cite")
+            title = title_el.get_text(strip=True) if title_el else ""
+            url = url_el.get_text(strip=True) if url_el else (
+                title_el.get("href", "") if title_el else ""
             )
-        return results
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+            if not title:
+                continue
+            results.append({"title": title[:160], "snippet": snippet[:240], "url": url})
+        return results[:max(max_results, 1)]
+
+    def _search_google(self, query: str, max_results: int) -> List[dict]:
+        """Google HTML search fallback (often blocked; used last)."""
+        url = "https://www.google.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        last_exception = None
+        for attempt in range(2):
+            try:
+                response = self._session.get(
+                    url, params={"q": query, "num": max_results}, headers=headers, timeout=5
+                )
+                response.raise_for_status()
+                return self._parse_google(response.text, max_results)
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                time.sleep(0.8 * (attempt + 1))
+        raise last_exception or RuntimeError("Google search failed")
+
+    def _parse_google(self, html: str, max_results: int) -> List[dict]:
+        BeautifulSoup = self._get_bs()
+        soup = BeautifulSoup(html)
+        results = []
+        for g in soup.select("div.g"):
+            title_el = g.select_one("h3")
+            link_el = g.select_one("a[href]")
+            snippet_el = g.select_one("div[data-sncf], .VwiC3b, span.st")
+            title = title_el.get_text(strip=True) if title_el else ""
+            url = link_el.get("href", "") if link_el else ""
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+            if not title:
+                continue
+            results.append({"title": title[:160], "snippet": snippet[:240], "url": url})
+        return results[:max(max_results, 1)]
 
     # ------------------------------------------------------------------
     # Async provider implementations (used when aiohttp is available)
@@ -864,7 +921,88 @@ class WebSearchTool(BaseTool):
         except Exception as e:
             raise RuntimeError(f"SerpAPI async search failed: {e}") from e
 
+    async def _async_search_bing(self, query: str, max_results: int) -> List[dict]:
+        """Bing HTML search fallback."""
+        url = "https://www.bing.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_bing(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Bing async search failed: {e}") from e
+
+    async def _async_search_google(self, query: str, max_results: int) -> List[dict]:
+        """Google HTML search fallback (often blocked; used last)."""
+        url = "https://www.google.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query, "num": max_results}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_google(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Google async search failed: {e}") from e
+
+    async def _async_search_google_news(self, query: str, max_results: int) -> List[dict]:
+        """Google News search."""
+        url = "https://news.google.com/rss/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    xml = await resp.text()
+                    return self._parse_google_news(xml, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Google News async search failed: {e}") from e
+
+    async def _async_search_bing(self, query: str, max_results: int) -> List[dict]:
+        """Bing HTML search fallback."""
+        url = "https://www.bing.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_bing(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Bing async search failed: {e}") from e
+
+    async def _async_search_google(self, query: str, max_results: int) -> List[dict]:
+        """Google HTML search fallback (often blocked; used last)."""
+        url = "https://www.google.com/search"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"q": query, "num": max_results}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    html = await resp.text()
+                    return self._parse_google(html, max_results)
+        except Exception as e:
+            raise RuntimeError(f"Google async search failed: {e}") from e
+
     async def _async_search_bing_news(self, query: str, max_results: int) -> List[dict]:
+        """Bing News search."""
         """Bing News search."""
         url = "https://www.bing.com/news/search"
         headers = {
@@ -982,6 +1120,8 @@ class WebSearchTool(BaseTool):
         async_methods = {
             "duckduckgo": self._async_search_duckduckgo,
             "360": self._async_search_360,
+            "bing": self._async_search_bing,
+            "google": self._async_search_google,
             "bing-news": self._async_search_bing_news,
             "google-news": self._async_search_google_news,
             "serpapi": self._async_search_serpapi,
