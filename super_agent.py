@@ -741,7 +741,8 @@ class SuperAgentCLI:
             from rich.panel import Panel
             from rich.console import Group
             from rich.text import Text
-            # 无色简洁: 全部用默认色, 只靠结构与对齐
+            from rich.align import Align
+
             elapsed = time.time() - live_state["started"]
             dots = "." * (int(elapsed * 2) % 4)
 
@@ -752,43 +753,71 @@ class SuperAgentCLI:
             }
             stage_label = _stage_en.get(stage_label, stage_label)
 
-            # 统计: 左对齐标签 + 数值, 简洁整齐
-            lines = [
-                f"  Stage     {stage_label}{dots}",
-                f"  Round     {live_state['round']}/{live_state['round_total']}",
-                f"  Sources   {live_state['sources']}",
-                f"  Queries   {live_state['queries']}",
-                f"  Tokens    {live_state.get('tokens', 0):,}",
-                f"  Elapsed   {int(elapsed)}s",
-            ]
-            # 进度条(细块, 无色)
-            pct = min(100, int(live_state["sources"] / 200 * 100)) if live_state["sources"] else 0
-            lines.append(f"  Progress  " + "▁" * (pct // 10) + " " * (10 - pct // 10))
-            stats_text = "\n".join(lines)
+            # Header: bold brand title + subtle subtitle
+            header = Group(
+                Align.center(Text("DEEP RESEARCH", style="bold bright_magenta")),
+                Align.center(Text("iterative search & synthesis", style="dim")),
+            )
 
-            # 过程日志: 缩进对齐, 无图标
-            log_lines = [f"    {ln[:64]}" for ln in live_state["log"]]
+            # Metrics: modern dashboard, two rows for better readability on 80-col terminals
+            def _metric_row(pairs, accent_labels=("STAGE", "ROUND")):
+                row = Text("  ")
+                for i, (label, value) in enumerate(pairs):
+                    if i > 0:
+                        row.append("    ", style="")
+                        row.append("│", style="dim")
+                        row.append("    ", style="")
+                    row.append(f"{label}  ", style="dim")
+                    row.append(value, style="bold bright_cyan" if label in accent_labels else "bold")
+                return row
+
+            row1 = _metric_row([
+                ("STAGE", f"{stage_label}{dots}"),
+                ("ROUND", f"{live_state['round']}/{live_state['round_total']}"),
+                ("ELAPSED", f"{int(elapsed)}s"),
+            ])
+            row2 = _metric_row([
+                ("SOURCES", str(live_state['sources'])),
+                ("QUERIES", str(live_state['queries'])),
+                ("TOKENS", f"{live_state.get('tokens', 0):,}"),
+            ])
+
+            # Progress bar based on rounds
+            total = max(live_state["round_total"], 1)
+            pct = min(100, int(live_state["round"] / total * 100)) if live_state["round_total"] else 0
+            bar_width = 28
+            filled = max(1, int(pct / 100 * bar_width)) if pct > 0 else 0
+            bar = "█" * filled + "░" * (bar_width - filled)
+            bar_line = Text(f"  {bar}  {pct}%", style="bright_magenta")
+
+            # Recent activity log
+            log_lines = []
+            for ln in live_state["log"][-8:]:
+                log_lines.append(f"  ▹ {ln[:68]}")
+            log_content = "\n".join(log_lines) if log_lines else "  ▹ waiting for signals..."
             log_panel = Panel(
-                "\n".join(log_lines) if log_lines else "    (waiting...)",
-                title=" Research Process ",
-                padding=(0, 1),
+                log_content,
+                title="[dim]activity[/dim]",
+                padding=(0, 0),
                 expand=False,
-                border_style="dim",
+                border_style="bright_black",
             )
 
             inner = Group(
+                header,
                 Text(""),
-                Text(stats_text),
+                row1,
+                row2,
+                Text(""),
+                bar_line,
                 Text(""),
                 log_panel,
             )
             return Panel(
                 inner,
-                title=" LV AGENT · Deep Research ",
-                subtitle=" // running ",
                 padding=(0, 1),
                 expand=False,
-                border_style="dim",
+                border_style="bright_magenta",
             )
 
         def stream_callback(kind, token):
@@ -916,7 +945,14 @@ class SuperAgentCLI:
                     live.stop()
                 except Exception:
                     pass
-                print(_style(f"  ✓ Deep research done · sources {live_state.get('sources', 0)} · queries {live_state.get('queries', 0)} · tokens {live_state.get('tokens', 0)}", "2"), flush=True)
+                from rich.text import Text
+                done_text = Text()
+                done_text.append("  ✓ ", style="bold bright_green")
+                done_text.append("Deep research done", style="bold")
+                done_text.append(f" · {live_state.get('sources', 0)} sources", style="dim")
+                done_text.append(f" · {live_state.get('queries', 0)} queries", style="dim")
+                done_text.append(f" · {live_state.get('tokens', 0):,} tokens", style="dim")
+                console.print(done_text)
             adapter.finalize()
             # Read content flag AFTER streaming completes so all adapters can suppress
             # duplicate final-answer printing.
@@ -1338,9 +1374,9 @@ class SuperAgentCLI:
                 cwd = "~" + cwd[len(home):]
         except Exception:
             cwd = "~"
-        brand = _style("Lv", "1;36")
-        path = _style(cwd, "38;5;245")
-        arrow = _style("→", "38;5;245")
+        brand = terminal.token("Lv", "brand")
+        path = terminal.token(cwd, "muted")
+        arrow = terminal.token("→", "muted")
         return f"{brand} {path} {arrow} "
 
     def _apply_history_line(self, buf: bytearray, text: str) -> None:
