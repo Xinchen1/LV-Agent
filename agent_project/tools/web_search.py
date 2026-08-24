@@ -282,8 +282,6 @@ class WebSearchTool(BaseTool):
         effective_providers = list(self.providers)
         if need["lang"] == "zh" and "360" in effective_providers:
             effective_providers = ["360"] + [p for p in effective_providers if p != "360"]
-        elif need["lang"] == "en" and "bing" in effective_providers:
-            effective_providers = ["bing"] + [p for p in effective_providers if p != "bing"]
 
         # Auto-enable news providers for news-like queries
         is_news_query = any(k in query.lower() for k in ['新闻', '最新', 'news', 'latest', '今日', '今日头条', 'breaking', '头条'])
@@ -460,10 +458,6 @@ class WebSearchTool(BaseTool):
                 return self._search_duckduckgo(query, max_results), None
             if provider == "360":
                 return self._search_360(query, max_results), None
-            if provider == "bing":
-                return self._search_bing(query, max_results), None
-            if provider == "google":
-                return self._search_google(query, max_results), None
             if provider == "serpapi":
                 if not self.api_key:
                     return [], "SerpAPI key not configured"
@@ -554,7 +548,7 @@ class WebSearchTool(BaseTool):
 
     def _parse_duckduckgo(self, html: str, max_results: int) -> List[dict]:
         BeautifulSoup = self._get_bs()
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html)
         results: List[dict] = []
         for result in soup.select(".result"):
             title_el = result.select_one(".result__title")
@@ -617,7 +611,7 @@ class WebSearchTool(BaseTool):
 
     def _parse_360(self, html: str, max_results: int) -> List[dict]:
         BeautifulSoup = self._get_bs()
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html)
         results: List[dict] = []
 
         # 新版360(so.com)结构:
@@ -789,82 +783,6 @@ class WebSearchTool(BaseTool):
 
         return results[: max(max_results, 1)]
 
-    def _search_bing(self, query: str, max_results: int) -> List[dict]:
-        """Bing HTML search fallback."""
-        url = "https://www.bing.com/search"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
-        }
-        last_exception = None
-        for attempt in range(2):
-            try:
-                response = self._session.get(
-                    url, params={"q": query}, headers=headers, timeout=5
-                )
-                response.raise_for_status()
-                return self._parse_bing(response.text, max_results)
-            except requests.exceptions.RequestException as e:
-                last_exception = e
-                time.sleep(0.8 * (attempt + 1))
-        raise last_exception or RuntimeError("Bing search failed")
-
-    def _parse_bing(self, html: str, max_results: int) -> List[dict]:
-        BeautifulSoup = self._get_bs()
-        soup = BeautifulSoup(html, "html.parser")
-        results = []
-        for li in soup.select(".b_algo"):
-            title_el = li.select_one("h2 a")
-            snippet_el = li.select_one("p")
-            url_el = li.select_one("cite")
-            title = title_el.get_text(strip=True) if title_el else ""
-            url = url_el.get_text(strip=True) if url_el else (
-                title_el.get("href", "") if title_el else ""
-            )
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            if not title:
-                continue
-            results.append({"title": title[:160], "snippet": snippet[:240], "url": url})
-        return results[:max(max_results, 1)]
-
-    def _search_google(self, query: str, max_results: int) -> List[dict]:
-        """Google HTML search fallback (often blocked; used last)."""
-        url = "https://www.google.com/search"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        last_exception = None
-        for attempt in range(2):
-            try:
-                response = self._session.get(
-                    url, params={"q": query, "num": max_results}, headers=headers, timeout=5
-                )
-                response.raise_for_status()
-                return self._parse_google(response.text, max_results)
-            except requests.exceptions.RequestException as e:
-                last_exception = e
-                time.sleep(0.8 * (attempt + 1))
-        raise last_exception or RuntimeError("Google search failed")
-
-    def _parse_google(self, html: str, max_results: int) -> List[dict]:
-        BeautifulSoup = self._get_bs()
-        soup = BeautifulSoup(html, "html.parser")
-        results = []
-        for g in soup.select("div.g"):
-            title_el = g.select_one("h3")
-            link_el = g.select_one("a[href]")
-            snippet_el = g.select_one("div[data-sncf], .VwiC3b, span.st")
-            title = title_el.get_text(strip=True) if title_el else ""
-            url = link_el.get("href", "") if link_el else ""
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            if not title:
-                continue
-            results.append({"title": title[:160], "snippet": snippet[:240], "url": url})
-        return results[:max(max_results, 1)]
-
     def _search_serpapi(self, query: str, max_results: int) -> List[dict]:
         params = {
             "q": query,
@@ -921,36 +839,6 @@ class WebSearchTool(BaseTool):
                     return self._parse_360(html, max_results)
         except Exception as e:
             raise RuntimeError(f"360 async search failed: {e}") from e
-
-    async def _async_search_bing(self, query: str, max_results: int) -> List[dict]:
-        url = "https://www.bing.com/search"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params={"q": query}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    html = await resp.text()
-                    return self._parse_bing(html, max_results)
-        except Exception as e:
-            raise RuntimeError(f"Bing async search failed: {e}") from e
-
-    async def _async_search_google(self, query: str, max_results: int) -> List[dict]:
-        url = "https://www.google.com/search"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params={"q": query, "num": max_results}, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    html = await resp.text()
-                    return self._parse_google(html, max_results)
-        except Exception as e:
-            raise RuntimeError(f"Google async search failed: {e}") from e
 
     async def _async_search_serpapi(self, query: str, max_results: int) -> List[dict]:
         if not self.api_key:
@@ -1011,7 +899,7 @@ class WebSearchTool(BaseTool):
     def _parse_bing_news(self, html: str, max_results: int) -> List[dict]:
         """Parse Bing News HTML results."""
         BeautifulSoup = self._get_bs()
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html)
         results: List[dict] = []
         for article in soup.select(".news-card, .newsitem, .news-card-body"):
             title_el = article.select_one(".title a, h3 a, .news-title a")
@@ -1094,8 +982,6 @@ class WebSearchTool(BaseTool):
         async_methods = {
             "duckduckgo": self._async_search_duckduckgo,
             "360": self._async_search_360,
-            "bing": self._async_search_bing,
-            "google": self._async_search_google,
             "bing-news": self._async_search_bing_news,
             "google-news": self._async_search_google_news,
             "serpapi": self._async_search_serpapi,

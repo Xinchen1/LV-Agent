@@ -2588,6 +2588,10 @@ class OpenMythosAgent:
             final_answer = "你好!有什么可以帮你的吗?"
 
         # 安全兜底:清理泄漏到最终回复中的 [TOOL:...] 标签(快速路径不展示工具调用原文)
+        # 0) 先剥离包含工具调用的 markdown 代码块 (```json ... ``` 等)
+        final_answer = re.sub(r'```(?:json)?\s*(?:.*?\[TOOL:\w+].*?)\s*```', '', final_answer, flags=re.DOTALL | re.IGNORECASE)
+        # Also remove any empty markdown code blocks left behind
+        final_answer = re.sub(r'```(?:json)?\s*```', '', final_answer, flags=re.DOTALL | re.IGNORECASE)
         # 1) 闭合的 [TOOL:...]...[/TOOL] 块
         final_answer = re.sub(r'\[TOOL:\w+\].*?\[/TOOL\]', '', final_answer, flags=re.DOTALL)
         # 2) 未闭合的 [TOOL:...] + JSON 参数 {…}
