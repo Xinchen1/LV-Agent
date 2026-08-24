@@ -35,40 +35,33 @@ class Theme:
         return f"\033[{code}m{text}\033[0m"
 
 
-# Built-in themes. Codes are SGR sequences (e.g. "38;5;188" or "1;38;5;188").
-# True-color hex values are provided in comments for reference / True Color fallback.
+# Built-in themes. Only 3 semantic colors + neutrals (dim/bold).
+# 1. PRIMARY (brand) - Main accent: headers, highlights, links, primary actions
+# 2. SUCCESS - Positive states: success, info, confirmations, completed
+# 3. ERROR - Negative states: errors, warnings, failures, critical issues
+# Neutrals: dim (faint), bold, and implicit reset
 BUILTIN_THEMES: Dict[str, Theme] = {
     "light": Theme(
         name="light",
         tokens={
-            "brand": "1;38;5;98",           # bold violet #7c3aed
-            "brand-dim": "38;5;104",        # muted violet #8b5cf6
-            "ink": "38;5;235",              # near-black #1c1917
-            "muted": "38;5;243",            # warm gray #78716c
-            "rule": "38;5;252",             # light border #e7e5e4
+            "primary": "38;5;30",           # teal #0d9488 - primary brand
             "success": "38;5;36",           # forest mint #059669
-            "warning": "38;5;172",          # amber #d97706
             "error": "38;5;167",            # coral #dc2626
-            "accent": "38;5;30",            # teal #0d9488
             "dim": "2",                     # faint
             "bold": "1",                    # bold
         },
+        supports_color=True,
     ),
     "dark": Theme(
         name="dark",
         tokens={
-            "brand": "1;38;5;183",          # bold lavender #a5b4fc
-            "brand-dim": "38;5;146",        # muted periwinkle #c7d2fe
-            "ink": "38;5;254",              # off-white #f5f5f4
-            "muted": "38;5;246",            # warm gray #a8a29e
-            "rule": "38;5;238",             # dark border #3f3f46
+            "primary": "38;5;80",           # teal #2dd4bf - primary brand
             "success": "38;5;79",           # mint #34d399
-            "warning": "38;5;215",          # soft amber #fbbf24
             "error": "38;5;210",            # coral #f87171
-            "accent": "38;5;80",            # teal #2dd4bf
-            "dim": "2",
-            "bold": "1",
+            "dim": "2",                     # faint
+            "bold": "1",                    # bold
         },
+        supports_color=True,
     ),
     "minimal": Theme(
         name="minimal",
