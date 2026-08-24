@@ -54,28 +54,28 @@ class Renderer:
         return self.style(text, "bold")
 
     def brand(self, text: str) -> str:
-        return self.themed(text, "brand")
+        return self.themed(text, "primary")
 
     def brand_dim(self, text: str) -> str:
-        return self.themed(text, "brand-dim")
+        return self.style(text, "dim", "primary")
 
     def muted(self, text: str) -> str:
-        return self.themed(text, "muted")
+        return self.style(text, "dim")
 
     def ink(self, text: str) -> str:
-        return self.themed(text, "ink")
+        return text
 
     def success(self, text: str) -> str:
         return self.themed(text, "success")
 
     def warning(self, text: str) -> str:
-        return self.themed(text, "warning")
+        return self.themed(text, "error")
 
     def error(self, text: str) -> str:
         return self.themed(text, "error")
 
     def accent(self, text: str) -> str:
-        return self.themed(text, "accent")
+        return self.themed(text, "primary")
 
     # ------------------------------------------------------------------
     # Output primitives
