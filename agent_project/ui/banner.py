@@ -118,11 +118,11 @@ def _brand_text(renderer: Renderer) -> str:
     r = renderer
     lines = [
         "",
-        r.themed("Lv agent", "brand"),
+        r.themed("Lv agent", "primary", bold=True),  # 标题：主色+粗体
         r.themed("Lux Vita · 光与生命", "brand-dim"),
         r.themed("by cleveris research", "muted"),
         "",
-        r.themed("Deep thinking, real tools.", "brand"),
+        r.themed("Deep thinking, real tools.", "primary"),
         r.themed("循环深度推理 · 工具驱动 · 自我学习", "ink"),
         r.themed("Recurrent deep reasoning · tool-driven · self-learning", "muted"),
         "",
