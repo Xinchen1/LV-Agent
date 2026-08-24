@@ -236,10 +236,10 @@ class SuperAgentCLI:
         try:
             from agent_project.config import load_config
             self.config = load_config(str(self.config_path))
-            print(_style(" config loaded", "2"))
+            print(terminal.style(" config loaded", "2"))
             return True
         except Exception as e:
-            print(_style(f" config error: {e}", "31"))
+            print(terminal.style(f" config error: {e}", "31"))
             return False
 
     def show_header(self, minimal: bool = False):
@@ -261,7 +261,7 @@ class SuperAgentCLI:
         except Exception:
             cols = 80
         line = "─" * cols
-        print(_style(line, "2"))
+        print(terminal.style(line, "2"))
 
         print()
         # 自适应头像宽度: 终端越宽, 头像越大, 像素点越多(更细腻)
@@ -310,7 +310,7 @@ class SuperAgentCLI:
 
         print()
         # decorative bottom line
-        print(_style(line, "2"))
+        print(terminal.style(line, "2"))
         # 系统状态行(设计方案: model / tools / cwd)
         self._print_system_status_line()
 
@@ -342,23 +342,23 @@ class SuperAgentCLI:
         from agent_project.agent import OpenMythosAgent
         try:
             self.agent = OpenMythosAgent(self.config)
-            print(_style(" agents loaded", "2"))
+            print(terminal.style(" agents loaded", "2"))
             return True
         except Exception as e:
-            print(_style(f" agent init failed: {e}", "33"))
+            print(terminal.style(f" agent init failed: {e}", "33"))
             # Only offer interactive backend switch when stdin is a TTY.
             if not sys.stdin.isatty():
-                print(_style(" non-interactive mode: cannot prompt for backend switch.", "31"))
-                print(_style(" fix config.yaml or set env vars (e.g. DEEPSEEK_API_KEY) and retry.", "2"))
+                print(terminal.style(" non-interactive mode: cannot prompt for backend switch.", "31"))
+                print(terminal.style(" fix config.yaml or set env vars (e.g. DEEPSEEK_API_KEY) and retry.", "2"))
                 return False
-            print(_style(" choose a backend to continue...", "2"))
+            print(terminal.style(" choose a backend to continue...", "2"))
             try:
                 if self.choose_and_set_model() and self.load_config():
                     self.agent = OpenMythosAgent(self.config)
-                    print(_style(" agents loaded", "2"))
+                    print(terminal.style(" agents loaded", "2"))
                     return True
             except Exception as e2:
-                print(_style(f" retry failed: {e2}", "31"))
+                print(terminal.style(f" retry failed: {e2}", "31"))
             return False
 
     def show_status(self):
@@ -681,7 +681,7 @@ class SuperAgentCLI:
                     continue
                 if data == b"\x1b":
                     self._interrupt_event.set()
-                    print(_style("  ↳ ESC 已按下, 正在中断任务...", "33"), flush=True)
+                    print(terminal.style("  ↳ ESC 已按下, 正在中断任务...", "33"), flush=True)
                     break
         except Exception:
             pass
@@ -1032,7 +1032,7 @@ class SuperAgentCLI:
                 )]
                 self._session_tokens = _estimate_tokens(summary)
                 self._last_auto_compress_at = now
-                print(_style(
+                print(terminal.style(
                     f"  ↳ context {pct*100:.0f}% threshold · auto-compressed: {current_tok} → {_estimate_tokens(summary)} tokens",
                     "warning",
                 ), flush=True)
@@ -1046,7 +1046,7 @@ class SuperAgentCLI:
         line = sb.render(used_tokens=self._session_tokens, width=width)
         # 上下文提示: >=80% 时在行尾追加提示(与自动压缩阈值一致)
         if self._max_context_tokens and self._session_tokens / self._max_context_tokens >= 0.80:
-            warn = _style("  ⚠️ context " + str(int(self._session_tokens / self._max_context_tokens * 100)) + "% · auto-compressing", "38;5;220")
+            warn = terminal.style("  ⚠️ context " + str(int(self._session_tokens / self._max_context_tokens * 100)) + "% · auto-compressing", "38;5;220")
             return line + warn
         return line
 
@@ -1296,7 +1296,7 @@ class SuperAgentCLI:
                         sys.stdout.write("\r\x1b[K" + self._prompt_prefix())
                         sys.stdout.flush()
                         echoed = 0
-                        print(_style(f"  ↳ 已暂存草稿 ({len(self._drafts)}), 输入 /drafts 查看", "2"), flush=True)
+                        print(terminal.style(f"  ↳ 已暂存草稿 ({len(self._drafts)}), 输入 /drafts 查看", "2"), flush=True)
                         continue
                     elif b == 0x1c:  # Ctrl+\: 打开 Dashboard(设计文档)
                         sys.stdout.write("\r\n")
@@ -1459,7 +1459,7 @@ class SuperAgentCLI:
             ref = os.path.expanduser(ref.strip())
             matches = glob.glob(ref) if any(c in ref for c in "*?[") else ([ref] if os.path.exists(ref) else [])
             if not matches:
-                print(_style(f"  ⚠️ 未找到文件: {ref}", "33"), flush=True)
+                print(terminal.style(f"  ⚠️ 未找到文件: {ref}", "33"), flush=True)
                 return f"@{ref}"
             parts = []
             for fp in matches[:8]:
@@ -1527,7 +1527,7 @@ class SuperAgentCLI:
                 user_input = self._prompt_with_footer()
             except Exception:
                 self.stop_telegram()
-                print("\n" + _style(" interrupted", "2"))
+                print("\n" + terminal.style(" interrupted", "2"))
                 break
             self._last_activity = time.time()
 
@@ -1545,23 +1545,23 @@ class SuperAgentCLI:
 
             if user_input.lower() in ('exit', 'quit', 'q'):
                 self.stop_telegram()
-                print(_style("goodbye", "2"))
+                print(terminal.style("goodbye", "2"))
                 break
 
             # !shell 模式: 以 ! 开头直接执行 shell, 不进入 agent turn(参考设计方案)
             elif user_input.startswith('!'):
                 cmd = user_input[1:].strip()
                 if not cmd:
-                    print(_style(" usage: !<command>  直接执行 shell 命令", "2"))
+                    print(terminal.style(" usage: !<command>  直接执行 shell 命令", "2"))
                     continue
-                print(_style(f" → {cmd}", "2", "38;5;240"))
+                print(terminal.style(f" → {cmd}", "2", "38;5;240"))
                 try:
                     import subprocess as _sp
                     _proc = _sp.run(cmd, shell=True, cwd=os.getcwd())
                 except KeyboardInterrupt:
-                    print(_style(" 中断", "2"))
+                    print(terminal.style(" 中断", "2"))
                 except Exception as e:
-                    print(_style(f" shell error: {e}", "31"))
+                    print(terminal.style(f" shell error: {e}", "31"))
                 continue
 
             # @文件引用: 展开 @path 为文件内容(参考设计方案), 支持相对路径与 glob
@@ -1656,7 +1656,7 @@ class SuperAgentCLI:
                     desc = ""
                     if tool and hasattr(tool, 'description'):
                         desc = str(tool.description).split('.')[0][:50]
-                    print(f"  · {_style(name, '1', '188')} {_style(desc, '2')}")
+                    print(f"  · {terminal.style(name, '1', '188')} {terminal.style(desc, '2')}")
                 continue
 
             elif user_input.lower() == '/sessions':
@@ -1679,7 +1679,7 @@ class SuperAgentCLI:
                             for sid, created, count in rows:
                                 ts = created or "?"
                                 preview = f"{sid[:24]}" if sid else "?"
-                                print(f"  · {_style(preview, '188')} {_style(str(count) + ' turns', '2')} {_style(str(ts)[:16], '2')}")
+                                print(f"  · {terminal.style(preview, '188')} {terminal.style(str(count) + ' turns', '2')} {terminal.style(str(ts)[:16], '2')}")
                     except Exception as e:
                         print(f" 读取会话失败: {e}")
                 continue
@@ -1694,7 +1694,7 @@ class SuperAgentCLI:
                 else:
                     print(f" {len(self._drafts)} 个草稿:")
                     for i, d in enumerate(reversed(self._drafts), 1):
-                        print(f"  {i}. {_style(d[:80], '2')}")
+                        print(f"  {i}. {terminal.style(d[:80], '2')}")
                     print(" 提示: 直接粘贴草稿内容即可继续编辑")
                 continue
 
@@ -1818,7 +1818,7 @@ class SuperAgentCLI:
                 self._finish_result(result)
             except KeyboardInterrupt:
                 # ESC 中断任务: 回到输入循环, 不退出
-                print(_style(" 任务已中断, 可以继续输入新的指令。", "2"))
+                print(terminal.style(" 任务已中断, 可以继续输入新的指令。", "2"))
             except Exception as e:
                 print(f"\033[31merror: {e}\033[0m")
 
@@ -1833,10 +1833,10 @@ class SuperAgentCLI:
         total = len(groups)
         for i, group in enumerate(groups, 1):
             if total > 1:
-                print(_style(f" ── 任务 {i}/{total} ──", "2"))
+                print(terminal.style(f" ── 任务 {i}/{total} ──", "2"))
             combined = "\n\n".join(group)
             if len(group) > 1:
-                print(_style(f" ↳ 检测到 {len(group)} 段相关任务, 已合并执行", "2"))
+                print(terminal.style(f" ↳ 检测到 {len(group)} 段相关任务, 已合并执行", "2"))
             try:
                 result = self._run_with_progress(
                     runner,
@@ -1846,7 +1846,7 @@ class SuperAgentCLI:
                 )
                 self._finish_result(result)
             except KeyboardInterrupt:
-                print(_style(" 任务批处理已中断 (ESC)", "2"))
+                print(terminal.style(" 任务批处理已中断 (ESC)", "2"))
                 break
             except Exception as e:
                 print(f"\033[31merror: {e}\033[0m")
@@ -1865,9 +1865,9 @@ class SuperAgentCLI:
             if html_path and os.path.exists(html_path):
                 import subprocess as _sp
                 _sp.Popen(["open", str(html_path)], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-                print(_style(f"  ↳ 已自动打开报告: {html_path}", "2"), flush=True)
+                print(terminal.style(f"  ↳ 已自动打开报告: {html_path}", "2"), flush=True)
         except Exception as e:
-            print(_style(f"  ↳ 打开报告失败: {e}", "33"), flush=True)
+            print(terminal.style(f"  ↳ 打开报告失败: {e}", "33"), flush=True)
 
     def run_single_task(self, task: str):
         # Contextual search hook: 先做本地关联搜索，增强查询上下文但不覆盖原始任务
