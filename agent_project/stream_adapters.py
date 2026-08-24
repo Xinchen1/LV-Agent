@@ -363,10 +363,10 @@ class RichStreamAdapter(StreamAdapter):
         # Compact meta: elapsed + token count
         meta = f"{elapsed:.1f}s · {self._fmt_tokens(self._total_tokens)}tk"
 
-        # 工具执行/结果处理时: 用紧凑绿色进度条
+        # 工具执行/结果处理时: 用现代青色进度条
         if self._current_action in ("tool", "result"):
-            bar = self._thin_green_bar(elapsed, width=16)
-            return f"\033[2m{bar}\033[0m \033[2m{' · '.join(parts)} · {meta}\033[0m"
+            bar = self._thin_teal_bar(elapsed, width=16)
+            return f"\033[36m{bar}\033[0m \033[2m{' · '.join(parts)} · {meta}\033[0m"
 
         # Spinner: smooth 8-frame cycle
         spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
@@ -374,8 +374,8 @@ class RichStreamAdapter(StreamAdapter):
         return f"\033[2m{spinner} {' · '.join(parts)} · {meta}\033[0m"
 
     @staticmethod
-    def _thin_green_bar(elapsed: float, width: int = 16) -> str:
-        """Compact green marquee bar for in-progress work."""
+    def _thin_teal_bar(elapsed: float, width: int = 16) -> str:
+        """Compact teal marquee bar for in-progress work."""
         pos = int(elapsed * 5) % width
         track = ["·"] * width
         track[pos] = "●"
