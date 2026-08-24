@@ -15,7 +15,7 @@ LV Agent 的架构设计深受**图灵机**启发：
 - **无限磁带** → 理论上的无限上下文窗口
 
 <div align="center">
-  <img src="references/1787293940590_c414ef8c.png" alt="Turing Machine Inspiration" width="600"/>
+  <img src="https://raw.githubusercontent.com/Xinchen1/LV-Agent/main/references/1787293940590_c414ef8c.png" alt="Turing Machine Inspiration" width="600"/>
   <br>
   <em>图灵机启发的 LV Agent 架构：磁带内存、状态转移、通用计算</em>
 </div>
