@@ -192,10 +192,10 @@ class OpenMythosAgent:
             else:
                 m = modules[i - 1]
                 color_code = {
-                    ModuleStatus.READY: "38;5;84",      # soft teal
-                    ModuleStatus.DEGRADED: "38;5;208",  # soft orange-amber
-                    ModuleStatus.DISABLED: "38;5;245",  # muted gray
-                    ModuleStatus.FAILED: "38;5;167",    # soft red
+                    ModuleStatus.READY: "38;5;114",     # soft mint green
+                    ModuleStatus.DEGRADED: "38;5;215",  # soft amber
+                    ModuleStatus.DISABLED: "38;5;250",  # light gray
+                    ModuleStatus.FAILED: "38;5;210",    # soft coral
                 }.get(m.status, "")
                 print(f"  {_style(line, color_code)}")
                 if self.config.health.show_install_hints and m.install_hint:

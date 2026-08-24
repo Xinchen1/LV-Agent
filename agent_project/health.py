@@ -79,6 +79,7 @@ class ModuleHealthChecker:
         report.modules.append(self._check_memskill())
         report.modules.append(self._check_file_memory())
         report.modules.append(self._check_sqlite_memory())
+        report.modules.append(self._check_pdf_generation())
         return report
 
     # ------------------------------------------------------------------
@@ -204,3 +205,10 @@ class ModuleHealthChecker:
             )
         except Exception as e:
             return ModuleHealth("sqlite_memory", ModuleStatus.DEGRADED, fallback="no session memory", error=str(e))
+
+    def _check_pdf_generation(self) -> ModuleHealth:
+        try:
+            import reportlab
+            return ModuleHealth("pdf_generation", ModuleStatus.READY)
+        except Exception as e:
+            return ModuleHealth("pdf_generation", ModuleStatus.DEGRADED, fallback="text output", error=str(e), install_hint="pip install reportlab")
