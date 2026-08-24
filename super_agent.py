@@ -47,8 +47,7 @@ from agent_project.stream_adapters import (
     select_stream_adapter,
     render_markdown_rich,
 )
-from agent_project.terminal import style as _style
-from agent_project.terminal import token as _token, set_theme as _set_theme, active_theme as _active_theme
+from agent_project import terminal
 from agent_project.ui import StatusBar
 
 console = Console()
@@ -274,27 +273,27 @@ class SuperAgentCLI:
         portrait = _render_portrait(width_chars=_pw)
         right_lines = [
             "",
-            _style("Lv agent", "1", "38;5;188"),
-            _style("Lux Vita · 光与生命", "38;5;186"),
-            _style("by cleveris research", "38;5;240"),
+            terminal.token("Lv agent", "brand"),
+            terminal.token("Lux Vita · 光与生命", "accent"),
+            terminal.token("by cleveris research", "muted"),
             "",
-            _style("Deep thinking, real tools.", "1", "188"),
-            _style("Recurrent reasoning · tool-driven · self-learning", "38;5;245"),
-            _style("Captain OS · 转弯要慢，直道要快", "38;5;220"),
+            terminal.token("Deep thinking, real tools.", "brand-dim"),
+            terminal.token("Recurrent reasoning · tool-driven · self-learning", "muted"),
+            terminal.token("Captain OS · 转弯要慢，直道要快", "muted"),
             "",
-            _style("Capabilities", "1", "188"),
-            _style("  · Multi-turn deep reasoning for complex problems", "38;5;251"),
-            _style("  · Real tools for live information", "38;5;251"),
-            _style("  · Continuous self-learning, smarter over time", "38;5;251"),
+            terminal.token("Capabilities", "accent"),
+            terminal.token("  · Multi-turn deep reasoning for complex problems", "muted"),
+            terminal.token("  · Real tools for live information", "muted"),
+            terminal.token("  · Continuous self-learning, smarter over time", "muted"),
             "",
-            _style("Tip", "1", "188"),
-            _style("  · /learn to save a reusable skill from this session", "38;5;251"),
-            _style("  · /memskill list to view learned skills", "38;5;251"),
+            terminal.token("Tip", "accent"),
+            terminal.token("  · /learn to save a reusable skill from this session", "muted"),
+            terminal.token("  · /memskill list to view learned skills", "muted"),
             "",
-            _style("Mission", "1", "188"),
-            _style("  · Open-source AI at the core", "38;5;245"),
-            _style("  · Great AI for everyone", "38;5;245"),
-            _style("  · Intelligence for all", "38;5;245"),
+            terminal.token("Mission", "accent"),
+            terminal.token("  · Open-source AI at the core", "muted"),
+            terminal.token("  · Great AI for everyone", "muted"),
+            terminal.token("  · Intelligence for all", "muted"),
             "",
         ]
         if portrait:
@@ -331,11 +330,11 @@ class SuperAgentCLI:
         elif backend == 'anthropic':
             model_name = (getattr(self.config, 'anthropic', {}) or {}).get('model', 'unknown')
         cwd = os.getcwd()
-        sep = _style("│", "2")
+        sep = terminal.token("│", "muted")
         line = (
-            f" {_style('model', '2')} {_style(f'{backend}/{model_name}', '188')} {sep} "
-            f"{_style('tools', '2')} {_style(str(tools_count), '188')} {sep} "
-            f"{_style('cwd', '2')} {_style(cwd, '245')}"
+            f" {terminal.token('model', 'muted')} {terminal.token(f'{backend}/{model_name}', 'accent')} {sep} "
+            f"{terminal.token('tools', 'muted')} {terminal.token(str(tools_count), 'accent')} {sep} "
+            f"{terminal.token('cwd', 'muted')} {terminal.token(cwd, 'muted')}"
         )
         print(line)
 
@@ -374,8 +373,8 @@ class SuperAgentCLI:
             model = self.config.deepseek.get('model', 'unknown')
         tools = len(list(TOOLS_REGISTRY.list_tools()))
         loops = self.config.default_thinking_loops
-        sep = _style("·", "2")
-        print(f" {_style('backend', '2')} {backend} {sep} {_style('model', '2')} {model} {sep} {_style('tools', '2')} {tools} {sep} {_style('loops', '2')} {loops}")
+        sep = terminal.token("·", "muted")
+        print(f" {terminal.token('backend', 'muted')} {backend} {sep} {terminal.token('model', 'muted')} {model} {sep} {terminal.token('tools', 'muted')} {tools} {sep} {terminal.token('loops', 'muted')} {loops}")
         print()
 
     def format_result(self, result: Dict[str, Any]):
@@ -386,16 +385,16 @@ class SuperAgentCLI:
         tokens = result.get('live_tokens') or result.get('session_token_usage', {}).get('last_call_tokens', 0)
         tokens_display = f"{tokens // 1000}.{tokens % 1000 // 100}k" if tokens >= 1000 else str(tokens)
         ok = bool(result.get('success'))
-        status = _style("ok", "32") if ok else _style("failed", "31")
+        status = terminal.token("ok", "success") if ok else terminal.token("failed", "error")
         meta = " · ".join([
             status,
-            _style(f"{loops} loops", "2"),
-            _style(f"{steps} steps", "2"),
-            _style(f"{duration:.1f}s", "2"),
-            _style(f"{tokens_display} tokens", "2"),
+            terminal.token(f"{loops} loops", "muted"),
+            terminal.token(f"{steps} steps", "muted"),
+            terminal.token(f"{duration:.1f}s", "muted"),
+            terminal.token(f"{tokens_display} tokens", "muted"),
         ])
         # 细线分隔 + 灰色元信息, 让结果与元数据有层次
-        return _style("· " + "─" * 38 + " ·", "2") + "\n " + meta
+        return terminal.token("· " + "─" * 38 + " ·", "rule") + "\n " + meta
     def start_telegram(self):
         if self._tg_process is not None and self._tg_process.poll() is None:
             print(" telegram bot already running")
@@ -1034,8 +1033,8 @@ class SuperAgentCLI:
                 self._session_tokens = _estimate_tokens(summary)
                 self._last_auto_compress_at = now
                 print(_style(
-                    f"  ↳ 上下文 {pct*100:.0f}% 已达阈值, 已自动压缩: {current_tok} → {_estimate_tokens(summary)} token",
-                    "38;5;220",
+                    f"  ↳ context {pct*100:.0f}% threshold · auto-compressed: {current_tok} → {_estimate_tokens(summary)} tokens",
+                    "warning",
                 ), flush=True)
         except Exception as e:
             import logging
@@ -1492,18 +1491,30 @@ class SuperAgentCLI:
     def _show_dashboard(self):
         """Ctrl+反斜杠 或 /dashboard: 显示 Agent Dashboard(设计文档)."""
         from agent_project.tools import TOOLS_REGISTRY
-        print(_style("── Agent Dashboard ──", "1", "188"))
+        print(terminal.token("─ Agent Dashboard ─", "accent"))
         if self.agent:
             try:
                 self.agent.print_module_status()
             except Exception:
                 pass
-        print(f"  会话 token: {self._session_tokens} | 工具: {len(list(TOOLS_REGISTRY.list_tools()))}")
+        sep = terminal.token("·", "muted")
+        line1 = (
+            f"  {terminal.token('session', 'muted')} {self._session_tokens}tk {sep} "
+            f"{terminal.token('tools', 'muted')} {len(list(TOOLS_REGISTRY.list_tools()))}"
+        )
+        print(line1)
         if self._input_history:
-            print(f"  输入历史: {len(self._input_history)} 条 | 草稿: {len(self._drafts)} 个")
+            line2 = (
+                f"  {terminal.token('history', 'muted')} {len(self._input_history)} {sep} "
+                f"{terminal.token('drafts', 'muted')} {len(self._drafts)}"
+            )
+            print(line2)
         pct = int(self._session_tokens / self._max_context_tokens * 100) if self._max_context_tokens else 0
-        print(f"  上下文占用: {pct}%" + (" ⚠️ 已自动压缩" if pct >= 80 else ""))
-        print(_style("──────────────────", "2"))
+        pct_text = f"{pct}%"
+        if pct >= 80:
+            pct_text = terminal.token(f"{pct}%", "warning") + terminal.token(" · auto-compressed", "warning")
+        print(f"  {terminal.token('context', 'muted')} {pct_text}")
+        print(terminal.token("──────────────────", "rule"))
 
     def run_interactive(self):
         # 空闲看门狗: 用户无操作超过 idle_threshold 秒时, 静默归纳/压缩上下文
@@ -1707,35 +1718,37 @@ class SuperAgentCLI:
                             )]
                             # 重置会话 token 计数器到压缩后大小(压缩的是会话上下文)
                             self._session_tokens = _estimate_tokens(summary)
-                            print(f" 上下文已压缩: {current_tok} token → {_estimate_tokens(summary)} token")
+                            print(f" {terminal.token('compressed', 'success')} {current_tok}tk → {_estimate_tokens(summary)}tk")
                         else:
-                            print(" 无内容可压缩")
+                            print(f" {terminal.token('nothing to compress', 'muted')}")
                     except Exception as e:
-                        print(f" 压缩失败: {e}")
+                        print(f" {terminal.token('compress failed:', 'error')} {e}")
                 else:
-                    print(" 上下文引擎不可用")
+                    print(f" {terminal.token('context engine unavailable', 'muted')}")
                 continue
 
             elif user_input.lower() == '/help':
-                print(" /deep <topic> - run deep iterative research and generate a report")
-                print(" /research <topic> - alias for /deep")
-                print(" /model - switch model")
-                print(" /config - show config")
-                print(" /code - toggle engineering/code mode")
-                print(" /status - show module health status")
-                print(" /tools - list available tools")
-                print(" /theme <light|dark|minimal> - switch theme")
-
-                print(" /sessions - show recent sessions")
-                print(" /dashboard - show agent dashboard")
-                print(" /mcp - configure/test an MCP server")
-                print(" /tg [start|stop|status|token <TOKEN>] - Telegram bot")
-                print(" /learn [topic] - learn a memory skill from recent conversation")
-                print(" /memskill [list|evolve|snapshot|restore <tag>|run <skill_name>] - manage memory skills")
-                print(" !<command> - run shell directly (no agent turn)")
-                print(" @<file> - attach file content to prompt")
-                print(" /help - this help")
-                print(" exit - quit")
+                def _h_cmd(name, desc):
+                    return f" {terminal.token(name, 'accent')} {terminal.token(desc, 'muted')}"
+                print(terminal.token("─ Commands ─", "accent"))
+                print(_h_cmd("/deep <topic>", "iterative research & report"))
+                print(_h_cmd("/research <topic>", "alias for /deep"))
+                print(_h_cmd("/model", "switch model"))
+                print(_h_cmd("/config", "show config"))
+                print(_h_cmd("/code", "toggle engineering/code mode"))
+                print(_h_cmd("/status", "module health status"))
+                print(_h_cmd("/tools", "list available tools"))
+                print(_h_cmd("/theme <light|dark|minimal>", "switch theme"))
+                print(_h_cmd("/sessions", "recent sessions"))
+                print(_h_cmd("/dashboard", "agent dashboard"))
+                print(_h_cmd("/mcp <request>", "configure/test MCP server"))
+                print(_h_cmd("/tg [...]", "Telegram bot control"))
+                print(_h_cmd("/learn [topic]", "learn a memory skill"))
+                print(_h_cmd("/memskill [...]", "manage memory skills"))
+                print(_h_cmd("!<command>", "run shell directly"))
+                print(_h_cmd("@<file>", "attach file to prompt"))
+                print(_h_cmd("/help", "show this help"))
+                print(_h_cmd("exit", "quit"))
                 continue
 
             elif user_input.lower().startswith('/mcp'):
