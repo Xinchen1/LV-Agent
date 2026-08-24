@@ -2603,6 +2603,9 @@ class OpenMythosAgent:
         if not final_answer:
             final_answer = "你好!有什么可以帮你的吗?"
 
+        # 最终清理: 移除 thinking 块、置信度、残留标签等
+        final_answer = self._clean_fast_answer(final_answer)
+
         # 截断检测: 流被掐断时后端可能返回残缺内容(如 "The"), 补一次完整重试,
         # 避免残缺回答被写进历史、污染后续所有追问。
         if self._is_truncated_answer(final_answer):
