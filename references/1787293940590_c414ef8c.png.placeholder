@@ -1,0 +1,17 @@
+# Turing Machine Inspiration Reference Image
+
+This is a placeholder for the Turing machine visualization that inspired the LV Agent design.
+
+Original reference: references/1787293940590_c414ef8c.png
+
+The design draws inspiration from Turing machine concepts:
+- Tape-based memory model → Context window management
+- State transitions → Agent state management
+- Universal computation → Universal tool execution
+- Infinite tape → Unbounded context window (theoretical)
+
+The visualization shows a Turing machine tape with read/write head,
+symbolizing the agent's ability to read/write/modify its environment
+through tools, with infinite theoretical memory (context window).
+
+Reference: https://en.wikipedia.org/wiki/Turing_machine
