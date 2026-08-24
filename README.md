@@ -4,6 +4,24 @@
 
 ---
 
+## 设计灵感：图灵机
+
+> **灵感来源**：图灵机通用计算模型
+
+LV Agent 的架构设计深受**图灵机**启发：
+- **磁带内存模型** → 上下文窗口管理
+- **状态转移函数** → Agent 状态管理
+- **通用计算模型** → 通用工具执行
+- **无限磁带** → 理论上的无限上下文窗口
+
+<div align="center">
+  <img src="references/1787293940590_c414ef8c.png" alt="Turing Machine Inspiration" width="600"/>
+  <br>
+  <em>图灵机启发的 LV Agent 架构：磁带内存、状态转移、通用计算</em>
+</div>
+
+---
+
 ## 项目简介
 
 LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一些思路，也是我研究机构 **Cleveris Research** 的作品。
