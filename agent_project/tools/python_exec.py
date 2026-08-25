@@ -81,6 +81,8 @@ _DANGEROUS_ATTRS = {
 }
 
 # 子进程内运行的受限执行包装器(固定模板, 用户代码经 stdin 传入)
+# 占位符 {WL}/{SB} 用 .replace() 做字面替换: .replace 不做模板语法解析,
+# 即使白名单/内置名字符串里含有 { / } 也不会被误当作占位符, 比 str.format 安全。
 _WRAPPER_TEMPLATE = r'''
 import sys, io, contextlib, traceback
 code = sys.stdin.read()

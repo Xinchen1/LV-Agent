@@ -578,18 +578,23 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         return False
 
     def _should_retry(self, e: Exception) -> bool:
-        """Determine if an error is retryable with exponential backoff and jitter."""
-        status = _extract_http_status(e)
-        # Retry on: rate limit, timeout, server errors, connection errors
+        """Determine if an error is retryable.
+
+        Retry only on transient failures:
+          - network-level errors (ConnectionError / TimeoutError)
+          - HTTP 408 (timeout), 429 (rate limit), 5xx (server errors)
+          - status is None (unclassified connection-level failure)
+        Permanent 4xx client errors — including 401/403 auth failures — are NOT
+        retried: they will never succeed, so retrying just wastes time/budget.
+        """
         if isinstance(e, (ConnectionError, TimeoutError)):
             return True
-        if _extract_http_status(e) in (408, 429, 500, 502, 503, 504):
+        status = _extract_http_status(e)
+        if status is None:
             return True
-        # Don't retry on 4xx errors (except 429) - these are permanent
-        if status in (400, 401, 403, 404, 405, 406, 408, 409, 410, 411, 412, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451):
+        if status in (408, 429, 500, 502, 503, 504):
             return True
-        if status in (401, 403, 405, 406, 407, 410):
-            return False
+        # Permanent client errors: do not retry.
         return False
 
     def _calculate_backoff(self, attempt: int) -> float:

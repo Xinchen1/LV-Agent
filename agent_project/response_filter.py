@@ -33,6 +33,32 @@ def is_mostly_english(s: str, threshold: float = 0.7) -> bool:
     return len(ascii_letters) / len(letters) >= threshold
 
 
+# 行首"自言自语"特征词: 用于流式逐行过滤模型泄露到正文前的英文元推理行。
+# 只匹配强元推理标记(we need to / the user / let me / to answer / according to ...),
+# 不放宽到裸 "I/We/So" 等, 避免误删正常的英文回答句。
+_LEAK_LINE_RE = re.compile(
+    r'(?i)^\s*(?:we need to|we should|the user|the model|the assistant|the response|'
+    r'let me|let us|i should|i need to|to answer|according to|based on|'
+    r'in order to|as per|ok[,.]?|okay[,.]?|sure[,.]?|alright[,.]?|hmm|well|'
+    r'now,|so,|first,|next,|here is|here are|this is)\b'
+)
+
+
+def is_leaked_self_talk(line: str) -> bool:
+    """判断一行是否为模型未用 <think> 标签时泄露到正文的英文"自言自语"行。
+
+    用于流式渲染时逐行抑制(而非整段清洗): 行以内英文为主, 且以 we/i/the user/...
+    等元推理特征词开头, 视为泄露, 不展示给用户。中文回答中的英文词不会命中
+    (不以这些词开头), 代码块行也不会命中(高亮器对代码块提前返回)。
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if not is_mostly_english(s):
+        return False
+    return bool(_LEAK_LINE_RE.match(s))
+
+
 def strip_leaked_reasoning(text: str) -> str:
     """剥离模型未用 <think> 标签时泄露到正文开头的英文元推理(自我对话).
 
