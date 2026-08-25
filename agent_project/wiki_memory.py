@@ -179,10 +179,6 @@ def _make_id(title: str) -> str:
     return f"wiki_{slug}_{ts}_{uuid.uuid4().hex[:6]}"
 
 
-def _title_hash(title: str) -> str:
-    return hashlib_simple(title)
-
-
 def hashlib_simple(s: str) -> str:
     """纯 Python 的简单 hash，避免引入 hashlib。"""
     h = 0
