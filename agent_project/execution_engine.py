@@ -613,9 +613,11 @@ class ExecutionEngine:
         if ctx.monitor_rounds % freq != 0:
             return
         hint = self._rule_monitor(ctx)
-        # LLM monitor 仅在规则层发现异常时才触发, 不轮询空转
-        if hint is None and ctx.max_steps >= 8 and len(ctx.steps) >= 3:
-            hint = self._llm_monitor(ctx)
+        # LLM 协作分支 agent 仅在规则层发现异常时才触发, 避免无谓的额外 LLM 调用
+        if hint is not None:
+            extra = self._llm_monitor(ctx)
+            if extra:
+                hint = f"{hint}\n{extra}"
         if hint:
             ctx.monitor_hints.append(hint)
             if ctx.stream_callback:

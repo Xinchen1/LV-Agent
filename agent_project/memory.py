@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict, deque
+from collections import defaultdict
 import logging
 
 from pydantic import BaseModel, Field
@@ -179,49 +179,6 @@ class KnowledgeGraph:
 
         return results
 
-    def shortest_path(
-        self,
-        source_id: str,
-        target_id: str,
-        max_hops: int = 5
-    ) -> Optional[List[Tuple[MemoryEdge, MemoryNode]]]:
-        """
-        Find shortest path between two nodes using BFS
-        Returns list of (edge, node) tuples representing path
-        """
-        if source_id not in self.nodes or target_id not in self.nodes:
-            return None
-
-        if source_id == target_id:
-            return []
-
-        # BFS
-        queue = deque([(source_id, [])])  # (current_node, path)
-        visited = {source_id}
-
-        for _ in range(max_hops):
-            if not queue:
-                break
-
-            current, path = queue.popleft()
-
-            # Get neighbors
-            for edge_id, edge in self.edges.items():
-                neighbor = None
-                if edge.source_id == current and edge.target_id not in visited:
-                    neighbor = edge.target_id
-                elif edge.target_id == current and edge.source_id not in visited:
-                    neighbor = edge.source_id
-
-                if neighbor:
-                    new_path = path + [(edge, self.nodes[neighbor])]
-                    if neighbor == target_id:
-                        return new_path
-                    visited.add(neighbor)
-                    queue.append((neighbor, new_path))
-
-        return None
-
     def suggest_related(
         self,
         node_id: str,
@@ -233,43 +190,6 @@ class KnowledgeGraph:
             neighbor_scores[n.id] += edge.weight
         ranked = sorted(neighbor_scores.items(), key=lambda x: x[1], reverse=True)[:max_results]
         return [(self.nodes[nid], score) for nid, score in ranked if nid in self.nodes]
-
-    def prune_by_utility(
-        self,
-        threshold_days: float = 30.0,
-        keep_min_nodes: int = 100
-    ) -> int:
-        """
-        Remove rarely accessed old nodes
-        Returns number of nodes removed
-        """
-        if len(self.nodes) <= keep_min_nodes:
-            return 0
-
-        cutoff_date = datetime.now() - timedelta(days=threshold_days)
-        to_remove = []
-
-        for node in self.nodes.values():
-            last_access = datetime.fromisoformat(node.last_accessed)
-            if (len(self.nodes) - len(to_remove) > keep_min_nodes and
-                last_access < cutoff_date):
-                # Check if node has many connections (important)
-                connections = self.get_connected_nodes(node.id)
-                if len(connections) < 3:  # not highly connected
-                    to_remove.append(node.id)
-
-        # Remove edges first
-        for node_id in to_remove:
-            edges_to_remove = [
-                edge_id for edge_id, edge in self.edges.items()
-                if edge.source_id == node_id or edge.target_id == node_id
-            ]
-            for edge_id in edges_to_remove:
-                del self.edges[edge_id]
-            del self.nodes[node_id]
-
-        logging.info(f"KnowledgeGraph: Pruned {len(to_remove)} nodes")
-        return len(to_remove)
 
     def save(self):
         """Save graph to disk"""
