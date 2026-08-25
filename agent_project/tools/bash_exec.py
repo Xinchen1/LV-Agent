@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Tuple
@@ -108,6 +109,15 @@ class BashExecTool(BaseTool):
         (r"\bfind\s+/[^\s]*\s+(?!.*maxdepth).*-name", "FULL-DISK find: use glob(pattern, path) instead of full-disk scan"),
     ]
 
+    # Subset of WARN_PATTERNS that are genuinely dangerous -> actually BLOCKED (not just logged).
+    # The original WARN_PATTERNS list was dead code (never enforced). These four are the high-severity ones.
+    BLOCKED_WARN_PATTERNS = [
+        (r"\bsudo\b", "Privilege escalation: sudo (set allow_unsafe=true if intentionally required)"),
+        (r"curl\b[^|]*\|\s*bash", "Remote code execution: piping curl output to bash"),
+        (r"wget\b[^|]*\|\s*bash", "Remote code execution: piping wget output to bash"),
+        (r"chmod\s+-R\s+777", "Insecure permissions: chmod -R 777"),
+    ]
+
     # Warn-only patterns (less severe)
     WARN_PATTERNS = [
         (r"sudo\b", "Privilege escalation: sudo"),
@@ -135,6 +145,9 @@ class BashExecTool(BaseTool):
         self.default_cwd = default_cwd or str(Path.cwd())
         # Track running processes for cancellation
         self._processes: Dict[int, asyncio.subprocess.Process] = {}
+        # Guard the shared _processes dict against concurrent tool executions
+        # (the agent may run several bash_exec calls in parallel via a thread pool).
+        self._lock = threading.Lock()
 
     def execute(
         self,
@@ -246,7 +259,8 @@ class BashExecTool(BaseTool):
             )
 
             pid = process.pid
-            self._processes[pid] = process
+            with self._lock:
+                self._processes[pid] = process
 
             if capture_output:
                 stdout_task = asyncio.create_task(
@@ -346,7 +360,8 @@ class BashExecTool(BaseTool):
                 metadata={"command": cmd_display},
             )
         finally:
-            self._processes.pop(pid, None)
+            with self._lock:
+                self._processes.pop(pid, None)
 
     async def _read_stream(
         self,
@@ -423,13 +438,17 @@ class BashExecTool(BaseTool):
             if re.search(pattern, command, re.IGNORECASE):
                 return reason
 
-        # Warn about risky patterns (these are flagged but only blocked if allow_unsafe is False
-        # and the pattern is severe enough)
+        # Enforce the high-severity WARN patterns (these were previously only logged).
+        for pattern, reason in self.BLOCKED_WARN_PATTERNS:
+            if re.search(pattern, command, re.IGNORECASE):
+                return reason
+
         return None
 
     def cancel(self, pid: int) -> bool:
         """Cancel a running process by PID."""
-        process = self._processes.get(pid)
+        with self._lock:
+            process = self._processes.get(pid)
         if process and process.returncode is None:
             self._kill_process(process)
             return True
@@ -437,10 +456,11 @@ class BashExecTool(BaseTool):
 
     def running_count(self) -> int:
         """Count currently running processes."""
-        return sum(
-            1 for p in self._processes.values()
-            if p.returncode is None
-        )
+        with self._lock:
+            return sum(
+                1 for p in self._processes.values()
+                if p.returncode is None
+            )
 
 
 class ProcessManager:

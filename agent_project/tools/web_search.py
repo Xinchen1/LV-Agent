@@ -28,7 +28,13 @@ except ImportError:
 
 # Optional fast parser
 try:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup  # noqa: F401
+    _HAS_BS4 = True
+except ImportError:
+    _HAS_BS4 = False
+
+try:
+    import lxml  # noqa: F401
     _HAS_LXML = True
 except ImportError:
     _HAS_LXML = False
@@ -519,10 +525,20 @@ class WebSearchTool(BaseTool):
     # ------------------------------------------------------------------
 
     def _get_bs(self):
-        """Return a BeautifulSoup constructor using lxml if available."""
-        # lxml is much faster than html.parser
-        parser = "lxml" if _HAS_LXML else "html.parser"
-        return lambda html: BeautifulSoup(html, parser)
+        """Return a BeautifulSoup constructor using lxml if available.
+
+        Falls back to the stdlib html.parser at call time if lxml cannot be
+        used (e.g. not installed in the active environment), so search never
+        breaks on a missing optional dependency.
+        """
+        if _HAS_LXML:
+            def _bs(html):
+                try:
+                    return BeautifulSoup(html, "lxml")
+                except Exception:
+                    return BeautifulSoup(html, "html.parser")
+            return _bs
+        return lambda html: BeautifulSoup(html, "html.parser")
 
     def _search_duckduckgo(self, query: str, max_results: int) -> List[dict]:
         url = "https://html.duckduckgo.com/html/"

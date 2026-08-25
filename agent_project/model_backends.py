@@ -385,9 +385,11 @@ class OpenAIBackend:
         self.timeout = timeout
         self.bypass_proxy = bypass_proxy
 
-        # Lazy load openai client
+        # Connection pool and health check
         self._client = None
         self._consecutive_errors = 0
+        self._last_health_check = 0
+        self._health_check_interval = 300  # 5 minutes
 
         print(_style("  OpenAI-compatible backend", "2"))
         print(f"    {_style('model', '2')} {model}")
@@ -547,6 +549,10 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
 
     def _ensure_connection(self) -> None:
         """Lightweight health check: recreate client if connection is stale."""
+        now = time.time()
+        if now - self._last_health_check < self._health_check_interval:
+            return
+        self._last_health_check = time.time()
         try:
             # Use a minimal request to verify connection with short timeout
             import httpx
@@ -556,6 +562,45 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             # Connection likely stale (idle timeout, proxy down, Ollama unloaded model)
             # Force recreate on next property access
             self._client = None
+
+    def _handle_error(self, e: Exception) -> bool:
+        """Handle errors with retry logic. Returns True if should retry."""
+        self._consecutive_errors += 1
+        status = _extract_http_status(e)
+        is_rate_limit = status == 429
+        is_transient = status in (408, 429, 500, 502, 503, 504) or status is None
+        if is_transient:
+            wait = min(2 ** self._consecutive_errors, 30)
+            print(_style(f"  Connection issue, retrying in {wait}s...", "2"))
+            time.sleep(wait)
+            self._client = None  # Force reconnect
+            return True
+        return False
+
+    def _should_retry(self, e: Exception) -> bool:
+        """Determine if an error is retryable with exponential backoff and jitter."""
+        status = _extract_http_status(e)
+        # Retry on: rate limit, timeout, server errors, connection errors
+        if isinstance(e, (ConnectionError, TimeoutError)):
+            return True
+        if _extract_http_status(e) in (408, 429, 500, 502, 503, 504):
+            return True
+        # Don't retry on 4xx errors (except 429) - these are permanent
+        if status in (400, 401, 403, 404, 405, 406, 408, 409, 410, 411, 412, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451):
+            return True
+        if status in (401, 403, 405, 406, 407, 410):
+            return False
+        return False
+
+    def _calculate_backoff(self, attempt: int) -> float:
+        """Calculate backoff with jitter: base * 2^attempt + jitter"""
+        base = min(2 ** self._consecutive_errors, 30)
+        jitter = random.uniform(0, 0.5)
+        return min(base + jitter, 30)
+
+    def _reset_errors(self):
+        """Reset consecutive error counter on success."""
+        self._consecutive_errors = 0
 
     def generate(
         self,
@@ -710,7 +755,6 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                         except Exception:
                             pass
 
-                # success -> reset error counter
                 self._consecutive_errors = 0
                 return "\n".join(collected_parts).strip()
 
@@ -729,18 +773,9 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     time.sleep(wait)
                     continue
                 # Other retryable errors.
-                self._consecutive_errors += 1
-                # If consecutive connection errors, force client rebuild
-                if self._consecutive_errors >= 2:
-                    try:
-                        self._client = None
-                        self._ensure_connection()
-                        print(_style("  connection errors detected, rebuilt client", "2"))
-                    except Exception:
-                        pass
-                if attempt < max_attempts - 1:
-                    wait = 2 ** attempt
-                    print(_style(f"  API error, retrying in {wait}s: {e}", "2"))
+                if self._should_retry(e):
+                    wait = self._calculate_backoff(attempt)
+                    print(_style(f"  API error, retrying in {wait:.1f}s: {e}", "2"))
                     time.sleep(wait)
                 else:
                     raise RuntimeError(f"OpenAI API error: {e}") from e
