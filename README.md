@@ -1,6 +1,7 @@
 <div align="center">
 
-![Uploading 截屏2026-08-25 22.49.06.png…]()
+<img width="1480" height="263" alt="screenshot" src="https://github.com/user-attachments/assets/1002e6ab-91fb-4ce6-9813-343736dc0cc9" />
+
 
 
 </div>
