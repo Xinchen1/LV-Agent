@@ -21,7 +21,7 @@ import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .checkpoint import CheckpointManager
 from .tools import TOOLS_REGISTRY, ToolResult
@@ -131,6 +131,11 @@ class ExecutionContext:
     monitor_enabled: bool = True
     monitor_hints: List[str] = field(default_factory=list)  # 注入给主 agent 的简明提示
     monitor_rounds: int = 0  # 监控检查轮数(限制频率)
+
+    # 规划驱动: 带 plan 的任务, 模型完成某节点后输出 DONE[<node_id>],
+    # 全部覆盖即可提前收敛(不必等步数耗尽)。
+    plan_node_ids: List[str] = field(default_factory=list)
+    plan_done: Set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +383,10 @@ class ConvergenceChecker:
             key = f"{call.tool_name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
             if ctx.call_counts.get(key, 0) >= 3:
                 return True
+
+        # 规划完成: 全部节点已被 DONE[<node_id>] 标记覆盖 → 提前收敛
+        if ctx.plan_node_ids and set(ctx.plan_node_ids) <= ctx.plan_done:
+            return True
 
         return False
 
@@ -653,6 +662,14 @@ class ExecutionEngine:
                 if not output:
                     output = ""
                 parsed = policy.parse_output(output, ctx)
+
+                # 规划驱动: 扫描 DONE[<node_id>] 标记, 记录已完成节点。
+                # 仅做早停增益——若模型从不输出该标记, 退回步数上限, 无行为回退。
+                if ctx.plan_node_ids:
+                    for _mid in re.findall(r"DONE\[([^\]]+)\]", output or ""):
+                        _mid = _mid.strip()
+                        if _mid in ctx.plan_node_ids:
+                            ctx.plan_done.add(_mid)
 
                 # Stream reasoning and tool calls
                 # 实时流式已显示内容时, 不再重复 emit(避免与 live token 重复/抖动)
