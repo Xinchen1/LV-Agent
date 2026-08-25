@@ -394,7 +394,7 @@ class SuperAgentCLI:
             terminal.token(f"{tokens_display} tokens", "muted"),
         ])
         # 细线分隔 + 灰色元信息, 让结果与元数据有层次
-        return terminal.token("· " + "─" * 38 + " ·", "rule") + "\n " + meta
+        return terminal.token("· " + "─" * 28 + " ·", "rule") + "\n " + meta
     def start_telegram(self):
         if self._tg_process is not None and self._tg_process.poll() is None:
             print(" telegram bot already running")

@@ -288,7 +288,7 @@ class JsonStreamAdapter(StreamAdapter):
 class RichStreamAdapter(StreamAdapter):
     """Rich TTY output with spinner, live reasoning panel and code highlighting."""
 
-    def __init__(self, console: Any, max_reasoning_lines: int = 3, show_thinking: bool = True):
+    def __init__(self, console: Any, max_reasoning_lines: int = 3, show_thinking: bool = False):
         self.console = console
         self.max_reasoning_lines = max_reasoning_lines
         self.show_thinking = show_thinking
@@ -398,12 +398,12 @@ class RichStreamAdapter(StreamAdapter):
     def _build_thinking_text(self) -> Any:
         lines = self._fold_reasoning()
         text = self.Text()
-        text.append(f"{self._action_label()}\n", style="dim italic")
-        if lines:
+        text.append(f"{self._action_label()}", style="dim italic")
+        # 仅当显式开启 thinking 显示且确实有内容时才展示 reasoning 行
+        if self.show_thinking and any(lines):
+            text.append("\n", style="dim")
             for line in lines:
                 text.append(f" {line}\n", style="dim")
-        else:
-            text.append(" ...\n", style="dim")
         return text
 
     def _update_thinking(self, force: bool = False) -> None:
@@ -450,6 +450,7 @@ class RichStreamAdapter(StreamAdapter):
 
     def _print_tool_call(self, text: str) -> None:
         self._stop_thinking()
+        from agent_project import terminal
         text = clean_runtime_text(text)
         # 提取工具名: 兼容 "bash_exec(...)" / "bash_exec: {...}" / "bash_exec {...}" 格式
         m = re.match(r'^\s*([a-zA-Z_][\w_]*)\s*[(:{=]', text)
@@ -457,13 +458,14 @@ class RichStreamAdapter(StreamAdapter):
         self._last_tool_name = tool_name
         self._set_action("tool", detail=tool_name)
         if not self._tool_header_printed:
-            print(f"\n\033[2m─ tools ─\033[0m", flush=True)
+            print(f"\n{terminal.token('─ tools ─', 'rule')}", flush=True)
             self._tool_header_printed = True
         # 紧凑 pending 前缀
-        print(f" \033[90m◌\033[0m \033[2m{text}\033[0m", flush=True)
+        print(f" {terminal.token('◌', 'muted')} {terminal.token(text, 'muted')}", flush=True)
 
     def _print_tool_result(self, text: str) -> None:
         self._stop_thinking()
+        from agent_project import terminal
         low = text.lower()
         # 策略提示(非错误): 安全拦截/权限拒绝等 → 用黄色而非红色(优先判断, 可能带 "Tool error:" 前缀)
         is_policy = any(k in low for k in ("blocked for safety", "denied by", "harness denied",
@@ -473,42 +475,68 @@ class RichStreamAdapter(StreamAdapter):
         is_error = (not is_policy) and low.startswith(("tool execution error", "timed out", "system stop", "tool error:"))
         # 多行输出(代码执行/文件读取)以代码块样式展示, 保留行结构与缩进
         if "\n" in text or is_error or is_policy:
+            text = self._compact_tool_result(text)
             self._print_block_result(text, is_error, policy=is_policy)
             return
         summary = clean_runtime_text(text)
-        width = max(term_width() - 6, 20)
+        width = max(min(term_width() - 6, 72), 20)
         if len(summary) > width:
             summary = summary[: width - 1] + "…"
-        # 设计方案: 状态前缀(✓成功 / ✗错误 / ◐策略)
+        # 状态前缀(✓成功 / ✗错误 / ◐策略)
         if is_error:
-            # 浅黄错误提示(替代刺眼红), 与块状错误一致
-            prefix, color = "✗", "38;5;229"
+            prefix, token = "✗", "warning"
         elif is_policy:
-            prefix, color = "◐", "33"
+            prefix, token = "◐", "warning"
         else:
-            prefix, color = "✓", "90"
-        print(f" \033[{color}m{prefix}\033[0m \033[{color}m{summary}\033[0m", flush=True)
+            prefix, token = "✓", "muted"
+        print(f" {terminal.token(prefix, token)} {terminal.token(summary, token)}\n", flush=True)
+
+    def _compact_tool_result(self, text: str) -> str:
+        """对特定工具的原始结果做视觉压缩, 减少 JSON/冗余信息噪音."""
+        name = self._last_tool_name or ""
+        if name == "web_search":
+            try:
+                data = json.loads(text)
+                if isinstance(data, list):
+                    lines = []
+                    for item in data[:8]:
+                        title = item.get("title", "")
+                        url = item.get("url", "")
+                        if title or url:
+                            lines.append(f"• {title or '(no title)'} — {url or '(no url)'}")
+                    if len(data) > 8:
+                        lines.append(f"... ({len(data) - 8} more results)")
+                    return "\n".join(lines) if lines else text
+            except Exception:
+                pass
+        return text
 
     def _print_block_result(self, text: str, is_error: bool, policy: bool = False) -> None:
         """把多行工具输出(代码执行结果/文件内容)渲染成带边框的代码块.
 
         设计方案: 状态前缀(成功✓/错误✗/策略◐) + 长输出自动折叠(>6行).
         """
-        width = max(term_width() - 8, 40)
+        from agent_project import terminal
+        width = max(min(term_width() - 8, 72), 40)
         max_lines = 6  # 设计文档: 超过 6 行自动折叠
         name = self._last_tool_name or "exec"
         lines = text.rstrip().split("\n")
         if policy:
-            # 策略提示(安全拦截/权限拒绝): 黄色边框+内容, 不是真正的错误
-            border_fg, name_fg, text_fg, mark = "33", "33", "37", "◐"
+            style = "warning"
+            mark = "◐"
+            tail = " · blocked"
         elif is_error:
-            # 浅黄错误提示(替代刺眼红): 边框/工具名/文本统一浅黄, 保留 ✗ 标记
-            border_fg, name_fg, text_fg, mark = "38;5;229", "38;5;229", "38;5;229", "✗"
+            style = "warning"
+            mark = "✗"
+            tail = " · error"
         else:
-            border_fg, name_fg, text_fg, mark = "2", "34", "37", "✓"
+            style = "rule"
+            mark = "✓"
+            tail = ""
         border = "─" * width
         # 状态前缀 + 工具名
-        print(f" \033[{border_fg}m╭─ \033[{border_fg}m{mark}\033[0m \033[{border_fg}m{name}\033[{border_fg}m {border}\033[0m")
+        header = terminal.token(f"╭─ {mark} {name} {border}", style)
+        print(f" {header}")
         shown = lines[:max_lines]
         more = len(lines) - len(shown)
         # search/replace diff 标记着色: SEARCH 红, REPLACE 绿, 分隔线暗
@@ -523,18 +551,13 @@ class RichStreamAdapter(StreamAdapter):
             elif replace_re.search(ln):
                 print(f" \033[1;32m│ {ln}\033[0m")
             elif divider_re.search(ln):
-                print(f" \033[2m│ {ln}\033[0m")
+                print(f" {terminal.token('│ ' + ln, 'muted')}")
             else:
-                print(f" \033[{text_fg}m│ {ln}\033[0m")
+                print(f" {terminal.token('│ ' + ln, 'muted')}")
         if more > 0:
-            print(f" \033[{text_fg}m│ …（其余 {more} 行已折叠）\033[0m")
-        if policy:
-            tail = " · blocked"
-        elif is_error:
-            tail = " · error"
-        else:
-            tail = ""
-        print(f" \033[{border_fg}m╰─ {len(lines)} 行{tail}\033[0m")
+            print(f" {terminal.token(f'│ … ({more} more lines)', 'muted')}")
+        footer = terminal.token(f"╰─ {len(lines)} lines{tail}", style)
+        print(f" {footer}\n")
 
     # ------------------------------------------------------------------
     # Public interface

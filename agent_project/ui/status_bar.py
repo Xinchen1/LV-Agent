@@ -61,10 +61,10 @@ class StatusBar:
         # Context usage mini-bar
         pct = min(100, int(used_tokens / self.max_context_tokens * 100)) if self.max_context_tokens else 0
         bar_color = _BAR_COLORS[3 if pct >= 95 else (2 if pct >= 80 else (1 if pct >= 50 else 0))]
-        bar_width = 8
-        # Ensure at least one visible block when there is any usage, avoid blank gaps
+        bar_width = 24
+        # Thin-line bar using low block characters for minimal visual height
         filled = max(1, int(pct / 100 * bar_width)) if pct > 0 else 0
-        bar = self.r.style("█" * filled + "░" * (bar_width - filled), bar_color)
+        bar = self.r.style("▁" * filled + " " * (bar_width - filled), bar_color)
         token_str = f"{used_tokens // 1000}k/{self.max_context_tokens // 1000}k" if used_tokens >= 1000 else f"{used_tokens}/{self.max_context_tokens}"
         pct_str = self.r.style(f"{pct}%", _MUTED)
 
