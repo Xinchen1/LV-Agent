@@ -8,7 +8,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class ToolConfig(BaseModel):
@@ -357,6 +357,28 @@ class AgentConfig(BaseModel):
         default_factory=dict,
         description="UI/CLI display and theme settings",
     )
+
+    @field_validator("backend")
+    @classmethod
+    def _check_backend(cls, v: str) -> str:
+        allowed = {"openai", "deepseek", "openrouter", "anthropic", "openmythos"}
+        if v not in allowed:
+            raise ValueError(f"backend 必须是 {sorted(allowed)} 之一, 收到 {v!r}")
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def _check_temperature(cls, v: float) -> float:
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"temperature 应在 [0, 2], 收到 {v}")
+        return v
+
+    @field_validator("max_thinking_loops", "default_thinking_loops")
+    @classmethod
+    def _check_thinking_loops(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"思考循环数必须 >= 1, 收到 {v}")
+        return v
 
 
 def load_model_registry(path: str = "agent_project/config/models.yaml") -> Dict[str, Any]:
