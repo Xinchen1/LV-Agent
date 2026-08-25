@@ -19,6 +19,19 @@ SKIP_DIRS: Set[str] = {
 }
 
 
+# ANSI styling for de-emphasized (secondary) lines: faint + light gray so that
+# "more lines" / limit hints read as small, very light text in the terminal.
+# Respects the NO_COLOR standard (https://no-color.org).
+_USE_COLOR = os.environ.get("NO_COLOR") is None
+
+
+def _faint(text: str) -> str:
+    """Wrap text in dim + light-gray ANSI so it reads as small, very-light text."""
+    if not _USE_COLOR:
+        return text
+    return f"\033[2;90m{text}\033[0m"
+
+
 class ProjectContextTool(BaseTool):
     name = "project_context"
     description = (
@@ -90,6 +103,10 @@ class ProjectContextTool(BaseTool):
             if previews:
                 parts.append(f"\n[Key Files Preview]\n{previews}")
 
+            parts.append(
+                _faint(f"\n— project_context summary · {root.name} · depth {max_depth} · max {max_files} files —")
+            )
+
             return ToolResult(success=True, output="\n".join(parts), metadata={
                 "root": str(root),
                 "git": git_info,
@@ -134,7 +151,7 @@ class ProjectContextTool(BaseTool):
 
             for idx, entry in enumerate(entries):
                 if count[0] >= max_files:
-                    lines.append(f"{prefix}... ({max_files} file limit reached)")
+                    lines.append(f"{prefix}{_faint(f'... ({max_files} file limit reached)')}")
                     return
                 is_last = idx == len(entries) - 1
                 connector = "└── " if is_last else "├── "
@@ -179,7 +196,7 @@ class ProjectContextTool(BaseTool):
                 preview_lines = lines[:40]
                 preview = "\n".join(preview_lines)
                 if len(lines) > 40:
-                    preview += f"\n... ({len(lines) - 40} more lines)"
+                    preview += f"\n{_faint(f'... ({len(lines) - 40} more lines)')}"
                 previews.append(f"--- {rel} ---\n{preview}")
             except Exception as e:
                 previews.append(f"--- {rel} ---\n(error reading: {e})")
