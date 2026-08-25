@@ -10,6 +10,7 @@ import os
 import re
 import json
 import time
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,9 @@ class OpenMythosAgent:
     - 经验存储和检索
     - 自我反思和改进
     """
+
+    # 缓存并发锁(类级, 任何实例—即使通过 object.__new__ 绕过 __init__—都可用)
+    _cache_lock = threading.Lock()
 
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -110,6 +114,8 @@ class OpenMythosAgent:
 
         # 工具结果缓存，防止同一轮中重复执行相同工具调用（如 super loop 反复读取同一文件）
         self._tool_result_cache: Dict[str, ToolResult] = {}
+        # 保护上述两个缓存在多线程(并行工具执行 / 后台线程)下的并发读写
+        self._cache_lock = threading.Lock()
 
         # Harness 能力内核（可选）：启用后所有工具调用先过策略门。
         # 必须在 _init_advanced_modules 之前构建，因为 ReasoningEngine 会引用它。
@@ -743,9 +749,10 @@ class OpenMythosAgent:
             return str(value)
 
         full_key = (namespace,) + tuple(_make_hashable(k) for k in key)
-        if full_key not in self._method_cache:
-            self._method_cache[full_key] = factory()
-        return self._method_cache[full_key]
+        with self._cache_lock:
+            if full_key not in self._method_cache:
+                self._method_cache[full_key] = factory()
+            return self._method_cache[full_key]
 
     def _log_to_file(self, message: str):
         """Write a log record only to file handlers, bypassing console output."""
@@ -1616,9 +1623,9 @@ class OpenMythosAgent:
             f"Tool: {action.tool_name}({action.arguments})\n\n"
             f"Tool result:\n{raw_output[:3000]}\n\n"
             "Give a concise, natural-language answer to the user's question based ONLY on the "
-            "tool result. Do not dump the raw result verbatim; summarize the key points the user "
-            "cares about. If the result is a directory/file listing, tell the user what's relevant "
-            "in it and answer the question directly. Final Answer:"
+            "tool result. Do not dump the raw result verbatim. Use short paragraphs or bullet "
+            "points so the answer is easy to read. If the tool result does not contain the "
+            "requested information, say so clearly instead of making things up. Final Answer:"
         )
         try:
             answer = self.backend.generate(
@@ -2087,7 +2094,11 @@ class OpenMythosAgent:
             "Use the Recent Conversation and Relevant Memory below to answer.",
             "If the user refers to '他们/她们/它们/他/她/它/刚才/之前/这个/那个/该/此/这类/这种', resolve the reference from the conversation history. "
             "For example, if the user asks '这个榜单权威吗' after discussing OSWorld, '这个榜单' means OSWorld.",
-            "First think briefly inside <think>...</think> tags, then respond naturally and concisely.",
+            "CRITICAL: ALL internal reasoning, planning, and self-talk MUST be wrapped inside "
+            "<think>...</think> tags. Anything you write OUTSIDE these tags is shown verbatim to the user. "
+            "Never write analysis such as 'we need to', 'the user asks', or any English meta-commentary "
+            "outside the tags — if you do, the user will see your private thinking. "
+            "Think inside <think>, then give the clean final answer (in the user's language) outside.",
             "",
             f"Today is {datetime.now().strftime('%Y-%m-%d')} ({datetime.now().strftime('%A')}). "
             f"Current year: {datetime.now().year}. When searching or answering time-sensitive questions, "
@@ -2206,6 +2217,15 @@ class OpenMythosAgent:
                     # 正文实时透出: 让用户逐字看到模型输出, 不再等整轮结束才一次性蹦出。
                     # 同时标记 content_parts 已被流式累积, 供最终答案组装使用。
                     _clean = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    # 安全网: 模型常把英文自我对话混在工具调用前。以 [TOOL: 为锚点,
+                    # 丢弃 [TOOL: 之前的非标签内容, 避免把内部推理泄露到界面。
+                    if '[TOOL:' in _clean:
+                        idx = _clean.find('[TOOL:')
+                        if idx > 0:
+                            prefix = _clean[:idx]
+                            # 复用已有的英文自我对话检测: 前缀以英文为主且含特征词
+                            if self._is_mostly_english(prefix) and self._SELFTALK_RE.search(prefix):
+                                _clean = _clean[idx:]
                     if _clean:
                         _streamed_content["v"] = True
                         stream_callback('content', _clean)
@@ -2827,21 +2847,10 @@ class OpenMythosAgent:
     def _clean_fast_answer(self, text: str) -> str:
         """清理 fast path 回复中的多余内容: think 标签残留与尾部回声.
 
-        模型(如 deepseek-reasoner)有时输出 <thinking>...</thinking> 或回答后再开一个
-        think 块(回声), 被截断后留下 <th 残片或 "可以/我/好的" 等短回声。
+        实现已抽到 agent_project.response_filter.clean_fast_answer (去 God Object 第一步)。
         """
-        if not text:
-            return text
-        # 0. 剥离可能残留在正文的置信度行(置信度只在思考内部, 不给用户看)
-        text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?\s*$', '', text).strip()
-        text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?', '', text).strip()
-        # 1. 去掉完整 think 块(支持 <think>/<thinking>)
-        text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-        # 2. 去掉尾部未闭合的标签残片(如 <th / <thin / <thinki)
-        text = re.sub(r'\s*<t[a-z]*\s*$', '', text).strip()
-        # 3. 去掉尾部回声: 结尾若重复了紧邻其前的短词/短句, 只保留一段
-        text = re.sub(r'(\S.{0,14}?)\s*\n?\s*\1\s*$', r'\1', text, flags=re.DOTALL)
-        return text.strip()
+        from .response_filter import clean_fast_answer
+        return clean_fast_answer(text)
 
     # 常见合法短答(不计入"疑似截断")
     _COMMON_SHORT_ANSWERS = {"ok", "okay", "yes", "no", "hi", "hello", "hey", "thanks",
@@ -3164,153 +3173,11 @@ class OpenMythosAgent:
     def _create_stream_router(self, user_callback, reasoning_parts, content_parts):
         """创建流式回调路由器,支持 native reasoning 和 <think> 标签.
 
+        实现已抽到 agent_project.response_filter.StreamRouter (去 God Object 第一步)。
         额外抑制原始 [TOOL:...] 标签直接泄漏到 content 流;这些标签会保留在
         content_parts 中供后续工具解析,但不会被用户看到.
         """
-
-        class StreamRouter:
-            def __init__(self, cb, reasoning_parts, content_parts):
-                self.cb = cb
-                self.reasoning_parts = reasoning_parts
-                self.content_parts = content_parts
-                self.state = 'start'  # start, think, content, tool_call_raw
-                self.buffer = ''
-                self.MAX_START_BUFFER = 30
-                # Marker detection: keep buffer small so we don't delay real content too long
-                self._tool_marker = '[TOOL:'
-                self._tool_end_marker = '[/TOOL]'
-
-            def _append(self, kind, text):
-                """Record text in the corresponding part list without emitting to callback."""
-                if not text:
-                    return
-                if kind == 'reasoning':
-                    self.reasoning_parts.append(text)
-                else:
-                    self.content_parts.append(text)
-
-            def _emit(self, kind, text):
-                """Emit text to callback and record it in parts."""
-                if text:
-                    self.cb(kind, text)
-                    self._append(kind, text)
-
-            def _can_still_be_think_tag(self):
-                """判断当前缓冲区是否仍有可能匹配 <think>/<thinking>(空缓冲不算)"""
-                prefix = self.buffer.lstrip()[:9]
-                if not prefix:
-                    return False
-                return ('<think>'.startswith(prefix) or '<thinking>'.startswith(prefix)) and len(prefix) < 9
-
-            def _can_still_be_tool_marker(self):
-                """判断当前缓冲区是否仍有可能匹配 [TOOL:(纯空白不算, 避免吞掉正文开头)"""
-                stripped = self.buffer.lstrip()
-                if not stripped:
-                    return False
-                return self._tool_marker.startswith(stripped[:len(self._tool_marker)])
-
-            def on_token(self, kind, token):
-                if kind == 'reasoning':
-                    # native reasoning:直接透传
-                    if self.state == 'start':
-                        # 清空可能存在的 start 缓冲
-                        if self.buffer.strip():
-                            self._emit('content', self.buffer)
-                        self.buffer = ''
-                    self.state = 'content'
-                    self._emit('reasoning', token)
-                    return
-
-                # kind == 'content'
-                if self.state == 'start':
-                    self.buffer += token
-                    stripped = self.buffer.lstrip()
-                    if stripped.startswith(('<think>', '<thinking>')):
-                        self.state = 'think'
-                        self.buffer = stripped[len('<think>'):]
-                    elif stripped.startswith(self._tool_marker):
-                        self.state = 'tool_call_raw'
-                        self.buffer = stripped
-                    elif len(self.buffer) >= self.MAX_START_BUFFER or not self._can_still_be_think_tag():
-                        self.state = 'content'
-                        self._emit('content', self.buffer)
-                        self.buffer = ''
-
-                elif self.state == 'think':
-                    self.buffer += token
-                    close = self.buffer.find('</think')  # 同时匹配 </think> 与 </thinking>
-                    if close != -1:
-                        end = self.buffer.find('>', close)
-                        if end != -1:
-                            self._emit('reasoning', self.buffer[:close])
-                            self.state = 'content'
-                            self.buffer = self.buffer[end + 1:]
-                            if self.buffer:
-                                self._emit('content', self.buffer)
-                                self.buffer = ''
-
-                elif self.state == 'content':
-                    # While emitting content, detect an inline [TOOL: marker and suppress it.
-                    if self._tool_marker in token or self._can_still_be_tool_marker():
-                        self.buffer += token
-                        if self._tool_marker in self.buffer:
-                            # Split at the marker: emit any leading content, then suppress the rest
-                            idx = self.buffer.find(self._tool_marker)
-                            if idx > 0:
-                                self._emit('content', self.buffer[:idx])
-                            self.state = 'tool_call_raw'
-                            self.buffer = self.buffer[idx:]
-                        return
-                    if '<think' in token or self._can_still_be_think_tag() or (token.startswith('<') and not self.buffer):
-                        # 内容后模型又开新的 think 块(常见回声), 转 think 状态抑制其泄漏为正文
-                        self.buffer += token
-                        if '<think' in self.buffer:
-                            idx = self.buffer.find('<think')
-                            if idx > 0:
-                                self._emit('content', self.buffer[:idx])
-                            self.state = 'think'
-                            self.buffer = self.buffer[idx + len('<think'):]
-                        elif not self._can_still_be_think_tag():
-                            # 攒够了但不是 think 标签(如数学符号 "< 5"), 作为普通内容吐出
-                            self._emit('content', self.buffer)
-                            self.buffer = ''
-                        return
-                    self._emit('content', token)
-
-                elif self.state == 'tool_call_raw':
-                    self.buffer += token
-                    if self._tool_end_marker in self.buffer:
-                        end_idx = self.buffer.find(self._tool_end_marker) + len(self._tool_end_marker)
-                        raw_call = self.buffer[:end_idx]
-                        # Keep the raw call in content_parts for downstream parsing but don't emit it.
-                        self._append('content', raw_call)
-                        self.buffer = self.buffer[end_idx:]
-                        self.state = 'content'
-                        if self.buffer:
-                            self._emit('content', self.buffer)
-                            self.buffer = ''
-                    elif '\n\n' in self.buffer:
-                        # Heuristic: tool call without [/TOOL] ends at a blank line
-                        parts = self.buffer.split('\n\n', 1)
-                        self._append('content', parts[0])
-                        self.buffer = parts[1]
-                        self.state = 'content'
-                        if self.buffer:
-                            self._emit('content', self.buffer)
-                            self.buffer = ''
-
-            def finalize(self):
-                if self.buffer:
-                    if self.state == 'think':
-                        self._emit('reasoning', self.buffer)
-                    elif self.state == 'tool_call_raw':
-                        # Preserve raw tool call for parser but don't leak it as content
-                        self._append('content', self.buffer)
-                    else:
-                        # content 态残留 buffer 尚未逐字透出过, emit 补上(避免丢尾)
-                        self._emit('content', self.buffer)
-                    self.buffer = ''
-
+        from .response_filter import StreamRouter
         return StreamRouter(user_callback, reasoning_parts, content_parts)
 
     # ============ 策略自动选择 ============
@@ -3450,8 +3317,9 @@ class OpenMythosAgent:
         from .reasoning import ReasoningStrategy
 
         # 新一轮开始时清空每轮缓存
-        self._method_cache.clear()
-        self._tool_result_cache.clear()
+        with self._cache_lock:
+            self._method_cache.clear()
+            self._tool_result_cache.clear()
 
         # 本会话轮次计数(进程级):启动后第一个问题走极速 Turbo,后续恢复正常深度
         is_session_first_turn = (getattr(self, '_session_turn_count', 0) == 0)
@@ -4848,7 +4716,8 @@ class OpenMythosAgent:
         但仍显示工具调用框(tool_call/tool_result), 由调用方播放提炼后的回答。
         """
         cache_key = f"{action.tool_name}:{json.dumps(action.arguments, sort_keys=True, ensure_ascii=False)}"
-        cached = self._tool_result_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._tool_result_cache.get(cache_key)
         if cached is not None:
             final_answer = cached.output.strip() if cached.success else f"工具调用失败: {cached.error or 'unknown error'}"
             if stream_callback:
@@ -4860,7 +4729,8 @@ class OpenMythosAgent:
         if stream_callback:
             self._emit_status(stream_callback, f"executing {action.tool_name}")
         tool_result = self._execute_tool(action)
-        self._tool_result_cache[cache_key] = tool_result
+        with self._cache_lock:
+            self._tool_result_cache[cache_key] = tool_result
         if self.context_engine:
             self.context_engine.observe_tool_result(
                 action.tool_name,

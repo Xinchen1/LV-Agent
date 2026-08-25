@@ -556,6 +556,43 @@ class FileOpsTool(BaseTool):
 
         return p.resolve()
 
+    # 受保护的系统路径前缀: 写入/删除类操作绝不应当触碰(防 ../../etc/passwd 等穿越)
+    _PROTECTED_PREFIXES = (
+        "/etc/", "/usr/", "/System/", "/Library/", "/bin/", "/sbin/",
+        "/private/etc/", "/private/var/db/", "/boot/", "/root/",
+    )
+
+    def _assert_contained(self, resolved: Path) -> Optional[str]:
+        """Return an error reason if ``resolved`` targets a protected system path; else None.
+
+        防路径穿越(../../etc/passwd、绝对路径 /etc/...): 这些写入/删除会被拒绝。
+        家目录、工作目录(allowed_dirs)以及其它普通路径(如 /tmp、/Volumes、用户自选目录)放行,
+        以免破坏正常文件操作。只读操作(read/open)不在此受限。
+        """
+        try:
+            resolved = resolved.resolve()
+        except Exception:
+            return f"cannot resolve path: {resolved}"
+        rstr = str(resolved) + "/"
+        for pfx in self._PROTECTED_PREFIXES:
+            if rstr.startswith(pfx) or rstr.rstrip("/") == pfx.rstrip("/"):
+                return f"refusing to write/delete into protected system path: {resolved}"
+        # 家目录与 allowed_dirs 永远放行(用户自己的文件)
+        try:
+            home = Path.home().resolve()
+            if resolved == home or str(resolved).startswith(str(home) + "/"):
+                return None
+        except Exception:
+            pass
+        for base in self.allowed_dirs:
+            try:
+                base_r = base.resolve()
+            except Exception:
+                continue
+            if resolved == base_r or str(resolved).startswith(str(base_r) + "/"):
+                return None
+        return None
+
     def _open_path(self, path: str) -> ToolResult:
         """Open a file or directory with the system's default application.
 
@@ -1020,6 +1057,12 @@ class FileOpsTool(BaseTool):
             path = "."
         try:
             resolved = str(self._resolve_path_smart(path))
+
+            # 路径穿越防护: 写入/删除类操作必须落在 allowed_dirs 之内
+            if action in ("write", "apply_diff", "delete"):
+                containment = self._assert_contained(Path(resolved))
+                if containment:
+                    return ToolResult(success=False, output="", error=containment)
 
             if action == "fast_read":
                 try:

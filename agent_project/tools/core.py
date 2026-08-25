@@ -21,7 +21,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Optional fast parser
 try:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup  # noqa: F401
+    _HAS_BS4 = True
+except ImportError:
+    _HAS_BS4 = False
+
+try:
+    import lxml  # noqa: F401
     _HAS_LXML = True
 except ImportError:
     _HAS_LXML = False
@@ -147,7 +153,10 @@ class WebSearch:
             timeout=8)
         
         from bs4 import BeautifulSoup
-        soup = BeautifulSoup(r.text, "lxml" if _HAS_LXML else "html.parser")
+        try:
+            soup = BeautifulSoup(r.text, "lxml" if _HAS_LXML else "html.parser")
+        except Exception:
+            soup = BeautifulSoup(r.text, "html.parser")
         
         results = []
         for result in soup.select(".result")[:max_results]:
