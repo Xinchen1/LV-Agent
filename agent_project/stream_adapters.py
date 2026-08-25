@@ -24,6 +24,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
+from .response_filter import is_leaked_self_talk
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -58,9 +60,37 @@ def clean_runtime_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _line_starts_nonascii(line: str) -> bool:
+    """行首(忽略前导空白)是否为非 ASCII 字符——用于判定'是否切到了用户语言'."""
+    s = line.lstrip()
+    return bool(s) and ord(s[0]) >= 128
+
+
 def clean_content_text(text: str) -> str:
-    """Remove emoji from content but keep whitespace."""
-    return _EMOJI_RE.sub("", text)
+    """Remove emoji from content but keep whitespace.
+
+    同时过滤流式渲染中逐行泄露的英文"自言自语"(模型未用 <think> 标签时把元推理
+    混进正文开头)。只作用于已结束的完整行, 且仅当该行之后确实切回了用户语言
+    (非 ASCII, 如中文)才判定为泄露并丢弃——纯英文回答不会被误删。未结束的片段
+    原样保留, 待下个 chunk 补全后再判定。
+    """
+    text = _EMOJI_RE.sub("", text)
+    if "\n" not in text:
+        return text
+    head, sep, tail = text.rpartition("\n")
+    lines = head.split("\n")
+    kept = []
+    n = len(lines)
+    for i, ln in enumerate(lines):
+        if not is_leaked_self_talk(ln):
+            kept.append(ln)
+            continue
+        # 疑似泄露: 仅当紧随其后的内容是用户语言(非 ASCII)才丢弃
+        nxt = tail if i == n - 1 else lines[i + 1]
+        if _line_starts_nonascii(nxt):
+            continue
+        kept.append(ln)
+    return "\n".join(kept) + sep + tail
 
 
 def term_width() -> int:
@@ -396,14 +426,10 @@ class RichStreamAdapter(StreamAdapter):
         return wrapped
 
     def _build_thinking_text(self) -> Any:
-        lines = self._fold_reasoning()
+        # 思考面板只显示单行状态(动作 + 耗时 + token), 不展开 reasoning 文本,
+        # 既减少视觉噪音也避免泄露内部推理。
         text = self.Text()
-        text.append(f"{self._action_label()}", style="dim italic")
-        # 仅当显式开启 thinking 显示且确实有内容时才展示 reasoning 行
-        if self.show_thinking and any(lines):
-            text.append("\n", style="dim")
-            for line in lines:
-                text.append(f" {line}\n", style="dim")
+        text.append(self._action_label(), style="dim italic")
         return text
 
     def _update_thinking(self, force: bool = False) -> None:
@@ -460,8 +486,9 @@ class RichStreamAdapter(StreamAdapter):
         if not self._tool_header_printed:
             print(f"\n{terminal.token('─ tools ─', 'rule')}", flush=True)
             self._tool_header_printed = True
-        # 紧凑 pending 前缀
-        print(f" {terminal.token('◌', 'muted')} {terminal.token(text, 'muted')}", flush=True)
+        # 紧凑 pending 前缀: 呼吸感绿色小圆点(绿 + 柔和 blink, 现代终端多已禁用闪烁, 故静默降级为绿点)
+        _PENDING_DOT = "\033[32;5m●\033[0m"
+        print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}", flush=True)
 
     def _print_tool_result(self, text: str) -> None:
         self._stop_thinking()
@@ -473,9 +500,17 @@ class RichStreamAdapter(StreamAdapter):
                                              "permission denied", "forbidden"))
         # 真错误: 执行失败/超时/系统停止
         is_error = (not is_policy) and low.startswith(("tool execution error", "timed out", "system stop", "tool error:"))
+
+        # 结构化结果(web_search 等返回 JSON 列表)始终压缩, 以静默列表呈现, 去掉 JSON 噪音
+        compact = self._compact_tool_result(text)
+        if compact != text:
+            for ln in compact.split("\n"):
+                print(f"  {terminal.token(ln, 'muted')}", flush=True)
+            print(flush=True)
+            return
+
         # 多行输出(代码执行/文件读取)以代码块样式展示, 保留行结构与缩进
         if "\n" in text or is_error or is_policy:
-            text = self._compact_tool_result(text)
             self._print_block_result(text, is_error, policy=is_policy)
             return
         summary = clean_runtime_text(text)
@@ -492,24 +527,54 @@ class RichStreamAdapter(StreamAdapter):
         print(f" {terminal.token(prefix, token)} {terminal.token(summary, token)}\n", flush=True)
 
     def _compact_tool_result(self, text: str) -> str:
-        """对特定工具的原始结果做视觉压缩, 减少 JSON/冗余信息噪音."""
+        """对结构化工具结果做视觉压缩, 减少 JSON/冗余信息噪音。
+
+        - web_search 等返回 JSON 列表(或含 results/items/data 容器的 dict)的结果
+        - 提取 title / url(link), 封顶 5 条, URL 截断, 不显示 snippet
+        - 无法识别(普通文本 / 非搜索类 JSON)则原样返回, 由调用方走其它渲染分支
+        """
         name = self._last_tool_name or ""
-        if name == "web_search":
-            try:
-                data = json.loads(text)
-                if isinstance(data, list):
-                    lines = []
-                    for item in data[:8]:
-                        title = item.get("title", "")
-                        url = item.get("url", "")
-                        if title or url:
-                            lines.append(f"• {title or '(no title)'} — {url or '(no url)'}")
-                    if len(data) > 8:
-                        lines.append(f"... ({len(data) - 8} more results)")
-                    return "\n".join(lines) if lines else text
-            except Exception:
-                pass
-        return text
+        s = text.strip()
+        if name not in ("web_search", "read_web") and not (s.startswith("[") or s.startswith("{")):
+            return text
+        try:
+            data = json.loads(s)
+        except Exception:
+            return text
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("results") or data.get("items") or data.get("data")
+            if not isinstance(items, list):
+                return text
+        else:
+            return text
+        if not items:
+            return "(无结果)"
+        lines = []
+        for item in items[:5]:
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("text") or item.get("name") or ""
+                url = item.get("url") or item.get("link") or item.get("href") or ""
+            elif isinstance(item, str):
+                title, url = item, ""
+            else:
+                title, url = str(item), ""
+            if not (title or url):
+                continue
+            url = self._shorten_url(url)
+            lines.append(f"• {title}  {url}" if url else f"• {title}")
+        if len(items) > 5:
+            lines.append(f"… 还有 {len(items) - 5} 条结果")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _shorten_url(url: str, max_len: int = 56) -> str:
+        """去掉协议头并截断过长 URL, 减少工具结果里的链接噪音."""
+        url = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
+        if len(url) > max_len:
+            url = url[: max_len - 1] + "…"
+        return url
 
     def _print_block_result(self, text: str, is_error: bool, policy: bool = False) -> None:
         """把多行工具输出(代码执行结果/文件内容)渲染成带边框的代码块.
@@ -632,12 +697,12 @@ class RichStreamAdapter(StreamAdapter):
         SECTION = "\033[1;36m"           # 章节(一、/1.): 加粗青
         LIST_MARK = "\033[2;36m"         # 列表符号: 暗青
         INLINE = "\033[36m"              # 行内代码: 青色
-        URL = "\033[36;4m"               # 链接: 青下划线
-        PATH = "\033[34m"                # 文件/路径: 蓝
-        NUM = "\033[36m"                 # 数字/统计: 青
-        ERR = "\033[1m"                  # 错误/失败: 加粗(不再用红)
-        KEY = "\033[1;36m"               # 重点词: 加粗青
-        QUOTE = "\033[2;90m"             # 引用/弱化: 暗灰
+        URL = "\033[36;4m"              # 链接: 青下划线
+        PATH = "\033[34m"               # 文件/路径: 蓝
+        NUM = "\033[36m"                # 数字/统计: 青
+        ERR = "\033[1m"                 # 错误/失败: 加粗(不再用红)
+        KEY = "\033[1;36m"              # 重点词: 加粗青
+        QUOTE = "\033[2;90m"            # 引用/弱化: 暗灰
         DIM = "\033[2m"
         FLUSH_AT_CHARS = 24
         FORCE_FLUSH_AT_CHARS = 48
@@ -663,6 +728,8 @@ class RichStreamAdapter(StreamAdapter):
             self.in_code_block = False
             self.code_lang = ""
             self.line_buffer = ""
+            # 泄露英文自言自语暂存行: 待下一行判定是否切到用户语言
+            self._pending_leak: Optional[str] = None
             # Markdown 表格缓冲: 收集 `| ... |` 行, 结束后用细线框绘制
             self._table_rows: list[list[str]] = []
             self._in_table = False
@@ -685,12 +752,19 @@ class RichStreamAdapter(StreamAdapter):
                 self.line_buffer = self.line_buffer[flush_at:]
 
         def flush(self) -> None:
+            if self._pending_leak is not None:
+                # 行尾仍无后续中文行 => 不是泄露, 正常补显
+                self._render_line(self._pending_leak)
+                self._pending_leak = None
             if self.line_buffer:
                 self._emit_fragment(self.line_buffer)
                 self.line_buffer = ""
 
         def _emit_fragment(self, text: str) -> None:
-            """流式中间片段: 原样续行输出, 不加换行."""
+            """流式中间片段: 原样续行输出, 不加换行.
+
+            不在此做泄露拦截——片段是未完成行, 误判率高; 完整行的拦截在 _emit_line。
+            """
             if not text:
                 return
             if self.in_code_block:
@@ -701,7 +775,7 @@ class RichStreamAdapter(StreamAdapter):
             print(self._style_inline(text), end="", flush=True)
 
         def _emit_line(self, line: str) -> None:
-            """完整一行: 按 Markdown 风格美化后换行."""
+            """完整一行入口: 处理代码块边界 + 泄露英文暂存, 再交给 _render_line."""
             stripped = line.strip()
             if self.in_code_block:
                 if stripped.startswith("```"):
@@ -713,6 +787,23 @@ class RichStreamAdapter(StreamAdapter):
                         print(f"{self.CODE_BG}{self.CODE_FG}{line.rstrip()}{self.RESET}", flush=True)
                 return
 
+            # 泄露的英文"自言自语": 先暂存, 等下一行判定——若下一行切到用户语言
+            # (非 ASCII)则丢弃, 否则当作正常英文回答的一部分补显, 避免误删纯英文回答。
+            if is_leaked_self_talk(line):
+                self._pending_leak = line
+                return
+            if self._pending_leak is not None:
+                if _line_starts_nonascii(line):
+                    self._pending_leak = None
+                else:
+                    self._render_line(self._pending_leak)
+                    self._pending_leak = None
+
+            self._render_line(line)
+
+        def _render_line(self, line: str) -> None:
+            """完整一行的 Markdown 美化渲染(不含代码块边界与泄露拦截)."""
+            stripped = line.strip()
             if stripped.startswith("```"):
                 self.in_code_block = True
                 self.code_lang = stripped[3:].strip()

@@ -11,6 +11,7 @@ import re
 import json
 import time
 import threading
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -113,9 +114,9 @@ class OpenMythosAgent:
         self._method_cache: Dict[Tuple[str, ...], Any] = {}
 
         # 工具结果缓存，防止同一轮中重复执行相同工具调用（如 super loop 反复读取同一文件）
-        self._tool_result_cache: Dict[str, ToolResult] = {}
-        # 保护上述两个缓存在多线程(并行工具执行 / 后台线程)下的并发读写
-        self._cache_lock = threading.Lock()
+        # 并发读写由类级 _cache_lock 保护(见文件顶部), 实例级无需再建一把锁。
+        # 用 OrderedDict 做容量上限(LRU 淘汰), 避免长任务内缓存只增不减。
+        self._tool_result_cache: "OrderedDict[str, ToolResult]" = OrderedDict()
 
         # Harness 能力内核（可选）：启用后所有工具调用先过策略门。
         # 必须在 _init_advanced_modules 之前构建，因为 ReasoningEngine 会引用它。
@@ -4718,6 +4719,9 @@ class OpenMythosAgent:
         cache_key = f"{action.tool_name}:{json.dumps(action.arguments, sort_keys=True, ensure_ascii=False)}"
         with self._cache_lock:
             cached = self._tool_result_cache.get(cache_key)
+            if cached is not None:
+                # 命中:标记为最近使用, 维持 LRU 顺序
+                self._tool_result_cache.move_to_end(cache_key)
         if cached is not None:
             final_answer = cached.output.strip() if cached.success else f"工具调用失败: {cached.error or 'unknown error'}"
             if stream_callback:
@@ -4731,6 +4735,9 @@ class OpenMythosAgent:
         tool_result = self._execute_tool(action)
         with self._cache_lock:
             self._tool_result_cache[cache_key] = tool_result
+            # 容量上限: 超出后淘汰最久未使用的条目, 防止内存只增不减
+            if len(self._tool_result_cache) > 512:
+                self._tool_result_cache.popitem(last=False)
         if self.context_engine:
             self.context_engine.observe_tool_result(
                 action.tool_name,
