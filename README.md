@@ -42,15 +42,15 @@ LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一�
 
 | 特性 | 说明 |
 |------|------|
-| **多策略推理** | CoT / ReAct / Self-Consistency / Verification / MCTS |
+| **多策略推理** | CoT / ReAct / Verification（Self-Consistency / MCTS 规划中） |
 | **自适应循环控制** | 简单问题少轮调用，难题多轮调用 |
-| **任务规划** | 支持 adaptive / MCTS / graph / key_path 多种策略 |
+| **任务规划** | 支持 SEQUENTIAL / PARALLEL / HIERARCHICAL / ADAPTIVE 策略 |
 | **自我修正** | 质量评估 + 自动修正 + 参数自适应调整 |
 
 ### 工具链
 
 - **Web 搜索** — 多查询融合
-- **文件操作** — 读 / 写 / grep / glob（Rust 加速可选）
+- **文件操作** — 读 / 写 / grep / glob
 - **代码执行** — Python / Bash，timeout 隔离
 - **GitHub 搜索、PDF 读取、天气查询、网页抓取**
 - **Telegram Bot 集成**（可独立运行）
