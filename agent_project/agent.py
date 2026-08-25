@@ -3500,10 +3500,11 @@ class OpenMythosAgent:
             max_node_loops = max(n.assigned_loops for n in plan.nodes.values())
             n_loops = min(max(root_loops, max_node_loops, len(plan.nodes) * 2), self.config.max_thinking_loops)
             # Embed the plan so the reasoning engine can follow it
-            plan_lines = ["## Plan (follow this sequence):"]
+            plan_lines = ["## Plan (follow this sequence; after finishing a node output `DONE[<node_id>`]):"]
             for idx, node_id in enumerate(plan.topological_sort(), 1):
                 node = plan.nodes[node_id]
                 plan_lines.append(f"{idx}. [{node_id}] {node.description}")
+            plan_lines.append("完成所有节点后, 输出 Final Answer。")
             plan_context = "\n".join(plan_lines)
         else:
             # Determine thinking loops (simple fallback)
@@ -3599,7 +3600,8 @@ class OpenMythosAgent:
                 custom_loops=n_loops,
                 stream_callback=stream_callback,  # 传递流式回调
                 token_callback=token_callback,    # 传递 token 用量回调
-                code_mode=code_mode
+                code_mode=code_mode,
+                plan=plan,
             )
 
             # 外层闭环: 质量不达标时在 max_outer_loops 预算内重试(尝试不同策略), 实现"反馈→重规划→重试"
@@ -3619,7 +3621,8 @@ class OpenMythosAgent:
                     custom_loops=max(n_loops, 3) + outer_attempt,
                     stream_callback=stream_callback,
                     token_callback=token_callback,
-                    code_mode=code_mode
+                    code_mode=code_mode,
+                    plan=plan,
                 )
                 outer_attempt += 1
                 self.outer_loop_counter = outer_attempt
