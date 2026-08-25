@@ -78,3 +78,4 @@ electron.pid
 *_session*.md
 session_*.md
 latest_*.md
+desktop/
