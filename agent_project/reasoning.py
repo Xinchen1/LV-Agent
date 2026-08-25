@@ -262,7 +262,7 @@ class ReasoningEngine:
             elif strategy == ReasoningStrategy.TREE_OF_THOUGHTS:
                 exec_trace = self._reason_tree_of_thoughts(ctx)
             elif strategy == ReasoningStrategy.MONTE_CARLO:
-                exec_trace = self._reason_monte_carlo(ctx)
+                exec_trace = self._reason_best_of_n(ctx)
             else:
                 exec_trace = self.execution_engine.run(policy, ctx)
 
@@ -341,10 +341,12 @@ class ReasoningEngine:
         winners = [t for t in traces if t.final_answer and t.final_answer.strip() == top_answer]
         return max(winners, key=lambda t: t.quality_score)
 
-    # ===================== Monte-Carlo =====================
+    # ===================== Best-of-N (config label: "mcts") =====================
+    # 说明: 这不是真正的蒙特卡洛树搜索(无树扩展 / 反向传播 / UCT 选择),
+    # 而是 N 次独立完整 ReAct rollout 取 quality_score 最高者。
 
-    def _reason_monte_carlo(self, ctx: ExecutionContext, n_rollouts: int = 3) -> Any:
-        """Monte-Carlo 轨迹搜索: 多次随机 rollout, 按质量分选回报最高者.
+    def _reason_best_of_n(self, ctx: ExecutionContext, n_rollouts: int = 3) -> Any:
+        """Best-of-N: 运行 N 次独立完整 ReAct, 返回 quality_score 最高的轨迹.
 
         每个 rollout 是一次完整 ReAct 执行(带工具调用), 以 trace.quality_score
         作为该路径的回报, 返回回报最高的轨迹. 中间 rollout 不流式输出.
