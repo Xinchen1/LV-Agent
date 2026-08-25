@@ -3240,9 +3240,10 @@ class OpenMythosAgent:
         )):
             return ReasoningStrategy.SUPER_AGENT
 
-        # 关键决策/战略级/高风险任务 → MCTS（多路 rollout 取质量最优）
-        # 与 ToT 的区别: ToT 是"探索更多思路", MCTS 是"多条完整执行路径各跑一遍、
-        # 按 quality_score 选最优", 代价更高(约 3 倍调用), 仅用于真正值得多跑的关键决策。
+        # 关键决策/战略级/高风险任务 → Best-of-N（配置名 "mcts"; 多路 rollout 取质量最优）
+        # 与 ToT 的区别: ToT 是"探索更多思路", 这里是"多条完整执行路径各跑一遍、
+        # 按 quality_score 选最优"(即 Best-of-N, 非真 MCTS), 代价更高(约 3 倍调用),
+        # 仅用于真正值得多跑的关键决策。
         # 置于 ToT 之前: "该不该/值不值得/怎么选" 是决策判断, 优先于"比较/对比方案"的探索。
         if any(k in t for k in (
             "关键", "战略", "重要决定", "重大决定", "重要决策", "重大决策",
@@ -3497,7 +3498,7 @@ class OpenMythosAgent:
         if plan:
             root_loops = plan.nodes['task_0'].assigned_loops if 'task_0' in plan.nodes else self.config.default_thinking_loops
             max_node_loops = max(n.assigned_loops for n in plan.nodes.values())
-            n_loops = min(max(root_loops, max_node_loops, len(plan.nodes) * 3), self.config.max_thinking_loops)
+            n_loops = min(max(root_loops, max_node_loops, len(plan.nodes) * 2), self.config.max_thinking_loops)
             # Embed the plan so the reasoning engine can follow it
             plan_lines = ["## Plan (follow this sequence):"]
             for idx, node_id in enumerate(plan.topological_sort(), 1):

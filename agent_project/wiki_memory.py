@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import uuid, json, re, time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -354,30 +354,6 @@ class WikiGraph:
                 break
         return results
 
-    def shortest_path(self, source_id: str, target_id: str,
-                      max_hops: int = 5) -> Optional[List[Tuple[WikiPage, str]]]:
-        if source_id not in self._pages or target_id not in self._pages:
-            return None
-        if source_id == target_id:
-            return [(self._pages[source_id], "self")]
-
-        from collections import deque
-        queue: deque = deque([(source_id, [])])
-        visited = {source_id}
-
-        for _ in range(max_hops):
-            if not queue:
-                break
-            cur, path = queue.popleft()
-            page = self._pages[cur]
-            for linked_id in page.links:
-                if linked_id == target_id:
-                    return path + [(page, "outgoing"), (self._pages[linked_id], "arrived")]
-                if linked_id not in visited:
-                    visited.add(linked_id)
-                    queue.append((linked_id, path + [(page, "outgoing")]))
-        return None
-
     def suggest_related(self, page_id: str, k: int = 5) -> List[Tuple[WikiPage, float]]:
         candidates: Dict[str, float] = defaultdict(float)
 
@@ -391,24 +367,6 @@ class WikiGraph:
 
         ranked = sorted(candidates.items(), key=lambda x: x[1], reverse=True)[:k]
         return [(self._pages[pid], score) for pid, score in ranked if pid in self._pages]
-
-    # ----------------------------------------------------------------
-    # maintenance
-    # ----------------------------------------------------------------
-    def prune_by_utility(self, threshold_days: float = 30.0,
-                         keep_min: int = 50) -> int:
-        if len(self._pages) <= keep_min:
-            return 0
-        cutoff = datetime.now() - timedelta(days=threshold_days)
-        to_remove = []
-        for pid, page in self._pages.items():
-            last = datetime.fromisoformat(page.last_accessed)
-            if (len(self._pages) - len(to_remove) > keep_min and
-                    last < cutoff and len(page.links) < 2):
-                to_remove.append(pid)
-        for pid in to_remove:
-            self.delete_page(pid)
-        return len(to_remove)
 
     # ----------------------------------------------------------------
     # persistence
