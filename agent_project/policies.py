@@ -1182,6 +1182,7 @@ class SuperAgentPolicy(ThinkingPolicy):
             )
             sub_ctx.executed_calls = dict(executed_calls)
             sub_ctx.call_counts = dict(call_counts)
+            executed_before = dict(executed_calls)
 
             trace = engine.run(self.inner, sub_ctx)
 
@@ -1199,6 +1200,12 @@ class SuperAgentPolicy(ThinkingPolicy):
                 break
 
             if not self._has_actionable_errors(trace.observations):
+                break
+
+            # 反思重试若没有产出任何"新"工具调用(全部命中去重/缓存), 说明只是在
+            # 旧结果上空转——再反思也改不了输出, 直接停, 避免无谓烧 token。
+            new_calls = [k for k in sub_ctx.executed_calls if k not in executed_before]
+            if not new_calls:
                 break
 
             reflection = self._reflect_and_replan(trace, ctx)
@@ -1235,12 +1242,15 @@ class SuperAgentPolicy(ThinkingPolicy):
         reflection = self.model.generate(prompt, n_loops=1, temperature=0.4, max_tokens=2048)
         cleaned = ReActPolicy._strip_think_tags(reflection or "")
         # 反思是"计划文本", 不应混入工具调用标签(模型偶尔会在反思里也写工具调用格式):
-        # 清理 <tool_calls>/<invoke>/<parameter> 等残留, 避免把无效调用当普通文本展示给用户。
-        cleaned = re.sub(r"<tool_calls>.*?</tool_calls>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = re.sub(r"<invoke\s+[^>]*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = re.sub(r"<parameter[^>]*>.*?</parameter>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = re.sub(r"<[\w_]+\s+[^>]*/>", "", cleaned)
-        cleaned = cleaned.strip()
+        # 一次性清理 <tool_calls>/<invoke>/<parameter> 等残留, 避免把无效调用当普通文本展示给用户。
+        cleaned = re.sub(
+            r"<tool_calls>.*?</tool_calls>|<invoke\s+[^>]*>|<parameter[^>]*>.*?</parameter>|<[\w_]+\s+[^>]*/>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        # 限制长度, 避免反思文本无限膨胀撑大下一轮 prompt(极简防抖)
+        cleaned = cleaned[:2000].strip()
         if ctx.stream_callback:
             ctx.stream_callback("tool_result", "[reflection] " + cleaned[:300])
         return cleaned
