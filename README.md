@@ -3,12 +3,18 @@
 <img src="assets/screenshot.png" width="800" alt="LV Agent GitHub" />
 
 </div>
-
 # LV Agent
 
 > 终端原生智能体框架。Deep thinking, real tools.
 
 ---
+
+## 设计灵感
+
+架构受图灵机通用计算模型启发，实际实现为 Harness 微内核架构。
+
+---
+
 ## 项目简介
 
 LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一些思路，也是我研究机构 **Cleveris Research** 的作品。
