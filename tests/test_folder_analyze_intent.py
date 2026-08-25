@@ -8,11 +8,12 @@ sys.path.insert(0, "agent_project")
 
 from agent_project.agent import OpenMythosAgent
 from agent_project.tools import ToolCall
+from agent_project.cache import MemoCache
 
 
 def make_agent():
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}
+    a._method_cache = MemoCache()
     a._code_mode_override = False
     a._current_task = ""
     return a
@@ -372,7 +373,7 @@ def test_llm_intent_classify_fallback():
     a = object.__new__(OpenMythosAgent)
     a.logger = logging.getLogger("test")
     a.backend = FakeBackend()
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
 
     # 规则未命中 + 非简单 → LLM 兜底
     calls["n"] = 0
@@ -419,7 +420,7 @@ def test_pronoun_resolves_relative_path_to_absolute():
     import os
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
     os.chdir(os.path.expanduser("~"))
 
     a.conversation_history = [
@@ -435,7 +436,7 @@ def test_pronoun_resolves_absolute_path():
     """历史里是绝对路径时直接使用."""
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
     a.conversation_history = [
         {"user": "分析super ide", "assistant": "project_context path=/home/dev/projects/super-ide OK"},
     ]
@@ -449,7 +450,7 @@ def test_pronoun_resolves_entity_name_via_dir_locate(tmp_path):
     import os
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
     # 在临时目录下建一个 super-ide 目录, 使 _locate_project_dir(cwd=tmp_path) 能定位到
     os.chdir(tmp_path)
     (tmp_path / "super-ide").mkdir()
@@ -465,6 +466,6 @@ def test_resolved_analysis_task_not_simple():
     """指代解析后的 '分析 <路径>,输出分析报告' 应走主循环(非 fast path)."""
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
     resolved = "要你 分析 '/home/dev/super-ide', 输出分析报告"
     assert not a._is_simple_query(resolved), "含'分析'+路径+报告的任务不应走 fast path"
