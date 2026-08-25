@@ -13,6 +13,7 @@ import time
 import threading
 from .cache import MemoCache, ToolResultCache
 from .intent import is_folder_read_intent, is_pure_nudge, is_ultra_short_ambiguous
+from .pure_utils import edit_distance, skip_tool_retry, tool_returns_listing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -1484,19 +1485,7 @@ class OpenMythosAgent:
 
     @staticmethod
     def _tool_returns_listing(action: Any) -> bool:
-        """执行前预判工具是否会产生"目录/文件列表"类原始输出.
-
-        若会在展示时被总结, 则先不直接播放原始内容, 避免先播列表又播总结。
-        """
-        if action is None:
-            return False
-        name = getattr(action, "tool_name", "")
-        args = getattr(action, "arguments", {}) or {}
-        if name == "file_ops":
-            return str(args.get("action", "")).lower() in ("list", "find", "grep")
-        if name in ("bash_exec", "run_code", "python_exec"):
-            return True
-        return False
+        return tool_returns_listing(action)
 
     @staticmethod
     def _is_ultra_short_ambiguous(task: str) -> bool:
@@ -1504,17 +1493,7 @@ class OpenMythosAgent:
 
     @staticmethod
     def _skip_tool_retry(action: Any, tool_result: Any) -> bool:
-        """判断工具失败后是否不值得重试(重试会复现相同失败并重复刷屏).
-
-        联网搜索无结果/超时类错误重试同一查询毫无意义, 直接走自然语言兜底。
-        """
-        name = getattr(action, "tool_name", "")
-        err = str(getattr(tool_result, "error", "") or "").lower()
-        if name == "web_search" and any(
-            k in err for k in ("no search results", "no results", "无结果", "没有找到", "nothing found", "timed out", "timeout")
-        ):
-            return True
-        return False
+        return skip_tool_retry(action, tool_result)
 
     def _tool_failure_fallback(self, task: str, tool_result: Any) -> str:
         """工具调用失败时的自然语言兜底回复, 避免把原始错误直接甩给用户.
@@ -4439,18 +4418,7 @@ class OpenMythosAgent:
 
     @staticmethod
     def _edit_distance(a: str, b: str) -> int:
-        """Levenshtein 编辑距离(用于工具名拼写纠错)."""
-        if len(a) < len(b):
-            a, b = b, a
-        if not b:
-            return len(a)
-        prev = list(range(len(b) + 1))
-        for i, ca in enumerate(a, 1):
-            cur = [i]
-            for j, cb in enumerate(b, 1):
-                cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-            prev = cur
-        return prev[-1]
+        return edit_distance(a, b)
 
     def _parse_output_for_action(self, text: str) -> Optional[ToolCall]:
         """Parse the first actionable tool call from model output.
