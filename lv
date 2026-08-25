@@ -1,0 +1,117 @@
+#!/bin/bash
+# Lv agent global launcher
+# Preserves the user's current working directory.
+
+set -e
+
+# Some IDE/agent runtimes (e.g. TRAE) inject PYTHONHOME/PYTHONPATH pointing to
+# their bundled Python, which breaks venv interpreters. Clear them early.
+unset PYTHONHOME PYTHONPATH
+# Clear stale proxy env vars that may point to a dead local proxy (e.g. 127.0.0.1:7890).
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+# Resolve this script's directory, following symlinks.
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SOURCE" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
+
+# venv lives at the repo root (parent of agent_project).
+REPO_ROOT="$(cd "$PROJECT_DIR/.." && pwd)"
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+SUPER_AGENT="$PROJECT_DIR/super_agent.py"
+# Optional local LLM proxy. Override via OMNIROUTE_DIR env var; skipped if absent.
+OMNIROUTE_DIR="${OMNIROUTE_DIR:-}"
+
+# Auto-start omniroute (local DeepSeek V4 proxy) if not already running
+if [ -n "$OMNIROUTE_DIR" ] && [ -x "${OMNIROUTE_DIR}/omniroute" ] && ! curl -s http://localhost:20128/health >/dev/null 2>&1; then
+    echo "   starting omniroute (local LLM proxy)..."
+    ( cd "$OMNIROUTE_DIR" && set -a && . .env && set +a && omniroute ) 2>/dev/null &
+    for i in $(seq 1 30); do
+        curl -s http://localhost:20128/health >/dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+
+# Load secrets from .env if present.
+# Only export variables that are standard names (not leaking unrelated .env vars).
+if [ -f "$PROJECT_DIR/.env" ]; then
+    while IFS= read -r line; do
+        key=$(echo "$line" | cut -d'=' -f1 | xargs)
+        val=$(echo "$line" | cut -d'=' -f2- | xargs)
+        case "$key" in
+            NIM_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|DEEPSEEK_API_KEY|SERPAPI_KEY|TELEGRAM_BOT_TOKEN)
+                export "$key=$val"
+                ;;
+        esac
+    done < "$PROJECT_DIR/.env"
+fi
+
+# Avoid vector-deps trying to phone home during import (keeps startup fast/offline)
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export CHROMADB_TELEMETRY_DISABLED=1
+
+# Ensure virtual environment exists (at the repo root, alongside agent_project).
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "creating virtual environment at $REPO_ROOT/.venv ..."
+    # 优先用 homebrew python3(避免系统 Python.framework 3.13 的代码签名崩溃)
+    PY_LAUNCHER="/opt/homebrew/bin/python3"
+    [ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="/usr/bin/python3"
+    [ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="python3"
+    "$PY_LAUNCHER" -m venv "$REPO_ROOT/.venv"
+    # Prefer the lightweight core deps so the agent starts fast on any machine.
+    # requirements-core.txt excludes torch/chromadb/sentence-transformers (heavy,
+    # architecture-sensitive). Install requirements-minimal.txt manually for
+    # full memory/embedding features.
+    # Use Tsinghua PyPI mirror for faster, more reliable installs in China.
+    PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+    if [ -f "$SCRIPT_DIR/requirements-core.txt" ]; then
+        "$VENV_PYTHON" -m pip install -r "$SCRIPT_DIR/requirements-core.txt" $PIP_MIRROR --quiet
+    elif [ -f "$SCRIPT_DIR/requirements-minimal.txt" ]; then
+        "$VENV_PYTHON" -m pip install -r "$SCRIPT_DIR/requirements-minimal.txt" $PIP_MIRROR --quiet
+    else
+        "$VENV_PYTHON" -m pip install openai pyyaml pydantic requests tiktoken rich beautifulsoup4 $PIP_MIRROR --quiet
+    fi
+fi
+
+# Build rust_file_ops for fast/verified file ops (apply_diff auto-verify etc.)
+# 若系统无 cargo, 静默跳过(文件操作将回退到纯 Python 实现)。
+RUST_BIN="$PROJECT_DIR/rust_file_ops/target/release/rust_file_ops"
+_NEED_BUILD=false
+if [ ! -x "$RUST_BIN" ]; then
+    _NEED_BUILD=true
+elif command -v uname >/dev/null 2>&1; then
+    _BIN_ARCH=$(file "$RUST_BIN" 2>/dev/null | grep -o 'x86_64\|aarch64\|arm64' | head -1)
+    _SYS_ARCH=$(uname -m)
+    if [ "$_SYS_ARCH" = "arm64" ] || [ "$_SYS_ARCH" = "aarch64" ]; then
+        if [ "$_BIN_ARCH" != "aarch64" ] && [ "$_BIN_ARCH" != "arm64" ]; then
+            _NEED_BUILD=true
+            echo "⚠ rust_file_ops binary is $_BIN_ARCH but system is $_SYS_ARCH — will recompile..."
+        fi
+    elif [ "$_SYS_ARCH" = "x86_64" ] && [ "$_BIN_ARCH" != "x86_64" ]; then
+        _NEED_BUILD=true
+        echo "⚠ rust_file_ops binary is $_BIN_ARCH but system is $_SYS_ARCH — will recompile..."
+    fi
+fi
+if $_NEED_BUILD && [ -d "$PROJECT_DIR/rust_file_ops" ] && command -v cargo >/dev/null 2>&1; then
+    echo "building rust_file_ops (fast file ops + auto syntax verification)..."
+    RUST_BUILD_LOG="${TMPDIR:-/tmp}/rust_file_ops_build.log"
+    if ( cd "$PROJECT_DIR/rust_file_ops" && cargo build --release >"$RUST_BUILD_LOG" 2>&1 ); then
+        echo "✓ rust_file_ops ready"
+    else
+        echo "⚠ rust build failed — using Python fallback. Build log: $RUST_BUILD_LOG"
+        echo "  (last lines:)"
+        tail -5 "$RUST_BUILD_LOG" 2>/dev/null | sed 's/^/    /'
+    fi
+elif $_NEED_BUILD && [ -d "$PROJECT_DIR/rust_file_ops" ]; then
+    echo "⚠ rust_file_ops needs recompile but cargo not found — using Python fallback (slower file ops)."
+    echo "  Install Rust (https://rustup.rs) to enable fast file ops."
+fi
+
+# Run the agent from the user's current directory, preserving cwd.
+exec "$VENV_PYTHON" "$SUPER_AGENT" "$@"
