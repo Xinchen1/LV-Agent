@@ -211,6 +211,7 @@ class ReasoningEngine:
         stream_callback: Optional[Callable] = None,
         token_callback: Optional[Callable[[int], None]] = None,
         code_mode: bool = False,
+        plan: Optional[Any] = None,
     ) -> ReasoningTrace:
         self.logger.info(f"Reasoning: strategy={strategy.value}, task={task[:50]}...")
 
@@ -252,6 +253,11 @@ class ReasoningEngine:
                 code_mode=code_mode,
                 extra_context=context or "",
             )
+
+            # 规划驱动: 将 plan 节点透传给执行上下文, 使循环可按节点完成度提前收敛。
+            if plan is not None and getattr(plan, "nodes", None):
+                ctx.plan_node_ids = [n.id for n in plan.nodes.values()
+                                     if getattr(n, "id", None)]
 
             # SuperAgentPolicy handles its own meta-loop;
             # 搜索型策略(SELF_CONSISTENCY / TREE_OF_THOUGHTS / MONTE_CARLO)走专门实现
