@@ -486,8 +486,9 @@ class RichStreamAdapter(StreamAdapter):
         if not self._tool_header_printed:
             print(f"\n{terminal.token('─ tools ─', 'rule')}", flush=True)
             self._tool_header_printed = True
-        # 紧凑 pending 前缀: 呼吸感绿色小圆点(绿 + 柔和 blink, 现代终端多已禁用闪烁, 故静默降级为绿点)
-        _PENDING_DOT = "\033[32;5m●\033[0m"
+        # 紧凑 pending 前缀: 极小绿色圆点 + 呼吸动效(绿 + ANSI blink=5)。
+        # 现代终端多已禁用闪烁, 此时静默降级为静态小绿点, 仍比原先的实心 ● 更克制。
+        _PENDING_DOT = "\033[32;5m•\033[0m"
         print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}", flush=True)
 
     def _print_tool_result(self, text: str) -> None:
@@ -684,26 +685,25 @@ class RichStreamAdapter(StreamAdapter):
     # ------------------------------------------------------------------
 
     class _StreamHighlighter:
-        # 精致柔和配色: 以标准 ANSI 色为主(终端主题决定明暗), 少量 256 色暖调
-        # 做点缀, 既有清晰层次又不刺眼, 适合长时间阅读。
-        CODE_BG = "\033[48;5;237m"
-        CODE_FG = "\033[38;5;255m"
+        # 配色策略(极简): 仅"标题"上色(# / ## 与 一、 章节), 其余一律纯文本。
+        # 用户要求: 模型输出里只保留标题颜色, 其他不要颜色标记。
+        CODE_BG = ""                    # 代码块: 去底色
+        CODE_FG = ""                    # 代码块: 去前景色
         RESET = "\033[0m"
-        BOLD = "\033[1m"
-        # 层级配色: 标题 > 章节 > 列表, 由强到弱
-        # 注: 不使用红/黄(用户要求去掉), 错误与重点用加粗/青色区分
-        H1 = "\033[1;36m"                # 一级标题: 加粗青
-        H2 = "\033[1;34m"                # 二级标题: 加粗蓝
-        SECTION = "\033[1;36m"           # 章节(一、/1.): 加粗青
-        LIST_MARK = "\033[2;36m"         # 列表符号: 暗青
-        INLINE = "\033[36m"              # 行内代码: 青色
-        URL = "\033[36;4m"              # 链接: 青下划线
-        PATH = "\033[34m"               # 文件/路径: 蓝
-        NUM = "\033[36m"                # 数字/统计: 青
-        ERR = "\033[1m"                 # 错误/失败: 加粗(不再用红)
-        KEY = "\033[1;36m"              # 重点词: 加粗青
-        QUOTE = "\033[2;90m"            # 引用/弱化: 暗灰
-        DIM = "\033[2m"
+        BOLD = ""                       # 加粗: 去色(纯文本)
+        # 仅标题/章节保留颜色, 形成清晰的层级锚点, 其余行零噪声
+        H1 = "\033[1;36m"               # 一级标题: 加粗青
+        H2 = "\033[1;34m"               # 二级标题: 加粗蓝
+        SECTION = "\033[1;36m"          # 章节(一、/1.): 加粗青
+        LIST_MARK = ""                  # 列表符号: 纯文本
+        INLINE = ""                     # 行内代码: 纯文本
+        URL = ""                        # 链接: 纯文本
+        PATH = ""                       # 文件/路径: 纯文本
+        NUM = ""                        # 数字/统计: 纯文本
+        ERR = ""                        # 错误/失败: 纯文本
+        KEY = ""                        # 重点词: 纯文本
+        QUOTE = ""                      # 引用/弱化: 纯文本
+        DIM = ""                        # 表格/代码围栏边框: 纯文本
         FLUSH_AT_CHARS = 24
         FORCE_FLUSH_AT_CHARS = 48
         WORD_BOUNDARY = set(" \t,.;:!?，。；：！？")
