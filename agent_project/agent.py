@@ -11,7 +11,7 @@ import re
 import json
 import time
 import threading
-from collections import OrderedDict
+from .cache import MemoCache, ToolResultCache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -61,9 +61,6 @@ class OpenMythosAgent:
     - 自我反思和改进
     """
 
-    # 缓存并发锁(类级, 任何实例—即使通过 object.__new__ 绕过 __init__—都可用)
-    _cache_lock = threading.Lock()
-
     def __init__(self, config: AgentConfig):
         self.config = config
 
@@ -111,12 +108,11 @@ class OpenMythosAgent:
         self.session_token_usage = {"total": 0, "stream": [], "last_call_tokens": 0}
 
         # 轻量级每轮缓存，避免对同一任务重复进行正则/文件扫描/策略匹配
-        self._method_cache: Dict[Tuple[str, ...], Any] = {}
+        self._method_cache = MemoCache()
 
         # 工具结果缓存，防止同一轮中重复执行相同工具调用（如 super loop 反复读取同一文件）
-        # 并发读写由类级 _cache_lock 保护(见文件顶部), 实例级无需再建一把锁。
-        # 用 OrderedDict 做容量上限(LRU 淘汰), 避免长任务内缓存只增不减。
-        self._tool_result_cache: "OrderedDict[str, ToolResult]" = OrderedDict()
+        # 容量上限(LRU 淘汰)由 ToolResultCache 内部维护, 避免长任务内缓存只增不减。
+        self._tool_result_cache = ToolResultCache()
 
         # Harness 能力内核（可选）：启用后所有工具调用先过策略门。
         # 必须在 _init_advanced_modules 之前构建，因为 ReasoningEngine 会引用它。
@@ -268,7 +264,7 @@ class OpenMythosAgent:
                     config=self.config,
                     loop_controller=None,
                     harness_kernel=self._harness_kernel,
-                    per_turn_cache=self._tool_result_cache,
+                    per_turn_cache=self._tool_result_cache.store,
                 )
                 _ready("reasoning")
             except Exception as e:
@@ -750,10 +746,7 @@ class OpenMythosAgent:
             return str(value)
 
         full_key = (namespace,) + tuple(_make_hashable(k) for k in key)
-        with self._cache_lock:
-            if full_key not in self._method_cache:
-                self._method_cache[full_key] = factory()
-            return self._method_cache[full_key]
+        return self._method_cache.get_or_set(full_key, factory)
 
     def _log_to_file(self, message: str):
         """Write a log record only to file handlers, bypassing console output."""
@@ -3319,9 +3312,8 @@ class OpenMythosAgent:
         from .reasoning import ReasoningStrategy
 
         # 新一轮开始时清空每轮缓存
-        with self._cache_lock:
-            self._method_cache.clear()
-            self._tool_result_cache.clear()
+        self._method_cache.clear()
+        self._tool_result_cache.clear()
 
         # 本会话轮次计数(进程级):启动后第一个问题走极速 Turbo,后续恢复正常深度
         is_session_first_turn = (getattr(self, '_session_turn_count', 0) == 0)
@@ -3673,7 +3665,7 @@ class OpenMythosAgent:
                 model_backend=self.backend,
                 config=self.config,
                 harness_kernel=self._harness_kernel,
-                per_turn_cache=self._tool_result_cache,
+                per_turn_cache=self._tool_result_cache.store,
             )
             exec_trace = engine.run(DirectPolicy(), direct_ctx)
             trajectory = {
@@ -4721,11 +4713,7 @@ class OpenMythosAgent:
         但仍显示工具调用框(tool_call/tool_result), 由调用方播放提炼后的回答。
         """
         cache_key = f"{action.tool_name}:{json.dumps(action.arguments, sort_keys=True, ensure_ascii=False)}"
-        with self._cache_lock:
-            cached = self._tool_result_cache.get(cache_key)
-            if cached is not None:
-                # 命中:标记为最近使用, 维持 LRU 顺序
-                self._tool_result_cache.move_to_end(cache_key)
+        cached = self._tool_result_cache.get(cache_key)
         if cached is not None:
             final_answer = cached.output.strip() if cached.success else f"工具调用失败: {cached.error or 'unknown error'}"
             if stream_callback:
@@ -4737,11 +4725,7 @@ class OpenMythosAgent:
         if stream_callback:
             self._emit_status(stream_callback, f"executing {action.tool_name}")
         tool_result = self._execute_tool(action)
-        with self._cache_lock:
-            self._tool_result_cache[cache_key] = tool_result
-            # 容量上限: 超出后淘汰最久未使用的条目, 防止内存只增不减
-            if len(self._tool_result_cache) > 512:
-                self._tool_result_cache.popitem(last=False)
+        self._tool_result_cache.put(cache_key, tool_result)
         if self.context_engine:
             self.context_engine.observe_tool_result(
                 action.tool_name,

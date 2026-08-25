@@ -9,6 +9,7 @@ sys.path.insert(0, ".")
 sys.path.insert(0, "agent_project")
 
 from agent_project.tools.file_ops import FileOpsTool
+from agent_project.cache import MemoCache
 
 
 def make_tool():
@@ -165,7 +166,7 @@ def test_file_modify_intent_routes_to_main_loop():
     """'给XX加功能'等修改意图应走主循环(simple=False)并识别为 file_ops 操作."""
     from agent_project.agent import OpenMythosAgent
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}; a._code_mode_override = False; a._current_task = ""
+    a._method_cache = MemoCache(); a._code_mode_override = False; a._current_task = ""
 
     # 修改意图 → 不走 fast path
     for t in [
@@ -994,7 +995,7 @@ def test_deep_research_pronoun_resolves_context():
     from agent_project.research_report import extract_research_topic
 
     a = object.__new__(OpenMythosAgent)
-    a._method_cache = {}
+    a._method_cache = MemoCache()
     a._code_mode_override = False
     a._current_task = ""
     a.logger = __import__("logging").getLogger("test")
