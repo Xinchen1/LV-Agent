@@ -1,10 +1,11 @@
 <div align="center">
 
-<img src="assets/screenshot.png" width="800" alt="LV Agent GitHub" />
+![Uploading 截屏2026-08-25 22.49.06.png…]()
+
 
 </div>
 # LV Agent
-![Uploading 截屏2026-08-25 22.49.06.png…]()
+
 
 
 > 终端原生智能体框架。Deep thinking, real tools.
