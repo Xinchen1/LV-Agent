@@ -3712,6 +3712,21 @@ class OpenMythosAgent:
         if getattr(self, "skill_engine", None):
             self.skill_engine.report_outcome(bool(trajectory.get('success')))
 
+        # ── Self-evolution (Line 3): after every turn, observe shadow metrics ──
+        if getattr(self, "_evolution_controller", None):
+            try:
+                decisions = self._evolution_controller.force_observe()
+                if decisions:
+                    for d in decisions:
+                        if d.action in ("promote", "rollback"):
+                            self.logger.info(
+                                "evolution: %s '%s' → %s (reason: %s)",
+                                d.action, d.capability,
+                                d.new_version, d.reason,
+                            )
+            except Exception as e:
+                self.logger.debug("Self-evolution observe: %s", e)
+
         return trajectory
 
     # ============ 辅助方法 ============

@@ -99,6 +99,77 @@ def _noop(_slot: "CapabilitySlot", _event: str, _data: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# SlotMetrics -- unified metric collector (replaces Fragment counters)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SlotMetrics:
+    """Aggregated per-slot metrics consumed by SelfEvolutionController.
+
+    Replaces the scattered _active_calls/_active_errors/_shadow_calls/...
+    fields with a single structured object.  All counts are monotonically
+    increasing; derived rates (error_rate, etc.) are computed from them.
+    """
+    active_calls: int = 0
+    active_errors: int = 0
+    active_latency_ms: float = 0.0      # sum of all call latencies
+    active_latency_max_ms: float = 0.0
+    _latency_samples: List[float] = field(default_factory=list)
+
+    shadow_calls: int = 0
+    shadow_errors: int = 0
+    shadow_latency_ms: float = 0.0
+
+    @property
+    def error_rate(self) -> float:
+        return self.active_errors / self.active_calls if self.active_calls else 0.0
+
+    @property
+    def shadow_error_rate(self) -> float:
+        return self.shadow_errors / self.shadow_calls if self.shadow_calls else 0.0
+
+    @property
+    def latency_p95_ms(self) -> float:
+        """P95 latency from recent samples (every 5th call sampled)."""
+        s = self._latency_samples
+        if not s:
+            return self.avg_latency_ms
+        s_sorted = sorted(s)
+        idx = int(len(s_sorted) * 0.95)
+        return s_sorted[min(idx, len(s_sorted) - 1)]
+
+    @property
+    def latency_p90_ms(self) -> float:
+        s = self._latency_samples
+        if not s:
+            return self.avg_latency_ms
+        s_sorted = sorted(s)
+        idx = int(len(s_sorted) * 0.90)
+        return s_sorted[min(idx, len(s_sorted) - 1)]
+
+    @property
+    def avg_latency_ms(self) -> float:
+        return (self.active_latency_ms / self.active_calls) if self.active_calls else 0.0
+
+    def reset_active(self) -> None:
+        self.active_calls = 0
+        self.active_errors = 0
+        self.active_latency_ms = 0.0
+        self.active_latency_max_ms = 0.0
+        self._latency_samples.clear()
+
+    def reset_shadow(self) -> None:
+        self.shadow_calls = 0
+        self.shadow_errors = 0
+        self.shadow_latency_ms = 0.0
+
+    def validate(self) -> None:
+        assert self.active_calls >= 0 and self.active_errors >= 0
+        assert self.shadow_calls >= 0 and self.shadow_errors >= 0
+        assert self.active_latency_ms >= 0.0
+
+
+# ---------------------------------------------------------------------------
 # CapabilitySlot
 # ---------------------------------------------------------------------------
 
@@ -136,10 +207,7 @@ class CapabilitySlot:
     _active_calls_in_flight: Set[int] = field(default_factory=set)
     _drain_timeout: float = 30.0
     _next_call_id: int = 0
-    _active_calls: int = 0
-    _active_errors: int = 0
-    _shadow_calls: int = 0
-    _shadow_errors: int = 0
+    _metrics: SlotMetrics = field(default_factory=SlotMetrics, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _event_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
     _events: Dict[str, List[Dict]] = field(
@@ -240,11 +308,10 @@ class CapabilitySlot:
             self.shadow = module
             self.shadow_disposer = getattr(module, "dispose", None)
             self.shadow_version = label
-            self._shadow_calls = 0
-            self._shadow_errors = 0
+            self._metrics.reset_shadow()
             logger.debug("slot '%s': shadow registered '%s'", self.name, label)
             return label
-        self._ensure_version_node(label, module, metadata=metadata)
+        self._upsert_version_node(label, module, metadata=metadata)
         old_state = self.state
         if old_state == SlotState.PENDING:
             self.state = SlotState.LOADING
@@ -253,27 +320,77 @@ class CapabilitySlot:
         else:
             self._install_module(module, label)
             self.state = SlotState.ACTIVE
-        self._active_calls = 0
-        self._active_errors = 0
+        # Metric resets happen in swap() (for actual module changes).
+        # register() preserves existing observations so that prior module
+        # performance carries over into the evaluation window.
         logger.debug("slot '%s': registered '%s' (%s -> ACTIVE)", self.name, label, old_state.value)
         return label
 
+
+    def _wrap_module(self, module: Any) -> Any:
+        """Wrap module.generate/generate_native to auto-record call metrics.
+
+        Also tracks per-call latency (ms) via ``record_latency``.  A guard flag
+        prevents double-wrapping when the same module object is swapped back in.
+        """
+        if module is None or not hasattr(module, 'generate'):
+            return module
+        if getattr(module, '_hotswap_wrapped', False):
+            return module  # already wrapped -- no double-counting
+        import functools
+        slot = self
+        orig_generate = module.generate
+        @functools.wraps(orig_generate)
+        def tracked_generate(*args, **kwargs):
+            t0 = time.monotonic()
+            success = False
+            try:
+                result = orig_generate(*args, **kwargs)
+                success = True
+                return result
+            except Exception:
+                raise
+            finally:
+                slot.record_call(success=success)
+                slot.record_latency((time.monotonic() - t0) * 1000.0)
+        module.generate = tracked_generate
+        if hasattr(module, 'generate_native'):
+            orig_gn = module.generate_native
+            @functools.wraps(orig_gn)
+            def tracked_generate_native(*args, **kwargs):
+                t0 = time.monotonic()
+                success = False
+                try:
+                    result = orig_gn(*args, **kwargs)
+                    success = True
+                    return result
+                except Exception:
+                    raise
+                finally:
+                    slot.record_call(success=success)
+                    slot.record_latency((time.monotonic() - t0) * 1000.0)
+            module.generate_native = tracked_generate_native
+        module._hotswap_wrapped = True
+        return module
+
     def _install_module(self, module: Any, label: str) -> None:
-        self.module = module
+        self.module = self._wrap_module(module)
         self.disposer = getattr(module, "dispose", None)
         self.version = label
-        self.shadow = None
-        self.shadow_disposer = None
-        self.shadow_version = ""
+        # Shadow is deliberately NOT cleared here -- shadow observation
+        # survives a swap so a promoted shadow keeps its metrics history,
+        # and a pending shadow stays evaluated by SelfEvolutionController.
         self._rollback_module = None
         self._rollback_disposer = None
         self._rollback_version = ""
         # Track in version graph so every swap is recorded.
-        self._ensure_version_node(label, module)
+        self._upsert_version_node(label, module)
 
-    def _ensure_version_node(self, label: str, module: Any = None,
+    def _upsert_version_node(self, label: str, module: Any = None,
                              metadata: Optional[Dict] = None,
                              parent: Optional[str] = None) -> VersionNode:
+        """Insert or update a version node.  Logs if an existing node is updated
+        (module replacement) so silent overwrites are always visible."""
         if label not in self._version_graph:
             node = VersionNode(
                 version=label, module=module,
@@ -284,6 +401,9 @@ class CapabilitySlot:
         else:
             node = self._version_graph[label]
             if module is not None:
+                if node.module is not None and node.module is not module:
+                    logger.info("slot '%s': version '%s' module replaced (upsert)",
+                                self.name, label)
                 node.module = module
             if metadata:
                 node.metadata.update(metadata)
@@ -324,16 +444,18 @@ class CapabilitySlot:
     def record_call(self, success: bool = True, *, for_shadow: bool = False) -> None:
         with self._lock:
             if for_shadow:
-                self._shadow_calls += 1
+                if self.shadow is self.module:
+                    return  # shadow == active (post-promote), skip to avoid double-count
+                self._metrics.shadow_calls += 1
                 if not success:
-                    self._shadow_errors += 1
+                    self._metrics.shadow_errors += 1
             else:
-                self._active_calls += 1
+                self._metrics.active_calls += 1
                 if not success:
-                    self._active_errors += 1
+                    self._metrics.active_errors += 1
                     self._error_window.append(time.monotonic())
-        if not for_shadow and self.shadow:
-            self._check_shadow_promotion()
+        # Shadow promotion is handled exclusively by SelfEvolutionController
+        # (force_observe / daemon loop), which carries audit-log + throttle.
         if not success and not for_shadow:
             self._check_circuit()
 
@@ -341,23 +463,21 @@ class CapabilitySlot:
         self.record_call(success=False, for_shadow=for_shadow)
         self._emit("error", {"error": str(error) if error else "unknown"})
 
-    def _check_shadow_promotion(self) -> None:
-        if self.shadow is None or self._shadow_calls < self.shadow_min_calls:
-            return
-        sr = self._shadow_errors / self._shadow_calls if self._shadow_calls else 0
-        ar = self._active_errors / self._active_calls if self._active_calls else 0
-        if sr <= self.shadow_max_error_rate:
-            logger.info("slot '%s': shadow '%s' healthy, promoting", self.name, self.shadow_version)
-            try:
-                self.swap(self.shadow, version=self.shadow_version)
-            except Exception as exc:
-                logger.warning("slot '%s': shadow promotion failed: %s", self.name, exc)
-        elif ar > 0.08 and self._active_calls > 0:
-            logger.warning("slot '%s': both degraded, force-swapping shadow", self.name)
-            try:
-                self.swap(self.shadow, version=self.shadow_version)
-            except Exception as exc:
-                logger.error("slot '%s': degraded swap failed: %s", self.name, exc)
+    def record_latency(self, latency_ms: float, *, for_shadow: bool = False) -> None:
+        """Record call latency for p95/p90 tracking (sampled in _wrap_module)."""
+        with self._lock:
+            if for_shadow:
+                self._metrics.shadow_latency_ms += latency_ms
+            else:
+                self._metrics.active_latency_ms += latency_ms
+                if latency_ms > self._metrics.active_latency_max_ms:
+                    self._metrics.active_latency_max_ms = latency_ms
+                # Sample every 5th call for percentile computation (bounded list)
+                if (self._metrics.active_calls % 5) == 0:
+                    s = self._metrics._latency_samples
+                    s.append(latency_ms)
+                    if len(s) > 2000:
+                        del s[: len(s) - 2000]  # cap at 2k samples
 
     # ---- circuit breaker ----
 
@@ -459,6 +579,14 @@ class CapabilitySlot:
             ) from load_err
 
         # Phase 3: ACTIVE (success)
+
+        # Reset observation stats for the new active module.
+        # Shadow stats are also reset because the shadow reference was for the
+        # previous active; a new swap opens a fresh observation window for both.
+        self._metrics.reset_active()
+        self._metrics.reset_shadow()
+        self._swap_start_time = 0  # consumed
+
         self._rollback_module = None
         self._rollback_disposer = None
         self._rollback_version = ""
@@ -485,8 +613,7 @@ class CapabilitySlot:
         self.shadow = None
         self.shadow_disposer = None
         self.shadow_version = ""
-        self._active_calls = 0
-        self._active_errors = 0
+        self._metrics.reset_active()
         self.state = SlotState.ACTIVE
         self._emit("rollback", {
             "error": str(error),
@@ -501,11 +628,7 @@ class CapabilitySlot:
     def force_swap(self, new_module: Any, *, version: Optional[str] = None) -> str:
         self.state = SlotState.UNLOADING
         self._dispose_current()
-        self.shadow = None
-        self.shadow_disposer = None
-        self.shadow_version = ""
-        self._shadow_calls = 0
-        self._shadow_errors = 0
+        # Shadow is preserved (same as regular swap); stats reset in swap().
         return self.register(new_module, version=version)
 
     def _drain_calls(self) -> bool:
@@ -525,8 +648,9 @@ class CapabilitySlot:
         if self.shadow is None:
             return False
         with self._lock:
-            sc, se = self._shadow_calls, self._shadow_errors
-            ac, ae = self._active_calls, self._active_errors
+            sm = self._metrics
+            sc, se = sm.shadow_calls, sm.shadow_errors
+            ac, ae = sm.active_calls, sm.active_errors
         sr = se / sc if sc > 0 else 0.0
         ar = ae / ac if ac > 0 else 0.0
         if sc < self.shadow_min_calls:
@@ -638,9 +762,7 @@ class CapabilitySlot:
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
-            ac, ae = self._active_calls, self._active_errors
-            sc, se = self._shadow_calls, self._shadow_errors
-            graph_size = len(self._version_graph)
+            m = self._metrics
             draining = len(self._active_calls_in_flight)
 
         def _summarize(module, ver, calls, errors):
@@ -657,12 +779,14 @@ class CapabilitySlot:
             "name": self.name,
             "state": self.state.value,
             "current_version": self.version,
-            "active": _summarize(self.module, self.version, ac, ae),
-            "shadow": _summarize(self.shadow, self.shadow_version, sc, se),
+            "active": _summarize(self.module, self.version,
+                                 m.active_calls, m.active_errors),
+            "shadow": _summarize(self.shadow, self.shadow_version,
+                                 m.shadow_calls, m.shadow_errors),
             "circuit_open": self.is_circuit_open(),
             "fallback": type(self._fallback_module).__name__ if self._fallback_module else None,
             "draining_calls": draining,
-            "version_graph_size": graph_size,
+            "version_graph_size": len(self._version_graph),
             "has_dispose": self.disposer is not None,
         }
 
@@ -677,8 +801,7 @@ class CapabilitySlot:
         self.shadow = module
         self.shadow_disposer = getattr(module, "dispose", None)
         self.shadow_version = label
-        self._shadow_calls = 0
-        self._shadow_errors = 0
+        self._metrics.reset_shadow()
         return label
 
 
@@ -1101,6 +1224,30 @@ def bridge_to_eventbus(hot: "HotSwapKernel", bus: "EventBus",
 # ---------------------------------------------------------------------------
 
 @dataclass
+class EvolutionPolicy:
+    """Multi-dimensional thresholds for self-evolution decisions.
+
+    Replaces the single-dimension ``error_rate`` comparison with a weighted
+    composite score that considers both error rate and latency.
+    """
+    err_weight: float = 0.7          # Weight for error rate in composite (0-1)
+    latency_weight: float = 0.3      # Weight for latency in composite (0-1)
+    latency_p95_ceiling_ms: float = 4000.0   # Latencies above this count as 1.0 (worst)
+    promote_min_score_delta: float = 0.15    # Min score gap to promote shadow
+    shadow_min_calls: int = 5
+    shadow_max_err: float = 0.02
+    rollback_err_thresh: float = 0.10
+    rollback_call_floor: int = 20
+    max_swaps_per_hour: int = 4
+
+    def _score(self, error_rate: float, latency_p95_ms: float) -> float:
+        """Composite score: 1.0 = perfect, 0.0 = worst."""
+        e = min(error_rate / self.shadow_max_err, 1.0)
+        l = min(latency_p95_ms / self.latency_p95_ceiling_ms, 1.0)
+        return 1.0 - (self.err_weight * e + self.latency_weight * l)
+
+
+@dataclass
 class EvolutionDecision:
     """One self-evolution decision for audit / display."""
     capability: str
@@ -1108,6 +1255,10 @@ class EvolutionDecision:
     reason: str = ""
     shadow_error_rate: float = 0.0
     active_error_rate: float = 0.0
+    shadow_score: float = 0.0
+    active_score: float = 0.0
+    shadow_latency_p95_ms: float = 0.0
+    active_latency_p95_ms: float = 0.0
     shadow_calls: int = 0
     active_calls: int = 0
     old_version: str = ""
@@ -1122,8 +1273,13 @@ class SelfEvolutionController:
     Lifecycle
     ---------
     observe  ->  check every capability's metrics
-                if shadow is healthy and better than active -> promote
-                if active degraded after last promotion -> rollback
+                if shadow composite score > active composite score by threshold -> promote
+                if active composite score < 0.5 -> rollback (if version graph allows)
+    Multi-dimensional evaluation
+    ----------------------------
+    Uses ``EvolutionPolicy`` to score modules on error rate (70%) + latency (30%)
+    rather than a single error_rate comparison.  Pass ``policy=`` for custom
+    weights; all individual params are still accepted as convenience overrides.
     Config
     ------
     observe_interval_s   How often to run the observation loop (default 60s).
@@ -1134,6 +1290,7 @@ class SelfEvolutionController:
     rollback_err_thresh  Rollback active if error rate exceeds this (0.10).
     rollback_call_floor  Only rollback after this many active calls (default 20).
     max_swaps_per_hour   Throttle evolution to avoid flapping (default 4).
+    policy               EvolutionPolicy for multi-dimensional scoring (optional).
     """
 
     def __init__(self, kernel: HotSwapKernel, registry: Optional[ModuleRegistry] = None,
@@ -1144,16 +1301,24 @@ class SelfEvolutionController:
                  rollback_err_thresh: float = 0.10,
                  rollback_call_floor: int = 20,
                  max_swaps_per_hour: int = 4,
+                 policy: Optional[EvolutionPolicy] = None,
                  audit_log: Optional[SwapAuditLog] = None):
         self.kernel = kernel
         self.reg = registry or kernel.reg
         self.observe_interval_s = observe_interval_s
-        self.shadow_min_calls = shadow_min_calls
-        self.shadow_max_err = shadow_max_err
+        self.policy = policy or EvolutionPolicy(
+            shadow_min_calls=shadow_min_calls,
+            shadow_max_err=shadow_max_err,
+            rollback_err_thresh=rollback_err_thresh,
+            rollback_call_floor=rollback_call_floor,
+            max_swaps_per_hour=max_swaps_per_hour,
+        )
+        self.shadow_min_calls = self.policy.shadow_min_calls
+        self.shadow_max_err = self.policy.shadow_max_err
         self.promote_better_than = promote_better_than
-        self.rollback_err_thresh = rollback_err_thresh
-        self.rollback_call_floor = rollback_call_floor
-        self.max_swaps_per_hour = max_swaps_per_hour
+        self.rollback_err_thresh = self.policy.rollback_err_thresh
+        self.rollback_call_floor = self.policy.rollback_call_floor
+        self.max_swaps_per_hour = self.policy.max_swaps_per_hour
         self.audit = audit_log
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -1219,10 +1384,13 @@ class SelfEvolutionController:
     # ---- shadow evaluation ----
 
     def _evaluate_shadow(self, cap: str, slot: CapabilitySlot) -> EvolutionDecision:
-        sc, se = slot._shadow_calls, slot._shadow_errors
-        ac, ae = slot._active_calls, slot._active_errors
+        sm = slot._metrics
+        sc, se = sm.shadow_calls, sm.shadow_errors
+        ac, ae = sm.active_calls, sm.active_errors
         sr = se / sc if sc > 0 else 0.0
         ar = ae / ac if ac > 0 else 0.0
+        s_lat = sm.latency_p95_ms
+        a_lat = sm.latency_p90_ms  # active uses p90 (fewer samples)
 
         if sc < self.shadow_min_calls:
             return EvolutionDecision(
@@ -1233,10 +1401,13 @@ class SelfEvolutionController:
                 old_version=slot.version, new_version=slot.shadow_version,
             )
 
-        shadow_healthy = sr <= self.shadow_max_err
-        active_worse = ar > sr * self.promote_better_than if sr > 0 else ar > self.shadow_max_err
+        p = self.policy
+        shadow_score = p._score(sr, s_lat)
+        active_score = p._score(ar, a_lat)
+        score_delta = shadow_score - active_score
+        shadow_healthy = sr <= p.shadow_max_err
 
-        if shadow_healthy and active_worse and self._can_swap():
+        if shadow_healthy and score_delta >= p.promote_min_score_delta and self._can_swap():
             try:
                 label = slot.swap(slot.shadow, version=slot.shadow_version)
                 old = slot.version
@@ -1244,11 +1415,16 @@ class SelfEvolutionController:
                 self._rollback_version_map[cap] = old
                 self._audit("shadow_promote", cap,
                             new_version=label, old_version=old,
-                            error_rate_s=sr, error_rate_a=ar)
+                            error_rate_s=sr, error_rate_a=ar,
+                            shadow_score=round(shadow_score, 3),
+                            active_score=round(active_score, 3))
                 return EvolutionDecision(
                     capability=cap, action="promote",
-                    reason=f"shadow healthy (err={sr:.3%}), active worse (err={ar:.3%})",
+                    reason=(f"shadow qualified (score={shadow_score:.3f} vs "
+                            f"{active_score:.3f}, delta={score_delta:.3f})"),
                     shadow_error_rate=sr, active_error_rate=ar,
+                    shadow_score=shadow_score, active_score=active_score,
+                    shadow_latency_p95_ms=s_lat, active_latency_p95_ms=a_lat,
                     shadow_calls=sc, active_calls=ac,
                     old_version=old, new_version=label,
                 )
@@ -1258,20 +1434,26 @@ class SelfEvolutionController:
                     capability=cap, action="skip",
                     reason=f"promote failed: {exc}",
                     shadow_error_rate=sr, active_error_rate=ar,
+                    shadow_score=shadow_score, active_score=active_score,
+                    shadow_latency_p95_ms=s_lat, active_latency_p95_ms=a_lat,
                     shadow_calls=sc, active_calls=ac,
                     old_version=slot.version, new_version=slot.shadow_version,
                 )
 
         if not shadow_healthy:
-            reason = f"shadow unhealthy (err={sr:.3%} > {self.shadow_max_err:.3%})"
+            reason = f"shadow unhealthy (err={sr:.3%} > {p.shadow_max_err:.3%})"
             slot.shadow = None
             slot.shadow_disposer = None
             slot.shadow_version = ""
         else:
-            reason = f"shadow ok but not clearly better ({sr:.3%} vs {ar:.3%})"
+            reason = (f"shadow score {shadow_score:.3f} not enough above "
+                      f"active {active_score:.3f} (delta={score_delta:.3f})")
         return EvolutionDecision(
             capability=cap, action="observe",
-            reason=reason, shadow_error_rate=sr, active_error_rate=ar,
+            reason=reason,
+            shadow_error_rate=sr, active_error_rate=ar,
+            shadow_score=shadow_score, active_score=active_score,
+            shadow_latency_p95_ms=s_lat, active_latency_p95_ms=a_lat,
             shadow_calls=sc, active_calls=ac,
             old_version=slot.version, new_version=slot.shadow_version,
         )
@@ -1279,12 +1461,14 @@ class SelfEvolutionController:
     # ---- rollback evaluation ----
 
     def _is_active_degraded(self, cap: str, slot: CapabilitySlot) -> bool:
-        ac = slot._active_calls
-        ae = slot._active_errors
+        m = slot._metrics
+        ac = m.active_calls
         if ac < self.rollback_call_floor:
             return False
-        ar = ae / ac if ac > 0 else 0.0
-        return ar >= self.rollback_err_thresh
+        ar = m.error_rate
+        p = self.policy
+        active_score = p._score(ar, m.latency_p90_ms if m.latency_p90_ms > 0 else m.avg_latency_ms)
+        return ar >= p.rollback_err_thresh or active_score < 0.5
 
     def _evaluate_rollback(self, cap: str, slot: CapabilitySlot) -> EvolutionDecision:
         prev = self._rollback_version_map.get(cap)
@@ -1294,20 +1478,25 @@ class SelfEvolutionController:
                 reason="no rollback target available",
                 old_version=slot.version,
             )
-        ac = slot._active_calls
-        ae = slot._active_errors
-        ar = ae / ac if ac > 0 else 0.0
+        m = slot._metrics
+        ac = m.active_calls
+        ar = m.error_rate
+        p = self.policy
+        active_score = p._score(ar, m.latency_p90_ms if m.latency_p90_ms > 0 else m.avg_latency_ms)
         try:
             ok = slot.rollback_to(prev)
             if ok:
                 self._record_swap()
                 self._audit("auto_rollback", cap,
                             old_version=slot.version, new_version=prev,
-                            error_rate_a=ar)
+                            error_rate_a=ar,
+                            active_score=round(active_score, 3))
                 return EvolutionDecision(
                     capability=cap, action="rollback",
-                    reason=f"active degraded (err={ar:.3%} >= {self.rollback_err_thresh:.3%})",
-                    active_error_rate=ar, active_calls=ac,
+                    reason=(f"active degraded (score={active_score:.3f}, "
+                            f"err={ar:.3%})"),
+                    active_error_rate=ar, active_score=active_score,
+                    active_calls=ac, active_latency_p95_ms=m.latency_p95_ms,
                     old_version=slot.version, new_version=prev,
                 )
         except Exception as exc:
@@ -1315,7 +1504,7 @@ class SelfEvolutionController:
         return EvolutionDecision(
             capability=cap, action="observe",
             reason=f"degraded but rollback failed",
-            active_error_rate=ae / ac if ac else 0,
+            active_error_rate=ar, active_score=active_score,
             active_calls=ac, old_version=slot.version,
         )
 

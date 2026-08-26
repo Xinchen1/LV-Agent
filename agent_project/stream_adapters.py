@@ -486,8 +486,8 @@ class RichStreamAdapter(StreamAdapter):
         if not self._tool_header_printed:
             print(f"\n{terminal.token('─ tools ─', 'rule')}", flush=True)
             self._tool_header_printed = True
-        # 紧凑 pending 前缀: 极小绿色圆点 + 呼吸动效(绿 + ANSI blink=5)。
-        # 现代终端多已禁用闪烁, 此时静默降级为静态小绿点, 仍比原先的实心 ● 更克制。
+        # 紧凑 pending 前缀: 极小绿色圆点 + 呼吸动效(绿 + ANSI blink=5)
+        # 工具执行中闪烁，完成后转为静态
         _PENDING_DOT = "\033[32;5m•\033[0m"
         print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}", flush=True)
 
