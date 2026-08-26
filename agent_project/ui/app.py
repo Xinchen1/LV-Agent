@@ -270,13 +270,15 @@ class CLIApp:
         status = r.success("ok") if ok else r.error("failed")
         meta_parts = [
             status,
-            r.dim(f"{loops} loops"),
-            r.dim(f"{steps} steps"),
-            r.dim(f"{duration:.1f}s"),
-            r.dim(f"{tokens_display} tokens"),
+            r.style(f"{loops} loops", "38;5;245"),
+            r.style(f"{steps} steps", "38;5;245"),
+            r.style(f"{duration:.1f}s", "38;5;245"),
+            r.style(f"{tokens_display} tokens", "38;5;245"),
         ]
-        r.print(" " + r.dim("· " + "─" * 38 + " ·"))
-        r.print(" " + r.dim(" · ").join(meta_parts))
+        r.print(" " + r.style("· " + "─" * 38 + " ·", "38;5;245"))
+        # Join with muted separator, keeping status color
+        line = meta_parts[0] + "".join([r.style(" · ", "38;5;245") + part for part in meta_parts[1:]])
+        r.print(" " + line)
 
 
 # ------------------------------------------------------------------------------
