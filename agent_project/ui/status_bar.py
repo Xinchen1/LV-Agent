@@ -89,7 +89,7 @@ class StatusBar:
             left = "…" + left[-(left_budget - 1):]
         pad = max(1, width - len(left) - mid_len - right_len)
         line = left + " " * pad + ctx_mid + right
-        return self.r.style(line[:width], _DIM)
+        return self.r.style(line[:width], _MUTED)
 
     # ------------------------------------------------------------------
     # Helpers

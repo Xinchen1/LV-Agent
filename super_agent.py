@@ -1643,8 +1643,86 @@ class SuperAgentCLI:
             elif user_input.lower() == '/status':
                 if self.agent:
                     self.agent.print_module_status()
+                    hk = getattr(self.agent, '_hotswap_kernel', None)
+                    if hk:
+                        print()
+                        for cap in hk.reg.list_capabilities():
+                            st = hk.status(cap)
+                            if isinstance(st, dict) and 'state' in st:
+                                print(f"  {terminal.style(cap, '1')}  {terminal.style(st['state'], '2')}  v={st.get('current_version','?')}")
                 else:
                     print(" agent not initialized")
+                continue
+
+            elif user_input.lower().startswith('/swap '):
+                parts = user_input[5:].strip().split(None, 1)
+                if not parts:
+                    print(" usage: /swap <capability> [version_label]")
+                    hk = getattr(self.agent, '_hotswap_kernel', None)
+                    if hk:
+                        caps = hk.reg.list_capabilities()
+                        print(f"  capabilities: {', '.join(caps)}")
+                    continue
+                cap = parts[0]
+                label = parts[1] if len(parts) > 1 else None
+                hk = getattr(self.agent, '_hotswap_kernel', None)
+                if not hk:
+                    print(" hotswap kernel not available")
+                    continue
+                try:
+                    slot = hk.reg.get_slot(cap)
+                    info = slot.status()
+                    print(f"  {terminal.style(cap, '1')} current: {info.get('current_version','?')} state={info.get('state','?')}")
+                    if 'shadow' in info and info['shadow']:
+                        print(f"  shadow: {info['shadow'].get('version','?')} calls={info['shadow'].get('calls',0)}")
+                    print("  use /shadow <cap> <module_ref> to test a replacement before swapping")
+                except KeyError:
+                    print(f"  capability '{cap}' not found")
+                    caps = hk.reg.list_capabilities()
+                    print(f"  available: {', '.join(caps)}")
+                continue
+
+            elif user_input.lower().startswith('/shadow '):
+                parts = user_input[7:].strip().split(None, 2)
+                if len(parts) < 2:
+                    print(" usage: /shadow <capability> <url_or_path_or_key>")
+                    continue
+                cap = parts[0]
+                arg = parts[1]
+                hk = getattr(self.agent, '_hotswap_kernel', None)
+                if not hk:
+                    print(" hotswap kernel not available")
+                    continue
+                try:
+                    slot = hk.reg.get_slot(cap)
+                    cur_ver = slot.version
+                    print(f"  setting shadow on {cap} (current: {cur_ver})")
+                    # Try to load from arg: could be a URL, model name, or config key
+                    backend_cfg = getattr(self.config, 'openai', {})
+                    if hasattr(arg, 'split') and '/' in arg:
+                        # Like openai/gpt-4o or a URL
+                        parts2 = arg.split('/')
+                        if len(parts2) == 2 and parts2[0] in ('openai', 'anthropic', 'deepseek'):
+                            backend = parts2[0]
+                            model = parts2[1]
+                            from agent_project.model_backends import OpenAIBackend
+                            shadow_mod = OpenAIBackend(
+                                api_key=getattr(getattr(self.config, backend, {}), 'get', lambda k, d=None: None)('api_key') or backend_cfg.get('api_key'),
+                                base_url=getattr(getattr(self.config, backend, {}), 'get', lambda k, d=None: None)('base_url', backend_cfg.get('base_url', '')),
+                                model=model,
+                            )
+                        else:
+                            print(f"  shadow config reference: {arg}")
+                            continue
+                    else:
+                        print(f"  shadow reference: {arg} (manual registration required)")
+                        continue
+                    hk.set_shadow(cap, shadow_mod, version=f'shadow-{arg.replace("/","-")}')
+                    info = slot.status()
+                    print(f"  shadow registered: v={info.get('shadow',{}).get('version','?')}")
+                    print("  SelfEvolutionController will evaluate after enough calls")
+                except Exception as e:
+                    print(f"  shadow setup failed: {e}")
                 continue
 
             elif user_input.lower() == '/tools':
