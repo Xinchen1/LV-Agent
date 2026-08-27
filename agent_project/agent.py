@@ -13,7 +13,19 @@ import time
 import threading
 from .cache import MemoCache, ToolResultCache
 from .intent import is_folder_read_intent, is_pure_nudge, is_ultra_short_ambiguous
-from .pure_utils import edit_distance, skip_tool_retry, tool_returns_listing
+from .pure_utils import edit_distance as _edit_distance_ref
+from .utils.agent_utils import (
+    task_tokens,
+    task_similarity,
+    merge_related_tasks,
+    is_continuation_query,
+    needs_tool_summary,
+    tool_returns_listing,
+    skip_tool_retry,
+    correct_tool_name,
+    extract_search_keywords,
+    ground_search_query,
+)
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -1401,10 +1413,6 @@ class OpenMythosAgent:
         except Exception as e:
             self.logger.debug(f"llm intent classify failed: {e}")
             return None
-
-    @staticmethod
-    def _is_pure_nudge(task: str) -> bool:
-        return is_pure_nudge(task)
 
     def _last_user_task(self) -> Optional[str]:
         """返回历史中最近一条用户消息(排除纯催促/命令词)."""
@@ -3022,64 +3030,21 @@ class OpenMythosAgent:
                     fixed[k] = ""
         return fixed
 
-    # 任务相似度: 过滤常见动作/虚词, 避免"分析一下X"与"分析一下Y"被误判相关
-    _TASK_STOP = set(
-        "调研 分析 比较 设计 实现 部署 调试 测试 优化 搜索 查找 计算 解释 总结 翻译 推荐 评估 研究 "
-        "查看 告诉 帮我 请问 一下 一个 这个 那个 这些 那些 然后 以及 还有 现在 今天 目前 最新 情况 "
-        "内容 资料 信息 报告 输出 生成 列出 介绍 说明 关于 对于 进行 需要 是否 什么 怎么 如何 为什么 "
-        "给我 继续 再 写 写一 写个".split()
-    )
-    # 动作/虚词字符: 在组双字前先剔除, 聚焦"主题内容"而非"动作"
-    _TASK_STOP_CHARS = set(
-        "的了么呢吗吧啊呀哦嗯好对是而在与及为之于以从到把被让给就都也还再这那请问帮我你它"
-        "分分析析一一上下看看查算写做找说说讲讲谈问要能会想希望需要请叫个位种些样次回遍点"
-    )
 
     @staticmethod
     def task_tokens(task: str) -> set:
-        """把任务拆成"主题特征": 英文词 + 由内容字符组成的中文双字(剔除动作/虚词)."""
-        task = (task or "").lower()
-        toks = set(re.findall(r"[a-z0-9]+", task))
-        cjk = [c for c in re.findall(r"[\u4e00-\u9fff]", task) if c not in OpenMythosAgent._TASK_STOP_CHARS]
-        for i in range(len(cjk) - 1):
-            bg = cjk[i] + cjk[i + 1]
-            if bg not in OpenMythosAgent._TASK_STOP:
-                toks.add(bg)
-        return toks
+        """把任务拆成"主题特征": 英文词 + 由内容字符组成的中文双字."""
+        return task_tokens(task)  # delegate to utils.agent_utils
 
     @classmethod
     def task_similarity(cls, a: str, b: str) -> float:
-        """两个任务的相关度(0-1). 共享英文主题词(AI/Python等)视为强关联."""
-        ta, tb = cls.task_tokens(a), cls.task_tokens(b)
-        if not ta or not tb:
-            return 0.0
-        shared = ta & tb
-        if not shared:
-            return 0.0
-        sim = len(shared) / min(len(ta), len(tb))
-        # 共享一个明确的英文主题词(≥2字母) = 强主题关联
-        if any(t.isascii() and len(t) >= 2 for t in shared):
-            sim = max(sim, 0.3)
-        return sim
+        """两个任务的相关度(0-1)."""
+        return task_similarity(a, b)  # delegate to utils.agent_utils
 
     @classmethod
     def merge_related_tasks(cls, tasks: List[str], threshold: float = 0.2) -> List[List[str]]:
-        """多段任务分组: 相邻且相关度 >= threshold 的任务合并成一组.
-
-        - 相关(同一主题/目标) → 合并为一次执行, 避免重复搜索/推理
-        - 无关 → 各自成组, 排队依次执行
-        """
-        groups: List[List[str]] = []
-        for t in tasks:
-            t = (t or "").strip()
-            if not t:
-                continue
-            if groups and cls.task_similarity(groups[-1][-1], t) >= threshold:
-                groups[-1].append(t)
-            else:
-                groups.append([t])
-        return groups
-
+        """多段任务分组: 相邻且相关度 >= threshold 的任务合并成一组."""
+        return merge_related_tasks(tasks, threshold)  # delegate to utils.agent_utils
     def _create_stream_router(self, user_callback, reasoning_parts, content_parts):
         """创建流式回调路由器,支持 native reasoning 和 <think> 标签.
 
