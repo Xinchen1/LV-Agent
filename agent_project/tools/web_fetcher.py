@@ -114,6 +114,11 @@ class WebContentFetcher:
             ct = resp.headers.get("Content-Type", "")
             if "html" not in ct.lower() and "text" not in ct.lower():
                 return None
+            try:
+                if resp.encoding:
+                    resp.encoding = resp.apparent_encoding or resp.encoding
+            except Exception:
+                pass
             return self._extract_text(resp.text)
         except Exception:
             return None
