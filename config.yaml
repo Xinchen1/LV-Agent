@@ -254,7 +254,7 @@ display: {}
 agent:
   backend: openai
   openai:
-    api_key: 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
+    api_key: null
     base_url: https://integrate.api.nvidia.com/v1
     model: nvidia/nemotron-3-super-120b-a12b
     temperature: 1.0
