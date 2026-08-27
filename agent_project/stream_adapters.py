@@ -337,7 +337,7 @@ class RichStreamAdapter(StreamAdapter):
         self._total_tokens = 0
         self._start_time = time.time()
         self._last_render = 0.0
-        self._render_interval = 0.10
+        self._render_interval = 0.25
         self._render_lock = threading.Lock()
         self._stop_spinner_event = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
