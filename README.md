@@ -204,3 +204,31 @@ cp config.example.yaml config.yaml
 ---
 
 > 项目在成长，期待与各位交流。
+
+---
+
+## About
+
+LV Agent is a self-contained AI agent system built around three principles: intelligent planning, native tool use, and long-horizon memory. It operates against OpenAI-compatible APIs or runs fully offline with local LLMs.
+
+### Core features
+
+- Reasoning-first workflow with automatic re-planning
+- Native tool integration: web search, file system, shell, and MCP servers
+- Holographic memory for durable facts and recent context
+- Terminal-first UX with streaming and rich rendering
+
+### Modes
+
+- **API** (recommended) — OpenRouter or OpenAI-compatible endpoints
+- **Local** (experimental) — Ollama + `qwen2.5-coder:7b`, no internet required
+
+### Links
+
+- **Repository:** https://github.com/Xinchen1/LV-Agent
+- **Recommended backend:** DeepSeek Chat / DeepSeek Reasoner
+- **Local backend:** Ollama + `qwen2.5-coder:7b`
+
+---
+
+> Thank you for your interest.
