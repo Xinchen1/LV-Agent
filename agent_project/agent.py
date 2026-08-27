@@ -12,8 +12,7 @@ import json
 import time
 import threading
 from .cache import MemoCache, ToolResultCache
-from .intent import is_folder_read_intent, is_pure_nudge, is_ultra_short_ambiguous
-from .pure_utils import edit_distance as _edit_distance_ref
+from .intent import is_folder_read_intent, is_ultra_short_ambiguous
 from .utils.agent_utils import (
     task_tokens,
     task_similarity,
