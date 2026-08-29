@@ -357,9 +357,13 @@ class DynamicReplanner:
 
     def replan(self, plan: "Plan", task: str, broken: str) -> "tuple":
         """Return (updated_plan, note). Falls back to (original_plan, '') on any failure."""
+        # 快速路径: 高置信度失败模式 → 直接套用确定性修订, 免一次 LLM 往返(显著缩短重试耗时)
+        fast = self._fast_fix(plan, broken)
+        if fast is not None:
+            return fast
         prompt = self._build_replan_prompt(plan, task, broken)
         try:
-            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=600)
+            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=350)
         except Exception:
             return plan, ""
         if isinstance(raw, str):
@@ -380,6 +384,34 @@ class DynamicReplanner:
         new_plan = self._apply_changes(plan, data)
         note = data.get("note", "plan adjusted based on observation")
         return new_plan, note
+
+    def _fast_fix(self, plan: "Plan", broken: str):
+        """对常见失败做零延迟的确定性修订; 无法高置信匹配时返回 None 走 LLM 路径."""
+        b = (broken or "").lower()
+        additions = []
+        if "command not found" in b:
+            additions.append(("task_path", "Locate the command and fix PATH or use its absolute path", "bash"))
+        elif any(s in b for s in ("no such file", "file not found", "找不到", "不存在", "filenotfounderror", "no such directory")):
+            additions.append(("task_locate", "Locate the target path with glob/grep, then read the correct file", "glob"))
+        elif any(s in b for s in ("modulenotfounderror", "importerror", "module not found", "无法导入")):
+            additions.append(("task_dep", "Verify the dependency is installed (pip/venv/PATH) and the import path is correct", "bash"))
+        elif any(s in b for s in ("permission denied", "拒绝访问", "denied")):
+            additions.append(("task_perm", "Fix file/command permissions (chmod) or run with the correct user", "bash"))
+        if not additions:
+            return None
+        import copy
+        nodes = {nid: copy.copy(n) for nid, n in plan.nodes.items()}
+        existing = set(nodes.keys())
+        used = []
+        for nid, desc, hint in additions:
+            rid = nid
+            while rid in existing:
+                rid = rid + "_"
+            nodes[rid] = PlanNode(node_id=rid, description=desc, dependencies=[], assigned_loops=2, tool_hint=hint)
+            existing.add(rid)
+            used.append(rid)
+        note = "auto recovery (no LLM): " + "; ".join(f"added {rid}" for rid in used)
+        return Plan(nodes), note
 
     def _apply_changes(self, plan: "Plan", data: Dict[str, Any]) -> "Plan":
         import copy
