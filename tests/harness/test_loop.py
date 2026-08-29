@@ -1,4 +1,11 @@
-"""End-to-end loop behaviour with a scripted fake sampler.
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 
 These tests are the architecture's proof: a full agent run -- model calls,
 tool dispatch, policy denials, budgets, pause/resume -- driven entirely

@@ -1,4 +1,10 @@
-#!/bin/bash
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 # LV Agent 一键安装脚本
 # 用法: ./install.sh
 

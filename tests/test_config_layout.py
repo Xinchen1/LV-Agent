@@ -1,4 +1,11 @@
-"""Config 布局回归测试: 平铺式(config.yaml)与 agent 包装式都需正确加载 backend."""
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 import os
 import sys
 import tempfile

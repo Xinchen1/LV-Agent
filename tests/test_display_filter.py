@@ -1,4 +1,11 @@
-"""Tests for display-layer filtering: tool-result compression and leaked-English suppression."""
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 
 import json
 
