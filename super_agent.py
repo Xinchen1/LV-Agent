@@ -774,6 +774,22 @@ class SuperAgentCLI:
             "log": [],          # 过程日志(最近 12 条)
             "recent_queries": [],
         }
+        _last_state_hash = [None]
+
+        def _maybe_refresh():
+            if live is None:
+                return
+            try:
+                current_hash = hash((
+                    live_state["stage"], live_state["round"], live_state["round_total"],
+                    live_state["sources"], live_state["queries"], live_state["tokens"],
+                    tuple(live_state["log"][-8:])
+                ))
+                if current_hash != _last_state_hash[0]:
+                    _last_state_hash[0] = current_hash
+                    live.update(_build_research_panel(), refresh=True)
+            except Exception:
+                pass
 
         def _log(msg: str):
             live_state["log"].append(msg)
@@ -872,7 +888,6 @@ class SuperAgentCLI:
                 tok = str(token)
                 if kind == "status":
                     live_state["msg"] = tok[:100]
-                    # 解析阶段/轮次/来源
                     m = re.search(r"research round (\d+)/(\d+)", tok)
                     if m:
                         live_state["round"], live_state["round_total"] = int(m.group(1)), int(m.group(2))
@@ -902,7 +917,7 @@ class SuperAgentCLI:
                     _log(tok[:90])
                 elif kind == "tool_result":
                     _log(tok[:90])
-                live.update(_build_research_panel())
+                _maybe_refresh()
                 return
             if kind == "status":
                 adapter.emit_status(token)
@@ -920,7 +935,7 @@ class SuperAgentCLI:
                 adapter.add_tokens(tokens)
             if live is not None and is_deep_research:
                 live_state["tokens"] = live_state.get("tokens", 0) + int(tokens)
-                live.update(_build_research_panel())
+                _maybe_refresh()
 
         kwargs['stream_callback'] = stream_callback
         kwargs['token_callback'] = token_callback
@@ -940,16 +955,13 @@ class SuperAgentCLI:
             if is_deep_research and sys.stdout.isatty():
                 try:
                     from rich.live import Live
-                    live = Live(_build_research_panel(), console=console, refresh_per_second=8, transient=True)
+                    live = Live(_build_research_panel(), console=console, refresh_per_second=4, transient=True, auto_refresh=False)
                     live.start()
-                    # 后台刷新线程: 即使无新事件也持续刷新(计时/动画), 避免看起来"卡死"
+                    # 后台刷新线程: 仅当状态真正变化时才重建面板, 大幅降低 CPU
                     def _ticker():
                         while live is not None and self._running:
-                            try:
-                                live.update(_build_research_panel())
-                            except Exception:
-                                pass
-                            time.sleep(0.5)
+                            _maybe_refresh()
+                            time.sleep(0.33)  # ~3 FPS
                     live_refresher = threading.Thread(target=_ticker, daemon=True)
                     live_refresher.start()
                 except Exception:
