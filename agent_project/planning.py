@@ -309,3 +309,99 @@ def create_simple_plan(task: str) -> Plan:
 
 # Backwards-compatible aliases used by older tests and external callers.
 TaskNode = PlanNode
+
+
+class DynamicReplanner:
+    """运行时根据工具观察结果动态修订 DAG 计划.
+
+    触发: 当最近一次工具返回呈现"前置条件失败"(文件不存在/无权限/模块缺失/
+    404/连接拒绝等)时, 调用 LLM 基于当前计划与失败观察提出修订(增/删/重排节点),
+    并就地生成新的 Plan。修订仅在确实出现失败信号时发生, 且受 max_replans 预算限制。
+    """
+
+    FAILURE_SIGNALS = (
+        "no such file", "not found", "does not exist", "permission denied",
+        "modulenotfounderror", "importerror", "filenotfounderror", "404",
+        "connection refused", "command not found", "拒绝访问", "找不到",
+        "不存在", "denied", "traceback (most recent call last)",
+    )
+
+    def __init__(self, model_backend: Any, config: Any = None, max_replans: int = 2):
+        self.model = model_backend
+        self.config = config
+        self.max_replans = max_replans
+
+    def should_replan(self, observations: List[str]) -> bool:
+        """Heuristic: 最近观察是否暴露了前置条件失败."""
+        if not observations:
+            return False
+        recent = " ".join(observations[-2:]).lower()
+        return any(sig in recent for sig in self.FAILURE_SIGNALS)
+
+    def _build_replan_prompt(self, plan: "Plan", task: str, broken: str) -> str:
+        plan_md = plan.to_markdown()
+        return (
+            "You are a planning adapter. The execution of the following plan hit a blocker.\n\n"
+            f"TASK: {task}\n\n"
+            f"CURRENT PLAN:\n{plan_md}\n\n"
+            f"BLOCKER OBSERVATION:\n{broken}\n\n"
+            "Propose minimal changes so the plan can proceed. You may add prerequisite/recovery "
+            "steps, remove impossible steps, or reorder. Keep existing node ids that stay.\n"
+            "Return ONLY a JSON object:\n"
+            '{"analysis":"...",'
+            '"add":[{"id":"task_N","description":"...","dependencies":["task_0"],"tool_hint":"..."}],'
+            '"remove":["task_X"],'
+            '"note":"short summary of changes"}\n'
+            "Use new unique ids (e.g. task_7) for added nodes."
+        )
+
+    def replan(self, plan: "Plan", task: str, broken: str) -> "tuple":
+        """Return (updated_plan, note). Falls back to (original_plan, '') on any failure."""
+        prompt = self._build_replan_prompt(plan, task, broken)
+        try:
+            raw = self.model.generate(prompt, n_loops=1, temperature=0.2, max_tokens=600)
+        except Exception:
+            return plan, ""
+        if isinstance(raw, str):
+            text = raw
+        else:
+            try:
+                text = self.model.tokenizer.decode(raw)
+            except Exception:
+                text = str(raw)
+        try:
+            s = text.find("{")
+            e = text.rfind("}") + 1
+            data = json.loads(text[s:e]) if s != -1 and e > s else {}
+        except Exception:
+            return plan, ""
+        if not isinstance(data, dict):
+            return plan, ""
+        new_plan = self._apply_changes(plan, data)
+        note = data.get("note", "plan adjusted based on observation")
+        return new_plan, note
+
+    def _apply_changes(self, plan: "Plan", data: Dict[str, Any]) -> "Plan":
+        import copy
+
+        nodes = {nid: copy.copy(n) for nid, n in plan.nodes.items()}
+        for rid in data.get("remove", []) or []:
+            nodes.pop(rid, None)
+        # 清理指向已删除节点的悬挂依赖
+        existing = set(nodes.keys())
+        for n in nodes.values():
+            n.dependencies = [d for d in n.dependencies if d in existing]
+        # 新增节点(确保 id 唯一)
+        for item in data.get("add", []) or []:
+            nid = item.get("id")
+            if not nid or nid in nodes:
+                continue
+            deps = [d for d in item.get("dependencies", []) if d in existing]
+            nodes[nid] = PlanNode(
+                node_id=nid,
+                description=item.get("description", "recovery step"),
+                dependencies=deps,
+                assigned_loops=int(item.get("loops", 2)),
+                tool_hint=item.get("tool_hint"),
+            )
+        return Plan(nodes)

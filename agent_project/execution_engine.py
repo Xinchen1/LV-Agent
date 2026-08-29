@@ -133,9 +133,13 @@ class ExecutionContext:
     monitor_rounds: int = 0  # 监控检查轮数(限制频率)
 
     # 规划驱动: 带 plan 的任务, 模型完成某节点后输出 DONE[<node_id>],
-    # 全部覆盖即可提前收敛(不必等步数耗尽)。
+    # 引擎据此提前收敛(全部节点完成即停)。
     plan_node_ids: List[str] = field(default_factory=list)
     plan_done: Set[str] = field(default_factory=set)
+    # 动态重规划: 运行中对 DAG 的引用与修订状态(由 reasoning 层注入 live Plan)
+    plan: Optional[Any] = None
+    plan_update_note: str = ""
+    replan_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +393,60 @@ class ConvergenceChecker:
             return True
 
         return False
+
+
+class DynamicReplanController:
+    """ExecutionEngine 运行时动态重规划的钩子.
+
+    在每轮工具执行后检查观察结果; 若暴露前置条件失败(文件不存在/无权限/
+    模块缺失/404 等), 调用 DynamicReplanner 基于当前 Plan 与失败观察修订 DAG,
+    并把新计划回注到下一轮提示, 使模型即时改走新路径。
+    """
+
+    def __init__(self, engine: "ExecutionEngine"):
+        self.engine = engine
+
+    def _cfg(self, key: str, default):
+        cfg = getattr(self.engine.config, "planning", None) or {}
+        return cfg.get(key, default)
+
+    def maybe_replan(self, ctx: ExecutionContext, step_number: int) -> None:
+        if not self._cfg("dynamic_replan", False):
+            return
+        if ctx.replan_count >= int(self._cfg("max_replans", 2)):
+            return
+        live_plan = getattr(ctx, "plan", None)
+        if not live_plan or not hasattr(live_plan, "nodes"):
+            return
+        recent = ctx.observations[-2:]
+        try:
+            from .planning import DynamicReplanner
+        except Exception:
+            return
+        replanner = DynamicReplanner(self.engine.model, self.engine.config)
+        if not replanner.should_replan(recent):
+            return
+        broken = recent[-1]
+        new_plan, note = replanner.replan(live_plan, ctx.task, broken)
+        if new_plan is live_plan or not note:
+            return
+        # 应用修订: 保留仍存在的已完成节点, 刷新节点清单与回注提示
+        kept_done = {nid for nid in ctx.plan_done if nid in new_plan.nodes}
+        ctx.plan = new_plan
+        ctx.plan_node_ids = [n.id for n in new_plan.nodes.values() if getattr(n, "id", None)]
+        ctx.plan_done = kept_done
+        ctx.replan_count += 1
+        plan_lines = [
+            "## Plan UPDATED (follow the new sequence; after finishing a node output "
+            "`DONE[<node_id>`]):"
+        ]
+        for idx, nid in enumerate(new_plan.topological_sort(), 1):
+            node = new_plan.nodes[nid]
+            deps = f" (after: {', '.join(node.dependencies)})" if node.dependencies else ""
+            plan_lines.append(f"{idx}. [{nid}] {node.description}{deps}")
+        plan_lines.append("Complete all nodes, then output Final Answer.")
+        ctx.plan_update_note = "\n".join(plan_lines)
+        self.engine._emit_status(ctx, f"plan updated ({note})")
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +794,9 @@ class ExecutionEngine:
                     trace.tools_used.append(call.tool_name)
                     self._emit(ctx, "tool_result", obs)
 
+                # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
+                DynamicReplanController(self).maybe_replan(ctx, step_number)
+
                 ctx.steps.append(record)
                 trace.steps.append(record)
 
@@ -763,6 +824,10 @@ class ExecutionEngine:
                 next_prompt = policy.next_prompt(ctx, output)
                 if next_prompt is None:
                     break
+                # 动态重规划: 把修订后的 DAG 回注下一轮, 使模型改走新路径
+                if getattr(ctx, "plan_update_note", ""):
+                    next_prompt = next_prompt + "\n\n" + ctx.plan_update_note
+                    ctx.plan_update_note = ""
                 # 把分支监控 agent 的提示注入主 agent 的下一轮
                 prompt = self._attach_monitor_hints(next_prompt, ctx)
 
@@ -1063,6 +1128,13 @@ class ExecutionEngine:
         #   json.dumps({"name": tool_name, "args": arguments})
         # 这样 call_counts.get(top_sig) 才能命中
         recent_steps = getattr(ctx, "steps", [])[-3:]
+        # 假进展加固: 最近 3 步的观察文本完全相同(通常是同一报错反复回灌)→ 原地打转
+        _obs_snippets = [
+            " ".join(str(o) for o in st.observations)[-300:]
+            for st in recent_steps if getattr(st, "observations", None)
+        ]
+        if len(_obs_snippets) >= 2 and len(set(_obs_snippets)) == 1:
+            return False
         recent_sigs = []
         for st in recent_steps:
             for c in st.tool_calls:

@@ -380,16 +380,16 @@ class SuperAgentCLI:
     def format_result(self, result: Dict[str, Any]):
         metadata = result.get('metadata', {})
         duration = metadata.get('duration_ms', 0) / 1000
-        loops = result.get('outer_loops', 0)
-        steps = result.get('thinking_steps', 0)
+        loops = result.get('outer_loops', 0)        # 实际执行的 think→act→observe 迭代数
+        budget = result.get('thinking_steps', 0)     # 初始 n_loops 思考预算(可被动态扩循环超出)
         tokens = result.get('live_tokens') or result.get('session_token_usage', {}).get('last_call_tokens', 0)
         tokens_display = f"{tokens // 1000}.{tokens % 1000 // 100}k" if tokens >= 1000 else str(tokens)
         ok = bool(result.get('success'))
         status = terminal.token("ok", "success") if ok else terminal.token("failed", "error")
         meta = " · ".join([
             status,
-            terminal.token(f"{loops} loops", "muted"),
-            terminal.token(f"{steps} steps", "muted"),
+            terminal.token(f"{loops} steps", "muted"),
+            terminal.token(f"budget {budget}", "muted"),
             terminal.token(f"{duration:.1f}s", "muted"),
             terminal.token(f"{tokens_display} tokens", "muted"),
         ])
