@@ -794,6 +794,8 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         n_loops: int = 1,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        stream_callback: Optional[Callable] = None,
+        token_callback: Optional[Callable] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """原生 Function Calling: 返回结构化 {content, tool_calls}.
@@ -803,10 +805,16 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         - 无需猜测格式, 无需 1300 行解析器
         - 无工具调用时返回纯 content
 
+        stream_callback 非空时开启流式: 边生成边回调 content/reasoning,
+        避免慢速远程模型下"长时间空白 -> 一次性蹦出全文"的体感卡顿。
+        若端点不支持 tools+stream, 自动回退到非流式。
+
         Returns:
-            {"content": str, "tool_calls": [{"name": str, "arguments": dict}]}
-            可能无 tool_calls 键或为空列表.
+            {"content": str, "tool_calls": [{"name": str, "arguments": dict}],
+             "_streamed_content": bool}
+            _streamed_content 供调用方抑制重复透出。
         """
+        stream = bool(stream_callback)
         try:
             # Ensure connection is fresh (handles idle timeout, proxy down, Ollama model unload)
             self._ensure_connection()
@@ -824,9 +832,58 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             )
             if tools:
                 payload["tools"] = tools
+            if stream:
+                payload["stream"] = True
             payload.update(kwargs)
 
-            completion = self.client.chat.completions.create(**payload)
+            content_parts: List[str] = []
+            reasoning_parts: List[str] = []
+            tool_slots: Dict[int, Dict[str, str]] = {}
+            streamed_content = False
+
+            if stream:
+                try:
+                    for chunk in self.client.chat.completions.create(**payload):
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        text = getattr(delta, "content", None)
+                        if text:
+                            content_parts.append(text)
+                            streamed_content = True
+                            stream_callback("content", text)  # type: ignore[union-attr]
+                            if token_callback:
+                                token_callback(_estimate_tokens(text))
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            stream_callback("reasoning", reasoning)  # type: ignore[union-attr]
+                            if token_callback:
+                                token_callback(_estimate_tokens(reasoning))
+                        for tc_delta in (getattr(delta, "tool_calls", None) or []):
+                            idx = getattr(tc_delta, "index", 0) or 0
+                            slot = tool_slots.setdefault(idx, {"name": "", "arguments": ""})
+                            fn = getattr(tc_delta, "function", None)
+                            if fn is not None:
+                                nm = getattr(fn, "name", None)
+                                if nm:
+                                    slot["name"] += nm
+                                ar = getattr(fn, "arguments", None)
+                                if ar:
+                                    slot["arguments"] += ar
+                    self._consecutive_errors = 0
+                    return self._finalize_native(
+                        "".join(content_parts) or "".join(reasoning_parts),
+                        list(tool_slots.values()),
+                        streamed_content,
+                    )
+                except Exception:
+                    # 端点不支持 tools+stream, 回退到非流式
+                    pass
+
+            # 非流式(回退或 stream 关闭)
+            non_stream = {k: v for k, v in payload.items() if k != "stream"}
+            completion = self.client.chat.completions.create(**non_stream)
             message = completion.choices[0].message
             content = getattr(message, "content", None) or ""
             reasoning = getattr(message, "reasoning_content", None) or ""
@@ -848,10 +905,29 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     arguments = {"_raw": args_raw}
                 tool_calls.append({"name": name, "arguments": arguments})
 
-            return {"content": content, "tool_calls": tool_calls}
+            self._consecutive_errors = 0
+            return self._finalize_native(content, tool_calls, False)
         except Exception as e:
             # 失败时降级: 返回空 tool_calls, 由调用方回退文本协议
             raise RuntimeError(f"generate_native failed: {e}") from e
+
+    @staticmethod
+    def _finalize_native(content: str, raw_tcs: List[Dict[str, str]], streamed_content: bool) -> Dict[str, Any]:
+        tool_calls = []
+        for tc in raw_tcs:
+            name = tc.get("name", "") or ""
+            args_raw = tc.get("arguments", "{}") or "{}"
+            arguments = {}
+            try:
+                arguments = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw or {})
+            except Exception:
+                arguments = {"_raw": args_raw}
+            tool_calls.append({"name": name, "arguments": arguments})
+        return {
+            "content": content,
+            "tool_calls": tool_calls,
+            "_streamed_content": streamed_content,
+        }
 
 
 class DeepSeekBackend(OpenAIBackend):
