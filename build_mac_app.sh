@@ -1,4 +1,11 @@
 #!/bin/bash
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 # Build LV Agent as a macOS .app bundle
 # This creates "LV Agent.app" that opens in Terminal and runs the agent.
 
@@ -68,7 +75,6 @@ PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
 # ── 3. Create the launcher script ──
 echo "[3/5] Creating launcher script..."
 cat > "$MACOS_DIR/$APP_NAME" << 'LAUNCHER_EOF'
-#!/bin/bash
 # LV Agent - macOS App Launcher
 
 # Resolve the .app bundle path

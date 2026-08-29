@@ -1,9 +1,9 @@
 """缓存层（从 agent.py 抽出的独立单元，去 God Object 第一步）。
 
-- ToolResultCache: 工具结果 LRU 缓存，命中复用、容量上限、淘汰最久未用。
-- MemoCache: 通用记忆化缓存，按 (namespace, *key) 惰性生成并缓存 factory() 结果。
+# ToolResultCache: 工具结果 LRU 缓存,命中复用、容量上限、淘汰最久未用。
+# MemoCache: 通用记忆化缓存,按 (namespace, *key) 惰性生成并缓存 factory() 结果。
 
-两都各自持有一把锁，线程安全；不再与 agent.py 共享类级锁。
+# 两把锁，线程安全；不再与 agent.py 共享类级锁。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ _DEFAULT_CAPACITY = 512
 
 
 class ToolResultCache:
-    """工具调用结果缓存：同一轮内重复调用相同工具时直接复用已存结果。"""
+    """工具调用结果缓存: 同一轮内重复调用相同工具时直接复用已存结果"""
 
     def __init__(self, capacity: int = _DEFAULT_CAPACITY):
         self._store: "OrderedDict[str, Any]" = OrderedDict()
@@ -25,7 +25,7 @@ class ToolResultCache:
 
     @property
     def store(self) -> "OrderedDict[str, Any]":
-        """底层字典，供执行引擎直接读写（保持既有行为，不绕开缓存语义）。"""
+        """Underlying dict, read directly by the execution engine (preserving existing behavior without bypassing cache semantics)"""
         return self._store
 
     def get(self, key: str) -> Optional[Any]:
@@ -51,7 +51,7 @@ class ToolResultCache:
 
 
 class MemoCache:
-    """通用记忆化：按 (namespace, *key) 缓存 factory() 的结果。"""
+    """Universal memoization: cache factory() results keyed by (namespace, *key)"""
 
     def __init__(self):
         self._store: Dict[Tuple, Any] = {}

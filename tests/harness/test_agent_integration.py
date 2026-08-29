@@ -1,4 +1,11 @@
-"""Legacy agent <-> kernel wiring: config gating and the _execute_tool guard.
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 
 The agent class is a god object; these tests exercise the harness seam
 without booting the full module stack (backend, memory, planners).

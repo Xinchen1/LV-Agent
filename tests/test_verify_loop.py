@@ -1,4 +1,11 @@
-"""验证闭环测试: apply_diff/write 自动语法验证 + 失败定位 + python fallback."""
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 
 import os
 import sys
