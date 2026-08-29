@@ -258,6 +258,8 @@ class ReasoningEngine:
             if plan is not None and getattr(plan, "nodes", None):
                 ctx.plan_node_ids = [n.id for n in plan.nodes.values()
                                      if getattr(n, "id", None)]
+                # 同时保留 live Plan 对象, 供运行时动态重规划修改 DAG。
+                ctx.plan = plan
 
             # SuperAgentPolicy handles its own meta-loop;
             # 搜索型策略(SELF_CONSISTENCY / TREE_OF_THOUGHTS / MONTE_CARLO)走专门实现
