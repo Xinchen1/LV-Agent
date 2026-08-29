@@ -407,8 +407,10 @@ class DynamicReplanController:
         self.engine = engine
 
     def _cfg(self, key: str, default):
-        cfg = getattr(self.engine.config, "planning", None) or {}
-        return cfg.get(key, default)
+        cfg = getattr(self.engine.config, "planning", None)
+        if cfg is None:
+            return default
+        return getattr(cfg, key, default)
 
     def maybe_replan(self, ctx: ExecutionContext, step_number: int) -> None:
         if not self._cfg("dynamic_replan", False):
