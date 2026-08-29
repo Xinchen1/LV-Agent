@@ -184,7 +184,7 @@ def needs_tool_summary(raw_output: str, is_continuation: bool) -> bool:
 
 def tool_returns_listing(action: Any) -> bool:
     """工具调用是否返回目录/文件列表这类结构化数据."""
-    from .tools import ToolResult  # 懒导入, 避免循环
+    from ..tools import ToolResult  # 懒导入, 避免循环
     if not isinstance(action, ToolResult):
         return False
     text = getattr(action, "output", "") or getattr(action, "result", "") or ""
@@ -275,7 +275,7 @@ def parse_output_for_action(
     valid_tools : set of registered tool names
     correct_fn : fuzzy corrector function
     """
-    from .tools import ToolCall
+    from ..tools import ToolCall
     for name, args in parse_all_fn(text):
         if name in valid_tools:
             return (name, args)
