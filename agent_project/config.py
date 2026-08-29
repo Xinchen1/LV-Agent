@@ -143,6 +143,9 @@ class PlanningConfig(BaseModel):
     default_strategy: str = "adaptive"
     optimize_plans: bool = True
     max_subtasks: int = 10
+    # 运行时动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
+    dynamic_replan: bool = True
+    max_replans: int = 2
 
 
 class ReasoningConfig(BaseModel):
