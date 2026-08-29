@@ -2191,7 +2191,11 @@ class OpenMythosAgent:
                     n_loops=1,
                     temperature=self.config.temperature,
                     max_tokens=fast_max_tokens,
+                    stream_callback=stream_callback,
+                    token_callback=token_callback,
                 )
+                if native.get("_streamed_content"):
+                    _streamed_content["v"] = True
                 tcs = native.get("tool_calls") or []
                 if tcs:
                     parts = []

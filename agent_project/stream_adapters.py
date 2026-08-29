@@ -346,6 +346,7 @@ class RichStreamAdapter(StreamAdapter):
         self._current_action = "thinking"
         self._current_detail = ""
         self._action_since = time.time()
+        self._turn_since = time.time()
         self._status_text = ""
 
         self._highlighter = self._StreamHighlighter()
@@ -374,7 +375,7 @@ class RichStreamAdapter(StreamAdapter):
             "result": "result",
             "answering": "answer",
         }
-        elapsed = time.time() - self._action_since
+        elapsed = time.time() - self._turn_since
         label = labels.get(self._current_action, self._current_action)
         status_text = (self._status_text or "").strip()
         detail = (self._current_detail or "").strip()
