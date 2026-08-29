@@ -608,6 +608,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         """Reset consecutive error counter on success."""
         self._consecutive_errors = 0
 
+    def _is_ollama(self) -> bool:
+        """Heuristic: is this backend pointing at a local Ollama server?"""
+        bu = (self.base_url or "").lower()
+        return "11434" in bu or "ollama" in bu
+
     def generate(
         self,
         prompt: str,
@@ -655,7 +660,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     pass
 
         def _single_call(msgs, stream: bool):
-            completion = self.client.chat.completions.create(
+            create_args = dict(
                 model=self.model,
                 messages=msgs,
                 temperature=temperature or self.temperature,
@@ -663,8 +668,12 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                 max_tokens=max_tokens or self.max_tokens,
                 timeout=self.timeout,
                 stream=stream,
-                **kwargs
+                **kwargs,
             )
+            # 本地 Ollama: 钉住模型常驻显存, 消除冷启动(~5.5s)的等待
+            if self._is_ollama():
+                create_args["keep_alive"] = -1
+            completion = self.client.chat.completions.create(**create_args)
             if stream:
                 content_parts = []
                 finish_reason = None
@@ -835,6 +844,9 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             if stream:
                 payload["stream"] = True
             payload.update(kwargs)
+            # 本地 Ollama: 钉住模型常驻显存, 消除冷启动(~5.5s)的等待
+            if self._is_ollama():
+                payload["keep_alive"] = -1
 
             content_parts: List[str] = []
             reasoning_parts: List[str] = []
