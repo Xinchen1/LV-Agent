@@ -1,4 +1,10 @@
-use std::collections::HashMap;
+// Copyright (c) 2026 cleveris research
+// SPDX-License-Identifier: MIT
+// Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

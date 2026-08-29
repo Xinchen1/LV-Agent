@@ -1,4 +1,11 @@
-"""意图分类器对"分析 X 文件夹"场景的识别与解析测试."""
+#!/usr/bin/env python3
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 
 import re
 import sys

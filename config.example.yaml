@@ -1,4 +1,10 @@
-# OpenMythos Agent 配置文件示例
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 # 复制为 config.yaml 并填写您的API密钥
 
 agent:

@@ -1,4 +1,10 @@
-backend: openai
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 model_registry_path: agent_project/config/models.yaml
 openai:
   api_key: ollama
@@ -63,8 +69,8 @@ model:
   expert_dim: 64
   vocab_size: 32000
 max_outer_loops: 1
-default_thinking_loops: 4
-max_thinking_loops: 16
+default_thinking_loops: 2
+max_thinking_loops: 3
 temperature: 0.7
 top_k: 50
 act_threshold: 0.7
@@ -254,10 +260,10 @@ display: {}
 agent:
   backend: openai
   openai:
-    api_key: null
+    api_key: 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
     base_url: https://integrate.api.nvidia.com/v1
-    model: stepfun-ai/step-3.7-flash
-    temperature: 1.0
+    model: meta/muse-glimmer-30b
+    temperature: 0.7
     top_p: 0.95
     max_tokens: 16384
     timeout: 120

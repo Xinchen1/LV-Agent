@@ -1,4 +1,10 @@
-use std::collections::HashMap;
+// Copyright (c) 2026 cleveris research
+// SPDX-License-Identifier: MIT
+// Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
