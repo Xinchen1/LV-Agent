@@ -12,7 +12,7 @@ import json
 import time
 import threading
 from .cache import MemoCache, ToolResultCache
-from .intent import is_folder_read_intent, is_ultra_short_ambiguous
+from .intent import is_folder_read_intent, is_pure_nudge, is_ultra_short_ambiguous
 from .utils.agent_utils import (
     task_tokens,
     task_similarity,
@@ -1521,6 +1521,10 @@ class OpenMythosAgent:
     @staticmethod
     def _is_ultra_short_ambiguous(task: str) -> bool:
         return is_ultra_short_ambiguous(task)
+
+    @staticmethod
+    def _is_pure_nudge(task: str) -> bool:
+        return is_pure_nudge(task)
 
     @staticmethod
     def _skip_tool_retry(action: Any, tool_result: Any) -> bool:
