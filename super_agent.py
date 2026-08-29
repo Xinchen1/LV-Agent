@@ -494,6 +494,7 @@ class SuperAgentCLI:
             if pref:
                 pref_path.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding='utf-8')
                 print(f" 模型偏好已保存: {pref}")
+                self._apply_model_live(pref)
                 return
             else:
                 print(" 无效选择")
@@ -549,7 +550,50 @@ class SuperAgentCLI:
         # 保存
         pref_path.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f" 模型偏好已保存: {pref}")
+        self._apply_model_live(pref)
         return
+
+    def _persist_model_config(self, backend, base_url=None, model=None, api_key=None):
+        """把 /model 的选择写回 config.yaml(兼容 agent: 包裹式与顶层平铺式)。"""
+        import yaml
+        if not self.config_path or not self.config_path.exists():
+            return
+        cfg = yaml.safe_load(self.config_path.read_text(encoding='utf-8')) or {}
+        target = cfg['agent'] if isinstance(cfg.get('agent'), dict) else cfg
+        target['backend'] = backend
+        sec = target.setdefault(backend, {})
+        if base_url is not None:
+            sec['base_url'] = base_url
+        if model is not None:
+            sec['model'] = model
+        if api_key is not None:
+            sec['api_key'] = api_key
+        self.config_path.write_text(
+            yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True),
+            encoding='utf-8',
+        )
+
+    def _apply_model_live(self, pref):
+        """让 /model 设置的模型在运行中的会话立即生效, 并持久化到 config.yaml。"""
+        if not self.agent:
+            print(" agent 尚未初始化, 仅保存偏好, 重启后生效")
+            return
+        backend = pref.get('backend') or 'openai'
+        base_url = pref.get('base_url')
+        model = pref.get('model')
+        api_key = pref.get('api_key')
+        try:
+            self._persist_model_config(backend, base_url, model, api_key)
+        except Exception as e:
+            print(_style(f" 模型配置持久化失败(不影响本次会话): {e}", "2"))
+        if self.load_config():
+            self.agent.config = self.config
+            self.agent.reload_backend()
+            sec = getattr(self.config, backend, {}) or {}
+            print(_style(
+                f" /model 已生效: backend={backend} model={sec.get('model')} base_url={sec.get('base_url')}",
+                "2",
+            ))
 
     def handle_memskill(self, rest: str):
         """管理记忆技能。"""
