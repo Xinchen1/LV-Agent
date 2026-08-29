@@ -427,6 +427,8 @@ class DynamicReplanController:
         if not replanner.should_replan(recent):
             return
         broken = recent[-1]
+        short = ((broken or "").strip().splitlines() or ["blocker"])[0][:90]
+        self.engine._emit_status(ctx, f"🔁 retry — {short}")
         new_plan, note = replanner.replan(live_plan, ctx.task, broken)
         if new_plan is live_plan or not note:
             return
@@ -446,7 +448,9 @@ class DynamicReplanController:
             plan_lines.append(f"{idx}. [{nid}] {node.description}{deps}")
         plan_lines.append("Complete all nodes, then output Final Answer.")
         ctx.plan_update_note = "\n".join(plan_lines)
-        self.engine._emit_status(ctx, f"plan updated ({note})")
+        topo = new_plan.topological_sort()
+        preview = ", ".join(topo[:6]) + (" …" if len(topo) > 6 else "")
+        self.engine._emit_status(ctx, f"✓ re-plan ({note}) → {preview}")
 
 
 # ---------------------------------------------------------------------------
