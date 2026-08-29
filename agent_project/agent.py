@@ -552,6 +552,30 @@ class OpenMythosAgent:
             )
             return backend
 
+    def reload_backend(self):
+        """重建模型后端, 使运行中的 /model 切换立即生效(无需重启).
+
+        失败时不替换旧后端, 保证会话不中断。
+        """
+        try:
+            new_backend = self._load_model_backend()
+        except Exception as e:
+            print(_style(f" 模型后端重建失败, 继续使用原模型: {e}", "1"))
+            return
+        new_backend.tokenizer = self._create_simple_tokenizer()
+        # 重置连接状态, 让下一次调用重新握手(适配新的 base_url / model)
+        for attr in ("_client", "_last_health_check"):
+            if hasattr(new_backend, attr):
+                try:
+                    setattr(new_backend, attr, None if attr == "_client" else 0.0)
+                except Exception:
+                    pass
+        self.backend = new_backend
+        print(_style(
+            f" 模型后端已切换: {getattr(new_backend, 'model', '?')} @ {getattr(new_backend, 'base_url', '?')}",
+            "2",
+        ))
+
     def _create_simple_tokenizer(self):
         """Create a fallback tokenizer for testing only."""
         print(_style("  fallback tokenizer (not for production OpenMythos models)", "2"))
