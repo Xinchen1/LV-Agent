@@ -165,6 +165,7 @@ class OpenMythosAgent:
             Kernel,
         )
         from .harness.approval import console_approval
+        from .harness.hotswap import HotSwapKernel
 
         if cfg.policy == "permissive":
             policy = permissive_policy()
@@ -177,10 +178,12 @@ class OpenMythosAgent:
             ask=console_approval,
             allowlist_path=cfg.allowlist_path,
         )
+        # Wrap with HotSwapKernel to enable self-evolution and module swapping
+        hs_kernel = HotSwapKernel(kernel)
         from .tools import set_harness_kernel
-        set_harness_kernel(kernel)
-        self.logger.info(f"harness kernel: enabled (policy={cfg.policy})")
-        return kernel
+        set_harness_kernel(hs_kernel)
+        self.logger.info(f"harness kernel: enabled (policy={cfg.policy}, hot-swap enabled)")
+        return hs_kernel
 
     def print_module_status(self, as_json: bool = False) -> None:
         """Print a human-readable or JSON health table for all advanced modules."""
@@ -282,6 +285,17 @@ class OpenMythosAgent:
                 _ready("reasoning")
             except Exception as e:
                 _failed("reasoning", e)
+
+        # Self-Evolution Controller
+        from .harness.hotswap import SelfEvolutionController, HotSwapKernel
+        if self._harness_kernel and isinstance(self._harness_kernel, HotSwapKernel):
+            self._evolution_controller = SelfEvolutionController(
+                kernel=self._harness_kernel,
+            )
+            _ready("evolution")
+        else:
+            self._evolution_controller = None
+            self.logger.debug("Evolution controller skipped: harness kernel not available or not a HotSwapKernel")
 
         # Memory Manager: keep a raw MemoryManager for file/session memory,
         # and optionally use LLM Wiki as the semantic memory for ContextEngine.
