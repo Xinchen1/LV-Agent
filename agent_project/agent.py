@@ -1158,6 +1158,19 @@ class OpenMythosAgent:
             return False
 
         # 中等长度(16-40字符)且无明确动作关键词,视为简单问题 → fast
+        # 新增: 历史/介绍查询直接返回 simple (无需搜索)
+        history_intro_keywords = [
+            "历史", "发展", "演进", "起源", "诞生", "成名",
+            "人工智能", "AI 历史", "简介", "概述", "回顾",
+            "介绍", "背景", "来历"
+        ]
+        task_lower = task.lower()
+        if any(k in task_lower for k in history_intro_keywords):
+            # 确保不是工具任务
+            tool_keywords = ["文件", "代码", "搜索", "创建", "项目", "目录"]
+            if not any(k in task_lower for k in tool_keywords):
+                pass  # continue to return True below
+        # 原有返回
         return True
 
     def _classify_intent(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
