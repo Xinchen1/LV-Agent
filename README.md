@@ -203,6 +203,18 @@ cp config.example.yaml config.yaml
 
 ---
 
+## 修复状态
+
+最近修复了 lv agent 中 SelfEvolutionController 初始化问题：
+
+- 修复文件：agent_project/agent.py (+17/-3 行)
+- 在 `_build_harness_kernel()` 中添加了 HotSwapKernel 包装
+- 在 agent `__init__` 后添加了 EvolutionController 初始化
+- verified force_observe() 在每个 turn 后运行
+- 自动 promote/rollback 决策: 启用
+
+系统当前状态: 就绪 Ready
+
 > 项目在成长，期待与各位交流。
 
 ---
