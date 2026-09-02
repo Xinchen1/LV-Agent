@@ -26,6 +26,28 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .checkpoint import CheckpointManager
 from .tools import TOOLS_REGISTRY, ToolResult
 
+# Precompiled patterns — avoid recompilation in hot paths (called per turn / per text clean)
+_RESEARCH_TASK_RE = re.compile(
+    r"(分析|报告|架构|剖析|调研|总结|评估|概述|概览|overview|analy[sz]e|report|architectur|structure|summar)",
+    re.IGNORECASE,
+)
+_SUBSTANCE_RE = re.compile(r"(?:结论|综上|核心|架构|模块|要点|结构|亮点|总结|整体)")
+_RE_DONE = re.compile(r"DONE\[([^\]]+)\]")
+_RE_JSON_ANY = re.compile(r'\{.*\}', re.DOTALL)
+
+# _clean_final_text patterns (called on every final answer)
+_RE_CODE_BLOCK = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_RE_CODE_OPEN = re.compile(r"```\w*\s*")
+_RE_CODE_CLOSE = re.compile(r"\s*```")
+_RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_RE_TOOL_BLOCK = re.compile(r"\[TOOL:\w+\].*?\[/TOOL\]", re.DOTALL)
+_RE_TOOL_INLINE = re.compile(r"\[TOOL:\w+\]\s*\{[^}]*\}")
+_RE_TOOL_TAG = re.compile(r"\[/?TOOL:?\w*\]")
+_RE_THOUGHT_LINE = re.compile(r"^Thought:\s*.*$", re.MULTILINE)
+_RE_ACTION_LINE = re.compile(r"^Action:\s*.*$", re.MULTILINE)
+_RE_FINAL_ANS = re.compile(r"^Final Answer:\s*", re.IGNORECASE)
+_RE_MULTI_SPACE = re.compile(r"\s{2,}")
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -632,11 +654,10 @@ class ExecutionEngine:
             text = str(raw or "").strip()
             if not text:
                 return None
-            import json as _json, re as _re
-            m = _re.search(r'\{.*\}', text, _re.DOTALL)
+            m = _RE_JSON_ANY.search(text)
             if not m:
                 return None
-            payload = _json.loads(m.group(0))
+            payload = json.loads(m.group(0))
             problem = str(payload.get("problem", "") or "").strip()
             if not problem or problem.upper() == "OK":
                 return None
@@ -730,7 +751,7 @@ class ExecutionEngine:
                 # 规划驱动: 扫描 DONE[<node_id>] 标记, 记录已完成节点。
                 # 仅做早停增益——若模型从不输出该标记, 退回步数上限, 无行为回退。
                 if ctx.plan_node_ids:
-                    for _mid in re.findall(r"DONE\[([^\]]+)\]", output or ""):
+                    for _mid in _RE_DONE.findall(output or ""):
                         _mid = _mid.strip()
                         if _mid in ctx.plan_node_ids:
                             ctx.plan_done.add(_mid)
@@ -840,7 +861,7 @@ class ExecutionEngine:
             # 项目/代码分析任务: 最终答案若为空/截断/过短(如只提一个文件)则强制重生成完整分析。
             # 覆盖用户场景: 模型调 project_context 拿到结构后只回一句"docs/goai/作品简介"就结束。
             _analysis_needed = bool(
-                re.search(r"(分析|架构|剖析|调研|概述|概览|报告|overview|analy[sz]e|architectur|structure|analyze)", ctx.task, re.IGNORECASE)
+                _RESEARCH_TASK_RE.search(ctx.task)
             )
             _answer = (trace.final_answer or "").strip()
             # 敷衍判定: 长度很短(如只提一个文件名/一句概述) 且 不含结论性/结构化内容。
@@ -848,7 +869,7 @@ class ExecutionEngine:
             _has_substance = bool(
                 _answer and (
                     len(_answer) >= 200
-                    or re.search(r"(?:结论|综上|核心|架构|模块|要点|结构|亮点|总结|整体)", _answer)
+                    or _SUBSTANCE_RE.search(_answer)
                 )
             )
             _short_answer = _analysis_needed and 0 < len(_answer) < 200 and not _has_substance
@@ -895,9 +916,9 @@ class ExecutionEngine:
         return trace
 
     def _generate(self, prompt: str, ctx: ExecutionContext, step_number: int) -> str:
-        max_tokens = 8192 if ctx.code_mode else 2048
+        max_tokens = 16384 if ctx.code_mode else 2048
         # 分析/报告类任务需要更大输出空间, 避免长报告被 max_tokens 截断
-        if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE):
+        if _RESEARCH_TASK_RE.search(ctx.task):
             max_tokens = max(max_tokens, 8192)
         if step_number == 1 and len(prompt) > 8000:
             max_tokens = 4096
@@ -923,9 +944,9 @@ class ExecutionEngine:
             tools = TOOLS_REGISTRY.get_openai_tools()
             if not tools:
                 return None
-            max_tokens = 8192 if ctx.code_mode else 2048
+            max_tokens = 16384 if ctx.code_mode else 2048
             # 分析/报告类任务: 更大输出空间, 避免长报告被截断
-            if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE):
+            if _RESEARCH_TASK_RE.search(ctx.task):
                 max_tokens = max(max_tokens, 8192)
             result = backend.generate_native(
                 prompt,
@@ -1090,7 +1111,7 @@ class ExecutionEngine:
         if extra:
             prompt = prompt.rstrip() + extra + "\n"
         # 分析/报告任务: 更大输出空间, 避免兜底报告被截断
-        _mt = 8192 if re.search(r"(分析|报告|架构|剖析|调研|总结|评估|overview|analy[sz]e|report|architectur|summar)", ctx.task, re.IGNORECASE) else 3072
+        _mt = 8192 if _RESEARCH_TASK_RE.search(ctx.task) else 3072
         answer, _streamed = self._streaming_generate(prompt, ctx, 0.3, _mt)
         cleaned = self._clean_final_text(answer or "")
         # 二次兜底: 生成仍为空/截断时, 用最近一步思考或观察作为答案
@@ -1129,12 +1150,7 @@ class ExecutionEngine:
         - 同一调用反复执行(≥3次)且观察未变 → 原地打转
         - 至少 1 个非空、非错误的成功观察才视为有进展
         """
-        import json as _json
-        # 工具调用签名格式与 call_counts key 格式一致 (line 940):
-        #   json.dumps({"name": tool_name, "args": arguments})
-        # 这样 call_counts.get(top_sig) 才能命中
         recent_steps = getattr(ctx, "steps", [])[-3:]
-        # 假进展加固: 最近 3 步的观察文本完全相同(通常是同一报错反复回灌)→ 原地打转
         _obs_snippets = [
             " ".join(str(o) for o in st.observations)[-300:]
             for st in recent_steps if getattr(st, "observations", None)
@@ -1144,7 +1160,7 @@ class ExecutionEngine:
         recent_sigs = []
         for st in recent_steps:
             for c in st.tool_calls:
-                sig = _json.dumps(
+                sig = json.dumps(
                     {"name": c.tool_name, "args": c.arguments},
                     sort_keys=True, ensure_ascii=False
                 )
@@ -1246,19 +1262,17 @@ class ExecutionEngine:
     def _clean_final_text(text: str) -> str:
         if not text:
             return ""
-        # Strip markdown code blocks (```json ... ``` or ``` ... ```) that may contain tool calls
-        text = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
-        # Strip any remaining ``` markers
-        text = re.sub(r"```\w*\s*", "", text)
-        text = re.sub(r"\s*```", "", text)
-        text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"\[TOOL:\w+\].*?\[/TOOL\]", "", text, flags=re.DOTALL)
-        text = re.sub(r"\[TOOL:\w+\]\s*\{[^}]*\}", "", text)
-        text = re.sub(r"\[/?TOOL:?\w*\]", "", text)
-        text = re.sub(r"^Thought:\s*.*$", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^Action:\s*.*$", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^Final Answer:\s*", "", text, count=1, flags=re.IGNORECASE)
-        text = re.sub(r"\s{2,}", " ", text).strip()
+        text = _RE_CODE_BLOCK.sub(r"\1", text)
+        text = _RE_CODE_OPEN.sub("", text)
+        text = _RE_CODE_CLOSE.sub("", text)
+        text = _RE_THINK.sub("", text)
+        text = _RE_TOOL_BLOCK.sub("", text)
+        text = _RE_TOOL_INLINE.sub("", text)
+        text = _RE_TOOL_TAG.sub("", text)
+        text = _RE_THOUGHT_LINE.sub("", text)
+        text = _RE_ACTION_LINE.sub("", text)
+        text = _RE_FINAL_ANS.sub("", text, count=1)
+        text = _RE_MULTI_SPACE.sub(" ", text).strip()
         return text
 
     def _score_trace(self, trace: ExecutionTrace) -> float:
