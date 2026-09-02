@@ -52,6 +52,17 @@ class ToolCallParser:
         "analyze", "grep", "diff", "backup", "find", "apply_diff", "verify", "open",
     }
 
+    # Precompiled regexes for _parse_json_with_bare_quotes (avoid re.compile in loops)
+    _RE_JSON_KEY = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:')
+    _RE_JSON_NUM = re.compile(r'-?\d+(?:\.\d+)?')
+    _RE_JSON_LIT = re.compile(r'(?:true|false|null)')
+
+    # Precompiled patterns for strip_tool_calls / strip_tool_markers (hot path)
+    _RE_TOOL_MARKERS = re.compile(
+        r"\[/TOOL\]|" + chr(60) + "/tool_call>|" + chr(60) + "/function>",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def parse_all(cls, text: str) -> List[Tuple[str, Dict[str, Any]]]:
         calls: List[Tuple[str, Dict[str, Any]]] = []
@@ -61,7 +72,8 @@ class ToolCallParser:
         registry = TOOLS_REGISTRY
 
         def strip_tool_markers(s: str) -> str:
-            return re.sub(r"\[/TOOL\]|</tool_call>|</function>", "", s, flags=re.IGNORECASE).strip()
+
+            return cls._RE_TOOL_MARKERS.sub("", s).strip()
 
         def add_call(tool_name: str, args: Dict[str, Any]):
             if not isinstance(tool_name, str) or not isinstance(args, dict):
@@ -597,11 +609,9 @@ class ToolCallParser:
 
         # 逐键解析: pattern "key": value
         result: Dict[str, Any] = {}
-        # 用正则找 "key": 后跟 值
-        import re as _re
         pos = 1  # 跳过 {
         while pos < len(obj_text) - 1:
-            m = _re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:').match(obj_text, pos)
+            m = cls._RE_JSON_KEY.match(obj_text, pos)
             if not m:
                 break
             key = m.group(1)
@@ -644,7 +654,7 @@ class ToolCallParser:
                     break
             elif obj_text[vstart] in "0123456789-":
                 # 数字
-                vm = _re.compile(r'-?\d+(?:\.\d+)?').match(obj_text, vstart)
+                vm = cls._RE_JSON_NUM.match(obj_text, vstart)
                 if vm:
                     num = vm.group(0)
                     try:
@@ -656,7 +666,7 @@ class ToolCallParser:
                     break
             elif obj_text[vstart] in "tfn":
                 # true/false/null
-                vm = _re.compile(r'(?:true|false|null)').match(obj_text, vstart)
+                vm = cls._RE_JSON_LIT.match(obj_text, vstart)
                 if vm:
                     val = vm.group(0)
                     result[key] = {"true": True, "false": False, "null": None}.get(val)

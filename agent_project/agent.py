@@ -35,10 +35,9 @@ _THREAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent_bg_")
 # Base imports only: heavy modules are loaded lazily inside _init_advanced_modules()
 # to keep agent startup fast, especially when memory/planning/reflection are disabled.
 from .config import AgentConfig
-from .tools import TOOLS_REGISTRY, BaseTool, ToolResult, ToolCall
+from .tools import TOOLS_REGISTRY, ToolResult, ToolCall
 from .research_report import is_research_report_task, generate_research_report
 from .health import ModuleHealthChecker, ModuleStatus
-from .evaluator import log_episode, summary_quality_check
 from .execution_engine import ExecutionContext, ExecutionEngine
 from .policies import DirectPolicy
 from .terminal import style as _style
@@ -973,7 +972,6 @@ class OpenMythosAgent:
                 topic = _ext(ut)
                 if topic and len(topic) <= 12 and not _pronoun_re.search(topic):
                     return topic
-                import re as _re
                 cands = [c for c in re.findall(r"[\u4e00-\u9fff]{2,8}(?:AI|ai|Agent|agent)?", topic) if len(c) >= 2]
                 if cands:
                     return cands[0]
@@ -983,8 +981,7 @@ class OpenMythosAgent:
                 if not at:
                     continue
                 # 提取看起来像专有名词的词(大写/带连接符/数字, 或中文长词)
-                import re as _re2
-                for cand in _re2.findall(r"[A-Z][A-Za-z0-9_-]{2,30}|[\u4e00-\u9fff]{3,12}(?:系统|架构|项目|平台|框架)", at):
+                for cand in re.findall(r"[A-Z][A-Za-z0-9_-]{2,30}|[\u4e00-\u9fff]{3,12}(?:系统|架构|项目|平台|框架)", at):
                     if len(cand) >= 3 and not _pronoun_re.search(cand):
                         return cand
             # 3. 兜底: 用户当前话术里"我的意思是X"中的 X
@@ -1013,18 +1010,14 @@ class OpenMythosAgent:
                 "直接输出主题, 不要解释。"
             ).format(task=task[:200], history=history_ctx[:2000])
             raw = self.backend.generate(prompt, n_loops=1, temperature=0.3, max_tokens=120).strip()
-            import re as _re
-            # 取输出末尾最具体的连续中文/英文片段 (LLM 常把主题放在末尾)
             cand = None
-            # 尝试 1: 提取"主题"后的内容
-            m = _re.search(r"(?:主题|theme|Topic)\s*[:：]?\s*([^。.!？?\n]{2,40})", raw, re.IGNORECASE)
+            m = re.search(r"(?:主题|theme|Topic)\s*[:：]?\s*([^。.!？?\n]{2,40})", raw, re.IGNORECASE)
             if m:
                 cand = m.group(1).strip().strip(chr(34) + chr(39))
-            # 尝试 2: 取输出中第一个 >=5 字的中文连续串 (LLM 常把主题嵌在解释里)
-            m2 = _re.findall(r"[\u4e00-\u9fff]{5,}", raw)
+            m2 = re.findall(r"[\u4e00-\u9fff]{5,}", raw)
             for seg in m2:
                 seg = seg.strip()
-                if _re.search(r"深度研究|研究报告|这些文件|应该是|就是|说的是|关于", seg):
+                if re.search(r"深度研究|研究报告|这些文件|应该是|就是|说的是|关于", seg):
                     continue
                 if 4 <= len(seg) <= 40:
                     cand = seg
@@ -1425,12 +1418,10 @@ class OpenMythosAgent:
         )
         try:
             raw = self.backend.generate(prompt, n_loops=1, temperature=0.0, max_tokens=250)
-            import json as _json
-            import re as _re
-            m = _re.search(r'\{.*\}', str(raw or ""), _re.DOTALL)
+            m = re.search(r'\{.*\}', str(raw or ""), re.DOTALL)
             if not m:
                 return None
-            payload = _json.loads(m.group(0))
+            payload = json.loads(m.group(0))
             tool_name = payload.get("tool", "")
             if not tool_name or tool_name == "none":
                 return None
@@ -3521,7 +3512,7 @@ class OpenMythosAgent:
 
             # Engineering tasks need more ReAct steps for read -> edit -> verify -> fix
             if code_mode:
-                n_loops = max(n_loops, 6)
+                n_loops = max(n_loops, 10)
                 self._status(stream_callback, f"loops {n_loops} code")
 
             trace = self.reasoning_engine.reason(

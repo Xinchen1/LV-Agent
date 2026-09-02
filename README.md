@@ -41,8 +41,8 @@ LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一�
 ### 工具链
 
 - **Web 搜索** — 多查询融合
-- **文件操作** — 读 / 写 / grep / glob
-- **代码执行** — Python / Bash，timeout 隔离
+- **文件操作** — 读 / 写 / grep / glob，支持「桌面上的 XXX」等跨目录文件夹浏览
+- **代码执行** — Python / Bash 全终端访问（管道、重定向、`&&`/`||`、env），timeout 隔离
 - **GitHub 搜索、PDF 读取、天气查询、网页抓取**
 - **Telegram Bot 集成**（可独立运行）
 
@@ -67,7 +67,7 @@ LV Agent 是一个**终端原生的智能体框架**，有基于 mythos 的一�
 - 头像像素画启动画面（Braille 渲染）
 - 底部状态栏：token 占用 / 上下文进度
 - 输入历史翻页 / Ctrl+S 草稿暂存 / Ctrl+\ Dashboard
-- 实时流式输出 + 深色 / 浅色主题
+- 实时流式输出 + 深色 / 浅色主题（渲染间隔 0.12s / 10fps，工具结果折叠至 3 行，流式阈值 64/128 字符）
 
 ---
 
@@ -195,6 +195,18 @@ cp config.example.yaml config.yaml
 
 ---
 
+## 更新日志
+
+### 2026-09-02
+
+- **执行引擎** — 预编译正则热点路径；代码模式 loops 6→10、`max_tokens` 16384；分析/报告类任务保底 8192 token，避免长报告截断；假进展/敷衍判定加固（`DONE[]` 标记扫描、观察去重）。
+- **推理与策略** — `intent_classifier` 支持「桌面上的 XXX」文件夹定位；`model_backends` 缓存 tiktoken encoder；`policies` 预编译 JSON 解析正则。
+- **终端渲染** — `stream_adapters` 渲染间隔 0.25s→0.12s、刷新 10fps、spinner 回收 0.05s；工具结果默认折叠至 3 行，流式阈值 64/128 字符；链接/数字/路径行内高亮。
+- **工具能力** — `bash_exec` 说明扩展为“全终端访问”，仅拦截 `curl|bash`/`wget|bash`/`chmod -R 777`，放行 `sudo` 与受限 `find`，满足真实工程任务。
+- **其它** — `agent.py` 清理冗余 import、`!` 命令提示统一为 `terminal.token` 风格。
+
+---
+
 ## 链接
 
 - **GitHub：** https://github.com/Xinchen1/LV-Agent
@@ -225,10 +237,10 @@ LV Agent is a self-contained AI agent system built around three principles: inte
 
 ### Core features
 
-- Reasoning-first workflow with automatic re-planning
-- Native tool integration: web search, file system, shell, and MCP servers
+- Reasoning-first workflow with automatic re-planning (code mode 10 loops, 16k tokens for analysis)
+- Native tool integration: web search, file system, full shell access, and MCP servers
 - Holographic memory for durable facts and recent context
-- Terminal-first UX with streaming and rich rendering
+- Terminal-first UX with streaming and rich rendering (0.12s interval, 10fps, folded tool output)
 
 ### Modes
 

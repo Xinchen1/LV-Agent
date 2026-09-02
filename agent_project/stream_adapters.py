@@ -53,11 +53,20 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# Precompiled hot-path patterns
+_RE_WS = re.compile(r"\s+")
+_RE_TOOL_NAME = re.compile(r"^\s*([a-zA-Z_][\w_]*)\s*[(:{=]")
+_RE_URL_PROTO = re.compile(r"^https?://", re.IGNORECASE)
+_RE_SEARCH = re.compile(r"^\s*<{6,}\s*SEARCH\s*$", re.IGNORECASE)
+_RE_REPLACE = re.compile(r"^\s*>{6,}\s*REPLACE\s*$", re.IGNORECASE)
+_RE_DIVIDER = re.compile(r"^\s*={6,}\s*$")
+_RE_BOLD = re.compile(r"\*\*(?P<b>[^*\n]+)\*\*|__(?P<u>[^_\n]+)__")
+
 
 def clean_runtime_text(text: str) -> str:
     """Remove emoji and collapse whitespace for compact status lines."""
     text = _EMOJI_RE.sub("", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return _RE_WS.sub(" ", text).strip()
 
 
 def _line_starts_nonascii(line: str) -> bool:
@@ -337,7 +346,7 @@ class RichStreamAdapter(StreamAdapter):
         self._total_tokens = 0
         self._start_time = time.time()
         self._last_render = 0.0
-        self._render_interval = 0.25
+        self._render_interval = 0.12
         self._render_lock = threading.Lock()
         self._stop_spinner_event = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
@@ -445,7 +454,7 @@ class RichStreamAdapter(StreamAdapter):
     def _start_thinking(self) -> None:
         if self._live is not None:
             return
-        self._live = self.Live(self._build_thinking_text(), console=self.console, refresh_per_second=8, transient=True)
+        self._live = self.Live(self._build_thinking_text(), console=self.console, refresh_per_second=10, transient=True)
         self._live.start()
         self._stop_spinner_event.clear()
         self._spinner_thread = threading.Thread(target=self._spinner_loop, daemon=True)
@@ -459,7 +468,7 @@ class RichStreamAdapter(StreamAdapter):
     def _stop_thinking(self) -> None:
         self._stop_spinner_event.set()
         if self._spinner_thread is not None and self._spinner_thread.is_alive():
-            self._spinner_thread.join(timeout=0.5)
+            self._spinner_thread.join(timeout=0.05)
         with self._render_lock:
             if self._live is not None:
                 self._live.stop()
@@ -476,24 +485,24 @@ class RichStreamAdapter(StreamAdapter):
             self._update_thinking(force=True)
 
     def _print_tool_call(self, text: str) -> None:
-        self._stop_thinking()
+        if self._live is not None:
+            self._stop_thinking()
         from agent_project import terminal
         text = clean_runtime_text(text)
         # 提取工具名: 兼容 "bash_exec(...)" / "bash_exec: {...}" / "bash_exec {...}" 格式
-        m = re.match(r'^\s*([a-zA-Z_][\w_]*)\s*[(:{=]', text)
+        m = _RE_TOOL_NAME.match(text)
         tool_name = m.group(1) if m else text.split("(", 1)[0].strip()[:20]
         self._last_tool_name = tool_name
         self._set_action("tool", detail=tool_name)
         if not self._tool_header_printed:
-            print(f"\n{terminal.token('─ tools ─', 'rule')}", flush=True)
+            print(f"\n{terminal.token('─ tools ─', 'rule')}")
             self._tool_header_printed = True
-        # 紧凑 pending 前缀: 极小绿色圆点 + 呼吸动效(绿 + ANSI blink=5)
-        # 工具执行中闪烁，完成后转为静态
         _PENDING_DOT = "\033[32;5m•\033[0m"
-        print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}", flush=True)
+        print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}")
 
     def _print_tool_result(self, text: str) -> None:
-        self._stop_thinking()
+        if self._live is not None:
+            self._stop_thinking()
         from agent_project import terminal
         low = text.lower()
         # 策略提示(非错误): 安全拦截/权限拒绝等 → 用黄色而非红色(优先判断, 可能带 "Tool error:" 前缀)
@@ -573,7 +582,7 @@ class RichStreamAdapter(StreamAdapter):
     @staticmethod
     def _shorten_url(url: str, max_len: int = 56) -> str:
         """去掉协议头并截断过长 URL, 减少工具结果里的链接噪音."""
-        url = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
+        url = _RE_URL_PROTO.sub("", url)
         if len(url) > max_len:
             url = url[: max_len - 1] + "…"
         return url
@@ -585,7 +594,7 @@ class RichStreamAdapter(StreamAdapter):
         """
         from agent_project import terminal
         width = max(min(term_width() - 8, 72), 40)
-        max_lines = 6  # 设计文档: 超过 6 行自动折叠
+        max_lines = 3  # 极简: 最多显示 3 行, 其余折叠
         name = self._last_tool_name or "exec"
         lines = text.rstrip().split("\n")
         if policy:
@@ -606,18 +615,14 @@ class RichStreamAdapter(StreamAdapter):
         print(f" {header}")
         shown = lines[:max_lines]
         more = len(lines) - len(shown)
-        # search/replace diff 标记着色: SEARCH 红, REPLACE 绿, 分隔线暗
-        search_re = re.compile(r"^\s*<{6,}\s*SEARCH\s*$", re.IGNORECASE)
-        replace_re = re.compile(r"^\s*>{6,}\s*REPLACE\s*$", re.IGNORECASE)
-        divider_re = re.compile(r"^\s*={6,}\s*$")
         for ln in shown:
             if len(ln) > width:
                 ln = ln[: width - 1] + "…"
-            if search_re.search(ln):
+            if _RE_SEARCH.search(ln):
                 print(f" \033[1;31m│ {ln}\033[0m")
-            elif replace_re.search(ln):
+            elif _RE_REPLACE.search(ln):
                 print(f" \033[1;32m│ {ln}\033[0m")
-            elif divider_re.search(ln):
+            elif _RE_DIVIDER.search(ln):
                 print(f" {terminal.token('│ ' + ln, 'muted')}")
             else:
                 print(f" {terminal.token('│ ' + ln, 'muted')}")
@@ -657,7 +662,6 @@ class RichStreamAdapter(StreamAdapter):
 
     def emit_tool_call(self, text: str) -> None:
         self._set_action("tool")
-        self._start_thinking()
         self._print_tool_call(text)
 
     def emit_tool_result(self, text: str) -> None:
@@ -705,8 +709,8 @@ class RichStreamAdapter(StreamAdapter):
         KEY = ""                        # 重点词: 纯文本
         QUOTE = ""                      # 引用/弱化: 纯文本
         DIM = ""                        # 表格/代码围栏边框: 纯文本
-        FLUSH_AT_CHARS = 24
-        FORCE_FLUSH_AT_CHARS = 48
+        FLUSH_AT_CHARS = 64
+        FORCE_FLUSH_AT_CHARS = 128
         WORD_BOUNDARY = set(" \t,.;:!?，。；：！？")
 
         # 行内高亮: 数字/统计、链接、路径、错误、重点词、行内代码
@@ -773,19 +777,20 @@ class RichStreamAdapter(StreamAdapter):
                 return
             if text.startswith("Final Answer:"):
                 text = text[len("Final Answer:"):].lstrip()
-            print(self._style_inline(text), end="", flush=True)
+            sys.stdout.write(self._style_inline(text))
+            sys.stdout.flush()
 
         def _emit_line(self, line: str) -> None:
             """完整一行入口: 处理代码块边界 + 泄露英文暂存, 再交给 _render_line."""
             stripped = line.strip()
             if self.in_code_block:
                 if stripped.startswith("```"):
-                    print(f"{self.DIM}└── {self.code_lang or 'code'}{self.RESET}", flush=True)
+                    print(f"{self.DIM}└── {self.code_lang or 'code'}{self.RESET}")
                     self.in_code_block = False
                     self.code_lang = ""
                 else:
                     if line:
-                        print(f"{self.CODE_BG}{self.CODE_FG}{line.rstrip()}{self.RESET}", flush=True)
+                        print(f"{self.CODE_BG}{self.CODE_FG}{line.rstrip()}{self.RESET}")
                 return
 
             # 泄露的英文"自言自语": 先暂存, 等下一行判定——若下一行切到用户语言
@@ -808,14 +813,12 @@ class RichStreamAdapter(StreamAdapter):
             if stripped.startswith("```"):
                 self.in_code_block = True
                 self.code_lang = stripped[3:].strip()
-                print(f"{self.DIM}┌── {self.code_lang or 'code'}{self.RESET}", flush=True)
+                print(f"{self.DIM}┌── {self.code_lang or 'code'}{self.RESET}")
                 return
 
             # Markdown 表格: `| a | b |` 行收集, 遇到非表格行时绘制细线框
             if stripped.startswith("|") and stripped.endswith("|"):
                 cells = [c.strip() for c in stripped.strip("|").split("|")]
-                # 分隔行 `| --- | --- |` 跳过, 仅用于判断列数
-                # 注意: 不能 flush 已缓冲的表头——表头、分隔行、数据行应作为一个表格整体缓冲
                 if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
                     return
                 self._table_rows.append(cells)
@@ -825,7 +828,7 @@ class RichStreamAdapter(StreamAdapter):
                 self._flush_table()
 
             if not stripped:
-                print(flush=True)  # 空行 = 段落分隔
+                print()
                 return
 
             if stripped.startswith("Thought:") or stripped.startswith("Action:"):
@@ -839,7 +842,7 @@ class RichStreamAdapter(StreamAdapter):
 
             # 引用 / 弱化行(> 开头) → 暗灰斜体感
             if stripped.startswith(">"):
-                print(f"{self.QUOTE}{line.rstrip()}{self.RESET}", flush=True)
+                print(f"{self.QUOTE}{line.rstrip()}{self.RESET}")
                 return
 
             # Markdown 标题: # 一级, ##/### 二级 (隐藏 # 记号, 只显示文字)
@@ -847,15 +850,15 @@ class RichStreamAdapter(StreamAdapter):
                 level = len(stripped) - len(stripped.lstrip("#"))
                 title = stripped.lstrip("#").strip()
                 if level >= 2:
-                    print(f"\n{self.H2}{title}{self.RESET}", flush=True)
+                    print(f"\n{self.H2}{title}{self.RESET}")
                 else:
-                    print(f"\n{self.H1}{title}{self.RESET}", flush=True)
+                    print(f"\n{self.H1}{title}{self.RESET}")
                 return
 
             # 章节标题行(一、数据极简主义) → 加粗金
             m = self._SECTION_RE.match(stripped)
             if m and len(stripped) <= 40:
-                print(f"\n{self.SECTION}{stripped}{self.RESET}", flush=True)
+                print(f"\n{self.SECTION}{stripped}{self.RESET}")
                 return
 
             # 列表项: 符号用暗青, 内容走行内高亮(不再整行刷青)
@@ -863,11 +866,11 @@ class RichStreamAdapter(StreamAdapter):
             if m:
                 mark = m.group("mark")
                 rest = line[m.end():]
-                print(f"{self.LIST_MARK}{mark} {self.RESET}{self._style_inline(rest.rstrip())}", flush=True)
+                print(f"{self.LIST_MARK}{mark} {self.RESET}{self._style_inline(rest.rstrip())}")
                 return
 
             # 普通段落: 行内高亮
-            print(self._style_inline(line.rstrip()), flush=True)
+            print(self._style_inline(line.rstrip()))
 
         def _flush_table(self) -> None:
             """用细线框绘制已缓冲的 Markdown 表格."""
@@ -907,7 +910,7 @@ class RichStreamAdapter(StreamAdapter):
                 return left + mid.join("─" * w for w in widths) + right
 
             # 用细线绘制: ┌─┬─┐ / ├─┼─┤ / └─┴─┘
-            print(f"{self.DIM}{border('┌', '┬', '┐')}{self.RESET}", flush=True)
+            print(f"{self.DIM}{border('┌', '┬', '┐')}{self.RESET}")
             for idx, row in enumerate([header] + body):
                 cells = []
                 for c in range(n_cols):
@@ -915,12 +918,12 @@ class RichStreamAdapter(StreamAdapter):
                     cells.append(pad(val, widths[c]))
                 line = "│".join(f"{pad(c, widths[i])}" for i, c in enumerate(cells))
                 if idx == 0:
-                    print(f"{self.DIM}│{self.RESET}{self.BOLD}{line}{self.RESET}{self.DIM}│{self.RESET}", flush=True)
-                    print(f"{self.DIM}{border('├', '┼', '┤')}{self.RESET}", flush=True)
+                    print(f"{self.DIM}│{self.RESET}{self.BOLD}{line}{self.RESET}{self.DIM}│{self.RESET}")
+                    print(f"{self.DIM}{border('├', '┼', '┤')}{self.RESET}")
                 else:
                     styled = "│".join(self._style_inline(pad(c, widths[i])) for i, c in enumerate(cells))
-                    print(f"{self.DIM}│{self.RESET}{styled}{self.DIM}│{self.RESET}", flush=True)
-            print(f"{self.DIM}{border('└', '┴', '┘')}{self.RESET}", flush=True)
+                    print(f"{self.DIM}│{self.RESET}{styled}{self.DIM}│{self.RESET}")
+            print(f"{self.DIM}{border('└', '┴', '┘')}{self.RESET}")
 
         def _style_inline(self, text: str) -> str:
             """行内重点着色: 数字/链接/路径/错误/重点词/行内代码/加粗."""
@@ -941,8 +944,7 @@ class RichStreamAdapter(StreamAdapter):
 
             text = self._HL_KEY.sub(repl, text)
             # **加粗** / __加粗__ 成对处理
-            text = re.sub(
-                r"\*\*(?P<b>[^*\n]+)\*\*|__(?P<u>[^_\n]+)__",
+            text = _RE_BOLD.sub(
                 lambda m: f"{self.BOLD}{(m.group('b') or m.group('u'))}{self.RESET}",
                 text,
             )

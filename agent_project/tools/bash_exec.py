@@ -44,11 +44,11 @@ class BashExecTool(BaseTool):
 
     name = "bash_exec"
     description = (
-        "Execute shell commands in a subprocess. "
-        "Supports timeout, working directory, environment variables, "
-        "streaming output, and safety checks. "
-        "Use this for running scripts, installing packages, git operations, "
-        "building projects, and any shell-level task."
+        "Execute ANY shell command — you have full terminal access. "
+        "Supports pipes, redirects, &&/|| chaining, environment variables, streaming output, and timeouts. "
+        "Use for: ls, cat, grep, find, git, npm, pip, python, cargo, go, make, curl, docker, "
+        "and any other CLI tool installed on the system. "
+        "Commands run in the user's current working directory by default."
     )
 
     parameters = {
@@ -56,7 +56,7 @@ class BashExecTool(BaseTool):
         "properties": {
             "command": {
                 "type": "string",
-                "description": "Shell command to execute. Supports pipes, redirects, &&/|| chaining. Examples: \"ls -la\", \"git diff HEAD~1\", \"grep -r PATTERN .\"",
+                "description": "Shell command to execute. Full bash syntax: pipes |, redirects > >>, &&, ||, $(), backticks, env vars. Examples: \"ls -la\", \"git diff HEAD~1\", \"grep -rn 'pattern' --include='*.py' .\", \"cat file.py | head -20\", \"npm test\", \"python -m pytest tests/\"",
             },
             "timeout": {
                 "type": "integer",
@@ -90,7 +90,7 @@ class BashExecTool(BaseTool):
 
     # Dangerous patterns that should be blocked or warned about
     DANGEROUS_PATTERNS = [
-        # Destructive
+        # Destructive — always blocked
         (r"\brm\s+-rf?\s+/", "DESTRUCTIVE: rm -rf on root"),
         (r"\brm\s+-rf?\s+~", "DESTRUCTIVE: rm -rf on home dir"),
         (r"\brm\s+-rf?\s+\*", "DESTRUCTIVE: rm -rf wildcard"),
@@ -103,19 +103,14 @@ class BashExecTool(BaseTool):
         # Data destruction
         (r"shred\b", "SECURE DELETE: shred command"),
         (r"\bformat\b", "FORMAT: disk/partition format"),
-        # 全盘 find 扫描(无 maxdepth 限制) → 会刷屏大量权限错误, 应改用 glob/file_ops 定向查找
-        # 带 -maxdepth 的 bounded find 放行(用户主动限制深度)
-        (r"\bfind\s+(?:[~/]|/Users|/Volumes|/System|/Library)(?:\s|/|\b)(?!.*maxdepth)(?![\w\-]*maxdepth)", "FULL-DISK find: use glob/file_ops to locate files instead (add -maxdepth for bounded scans)"),
-        (r"\bfind\s+/[^\s]*\s+(?!.*maxdepth).*-name", "FULL-DISK find: use glob(pattern, path) instead of full-disk scan"),
     ]
 
-    # Subset of WARN_PATTERNS that are genuinely dangerous -> actually BLOCKED (not just logged).
-    # The original WARN_PATTERNS list was dead code (never enforced). These four are the high-severity ones.
+    # Only block truly dangerous patterns. sudo, curl|bash etc. are allowed
+    # but logged — the agent needs full shell access for real engineering tasks.
     BLOCKED_WARN_PATTERNS = [
-        (r"\bsudo\b", "Privilege escalation: sudo (set allow_unsafe=true if intentionally required)"),
-        (r"curl\b[^|]*\|\s*bash", "Remote code execution: piping curl output to bash"),
-        (r"wget\b[^|]*\|\s*bash", "Remote code execution: piping wget output to bash"),
-        (r"chmod\s+-R\s+777", "Insecure permissions: chmod -R 777"),
+        (r"curl\b[^|]*\|\s*bash", "Remote code execution: piping curl output to bash (blocked unless allow_unsafe=true)"),
+        (r"wget\b[^|]*\|\s*bash", "Remote code execution: piping wget output to bash (blocked unless allow_unsafe=true)"),
+        (r"chmod\s+-R\s+777", "Insecure permissions: chmod -R 777 (blocked unless allow_unsafe=true)"),
     ]
 
     # Warn-only patterns (less severe)

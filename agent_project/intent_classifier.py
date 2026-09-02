@@ -45,6 +45,7 @@ class IntentClassifier:
             return ("__memory_query__", {}, 0.95, "detected memory-query intent (answer from injected memory, no web search)")
 
         # -1) 看/读文件夹意图: "看下 X 文件夹/目录" → 定位并在当前目录下 list
+        # 支持 "桌面上的 X" 等跨目录文件夹访问
         if any(k in tl for k in ("看下", "看一下", "看看", "查看", "浏览", "读一下", "读取", "打开") ) and any(
             k in tl for k in ("文件夹", "目录", "folder", "dir", "目录结构", "里面", "内容")
         ):
@@ -58,6 +59,15 @@ class IntentClassifier:
                 raw = raw.replace("文件夹", "").replace("目录", "").replace("folder", "").replace("dir", "").strip()
                 if raw:
                     fname = raw
+            
+            # 额外支持 "桌面上的 X" 这种路径前缀模式
+            m2 = re.search(r'(?:桌面上?|桌面的?|桌面实验)\s*(?:的)?\s*([^，。！？!\s]+)', t, re.IGNORECASE)
+            if m2 and not fname:
+                name_part = m2.group(1).strip()
+                if name_part:
+                    fname = f"Desktop/{name_part}"
+                    return ("file_ops", {"action": "list", "path": fname}, 0.9, "detected folder-read intent with desktop path")
+            
             if fname:
                 return ("file_ops", {"action": "list", "path": fname}, 0.9, "detected folder-read intent")
 
