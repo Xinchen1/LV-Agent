@@ -1615,16 +1615,16 @@ class SuperAgentCLI:
       elif user_input.startswith('!'):
         cmd = user_input[1:].strip()
         if not cmd:
-          print(terminal.style(" usage: !<command> 直接执行 shell 命令", "2"))
+          print(terminal.token(" usage: !<command> to run shell directly", "muted"))
           continue
-        print(terminal.style(f" -> {cmd}", "2", "38;5;240"))
+        print(terminal.token(f" → {cmd}", "muted"))
         try:
           import subprocess as _sp
           _proc = _sp.run(cmd, shell=True, cwd=os.getcwd())
         except KeyboardInterrupt:
-          print(terminal.style(" 中断", "2"))
+          print(terminal.token(" interrupted", "warning"))
         except Exception as e:
-          print(terminal.style(f" shell error: {e}", "31"))
+          print(terminal.token(f" shell error: {e}", "error"))
         continue
 
       # @文件引用: 展开 @path 为文件内容(参考设计方案), 支持相对路径与 glob

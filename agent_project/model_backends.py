@@ -18,18 +18,30 @@ import requests
 from .terminal import style as _style
 
 
+_TIKTOKEN_ENC = None
+
+
+def _get_tiktoken():
+    """Cached tiktoken encoder — avoids repeated get_encoding() calls."""
+    global _TIKTOKEN_ENC
+    if _TIKTOKEN_ENC is None:
+        try:
+            import tiktoken
+            _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN_ENC = False
+    return _TIKTOKEN_ENC
+
+
 def _estimate_tokens(text: str) -> int:
     """Estimate token count. Prefer tiktoken; fall back to character heuristic."""
     if not text:
         return 0
-    try:
-        import tiktoken
-        enc = tiktoken.get_encoding("cl100k_base")
+    enc = _get_tiktoken()
+    if enc:
         return len(enc.encode(text))
-    except Exception:
-        # CJK-heavy text averages ~1.5 chars/token; Latin text ~4 chars/token.
-        cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-        return max(1, cjk // 2 + (len(text) - cjk) // 4)
+    cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    return max(1, cjk // 2 + (len(text) - cjk) // 4)
 
 
 def _extract_http_status(exc: Exception) -> Optional[int]:
