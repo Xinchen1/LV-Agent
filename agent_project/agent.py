@@ -3528,9 +3528,17 @@ class OpenMythosAgent:
 
             # 外层闭环: 质量不达标时在 max_outer_loops 预算内重试(尝试不同策略), 实现"反馈→重规划→重试"
             # 不再只重试一次, 而是用完外层循环预算或质量达标为止。
-            outer_budget = max(1, self.config.max_outer_loops)
-            outer_attempt = 1
-            self.outer_loop_counter = 1
+            # Use LoopController to determine loop count, capped by config max_outer_loops
+            base_loops = self.reasoning_engine.loop_controller.determine_loops(
+                task,
+                getattr(self, "_strategy_override", None)
+                or self.reasoning_engine.strategy
+                or ReasoningStrategy.REACT,
+            )
+            # Hard cap from config (user-editable)
+            outer_budget = min(max(base_loops, 1), self.config.max_outer_loops)
+            outer_attempt = 0
+            # outer_loop_counter retains its display purpose below
             quality = getattr(trace, 'quality_score', 1.0)
             retry_strategies = [ReasoningStrategy.VERIFICATION, ReasoningStrategy.SELF_CONSISTENCY]
             while quality < 0.45 and outer_attempt < outer_budget and not code_mode and mode != 'reflection':
