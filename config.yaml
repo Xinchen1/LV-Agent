@@ -168,7 +168,21 @@ logging:
   file: ./logs/agent.log
   console: false
   rich_markup: true
-  output_mode: auto
+  output_mode: auto\ thinking:
+  # Unified thinking/loop configuration (priority over scattered individual keys)
+  #  此配置区域优先于各散落键; 旧键仍为向后兼容
+  min_loops: 2
+  max_loops: 16
+  default_loops: 4
+  
+  # Hard upper limit for outer loops (user-editable; also bounds LoopController output)
+  max_outer_loops: 12
+  
+  # The following keys are kept for backward compatibility;
+  # if missing, Thinking section values are used.
+  # loop_controller_min_loops:
+  # loop_controller_max_loops:
+  # loop_controller_default_loops:
 planning:
   enabled: true
   default_strategy: adaptive
