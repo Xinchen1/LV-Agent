@@ -323,21 +323,43 @@ class ReasoningEngine:
 
     # ===================== Self-Consistency =====================
 
+    def _run_multiple_rollouts(
+        self,
+        ctx: ExecutionContext,
+        n: int,
+        policy,
+        post_process,
+        status_msg: str,
+    ) -> Any:
+        """Run N independent ReAct rollouts with cloned contexts, then apply post-processing.
+
+        每个 rollout 使用独立的上下文状态(避免共享 steps/observations), 中间 rollout 不流式输出.
+        """
+        traces = []
+        for i in range(n):
+            sub = self._clone_ctx(ctx)
+            if i < n - 1:
+                sub.stream_callback = None
+            traces.append(self.execution_engine.run(policy, sub))
+        if ctx.stream_callback:
+            ctx.stream_callback("status", status_msg.format(n=n))
+        return post_process(traces)
+
+    # ===================== Self-Consistency =====================
+
     def _reason_self_consistency(self, ctx: ExecutionContext, n_samples: int = 3) -> Any:
         """Self-Consistency: 同一任务独立采样多次, 对最终答案做多数投票.
 
         每个 sample 是一次完整的 ReAct 执行(含工具). 中间采样不流式输出,
         投票胜出的答案平票时取质量分最高者. 返回胜出的 ExecutionTrace.
         """
-        traces = []
-        for i in range(n_samples):
-            sub = self._clone_ctx(ctx)
-            if i < n_samples - 1:
-                sub.stream_callback = None
-            traces.append(self.execution_engine.run(ReActPolicy(), sub))
-        if ctx.stream_callback:
-            ctx.stream_callback("status", f"self-consistency: {n_samples} samples, majority vote")
-        return self._vote_by_answer(traces)
+        return self._run_multiple_rollouts(
+            ctx,
+            n_samples,
+            ReActPolicy(),
+            self._vote_by_answer,
+            "self-consistency: {n} samples, majority vote",
+        )
 
     def _vote_by_answer(self, traces: List[Any]) -> Any:
         """按最终答案多数投票, 平票取 quality_score 最高者."""
@@ -359,16 +381,13 @@ class ReasoningEngine:
         每个 rollout 是一次完整 ReAct 执行(带工具调用), 以 trace.quality_score
         作为该路径的回报, 返回回报最高的轨迹. 中间 rollout 不流式输出.
         """
-        traces = []
-        for i in range(n_rollouts):
-            sub = self._clone_ctx(ctx)
-            if i < n_rollouts - 1:
-                sub.stream_callback = None
-            traces.append(self.execution_engine.run(ReActPolicy(), sub))
-        best = max(traces, key=lambda t: t.quality_score)
-        if ctx.stream_callback:
-            ctx.stream_callback("status", f"monte-carlo: {n_rollouts} rollouts, best score={best.quality_score:.2f}")
-        return best
+        return self._run_multiple_rollouts(
+            ctx,
+            n_rollouts,
+            ReActPolicy(),
+            lambda traces: max(traces, key=lambda t: t.quality_score),
+            "monte-carlo: {n} rollouts, best score={best:.2f}",
+        )
 
     # ===================== Tree-of-Thoughts =====================
 
