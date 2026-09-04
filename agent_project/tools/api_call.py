@@ -39,14 +39,7 @@ class ApiCallTool(BaseTool):
     }
 
     def __init__(self, allowed_hosts: list = None, timeout: int = 30):
-        # 默认允许的hosts(示例 + 常用开放API)
-        self.allowed_hosts = set(allowed_hosts or [
-            "jsonplaceholder.typicode.com",
-            "httpbin.org",
-            "api.github.com",
-            "raw.githubusercontent.com",
-            "github.com",
-        ])
+        self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.timeout = timeout
 
     def execute(self, url: str, method: str = "GET", headers: Dict = None, data: Dict = None) -> ToolResult:
@@ -96,15 +89,23 @@ class ApiCallTool(BaseTool):
             return ToolResult(success=False, output="", error=f"Error: {str(e)}")
 
     def _is_allowed_url(self, url: str) -> bool:
-        """检查URL是否在允许的hosts列表中"""
+        """检查URL是否允许访问。无白名单时允许所有外部URL，阻止内网SSRF。"""
         from urllib.parse import urlparse
+        import ipaddress
         try:
             parsed = urlparse(url)
             hostname = parsed.netloc.lower()
-            # 移除端口号（如果有）
             if ':' in hostname:
                 hostname = hostname.split(':')[0]
-            return hostname in self.allowed_hosts or 'localhost' in hostname
+            if self.allowed_hosts:
+                return hostname in self.allowed_hosts
+            if hostname in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+                return False
+            try:
+                ip = ipaddress.ip_address(hostname)
+                return not (ip.is_private or ip.is_loopback or ip.is_link_local)
+            except ValueError:
+                return True
         except Exception:
             return False
 
