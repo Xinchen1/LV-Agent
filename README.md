@@ -141,7 +141,7 @@ cp config.example.yaml config.yaml
 ./lv            # 或 python super_agent.py
 ```
 
-**支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
+**支持后端：** AMD Radeon（默认，DeepSeek-V4-Flash）/ DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
 
 ---
 
@@ -196,6 +196,15 @@ cp config.example.yaml config.yaml
 ---
 
 ## 更新日志
+
+### 2026-09-04
+
+- **默认模型** — 切换为 AMD Radeon 平台 `DeepSeek-V4-Flash`（前端显示名 `cancri fast`），OpenAI 兼容格式；`models.yaml` 注册 AMD provider；该模型自动前置超级智能编程专家 system prompt 约束。
+- **执行引擎** — 跨步重复调用强制收敛：首次重复返回缓存+换工具提示，二次重复直接下 `STOP` 指令要求输出最终答案；去重不再覆盖原始缓存；`policies` 历史回注补 `Action` 行（Thought→Action→Observation 完整链）。
+- **工具能力** — `web_search` 空结果早停（失败明示，不再换词死循环）；observation 压缩为 title/url/snippet/score 四字段（约 1/3 体积）；`sequential_fallback` 默认开启。
+- **意图识别** — 显式搜索动词（搜索/查一下/最新/新闻…）优先于 `python` 等裸关键词，`intent_classifier` 与 `agent.py` 双副本同修。
+- **记忆与上下文** — `compress_events` 防膨胀守卫（短文本不再越压越大）+ token-aware 硬截断（中英文都守预算）。
+- **打包** — `build_mac_app.sh` 补 `VERSION`/`ARCH` 变量（DMG 文件名修正）、launcher 加 shebang；Electron 客户端（`desktop/`）可打 `LV Agent-1.0.0-arm64.dmg`，首次运行自动落配置到用户目录。
 
 ### 2026-09-02
 
