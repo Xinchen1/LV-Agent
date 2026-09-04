@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir \
     "playwright>=1.40.0"
 
 RUN playwright install chromium --with-deps
-    "aiohttp>=3.9.0"
 
 COPY agent_project /app/agent_project
 COPY web/server.py /app/web/server.py
