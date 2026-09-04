@@ -3894,7 +3894,8 @@ class OpenMythosAgent:
             pattern = re.compile(re.escape(alias) + r"(?:项目|文件夹|目录|文件)?\s*的\s*(.+)", re.IGNORECASE)
             m = pattern.search(task)
             if m:
-                target_name = m.group(1).strip()
+                # 截断到第一个分句标点: "桌面的grok-build文件夹，修改它…" → "grok-build文件夹"
+                target_name = re.split(r'[，。！？、；;,.!?]', m.group(1).strip(), maxsplit=1)[0].strip()
                 target_name = re.sub(r'(项目|文件夹|目录|文件)\s*$', '', target_name).strip()
                 break
 
@@ -3903,7 +3904,7 @@ class OpenMythosAgent:
             for marker in ["下的", "里面", "中的", "上的", "里的"]:
                 if marker in task:
                     idx = task.rfind(marker)
-                    target_name = task[idx + len(marker):].strip()
+                    target_name = re.split(r'[，。！？、；;,.!?]', task[idx + len(marker):].strip(), maxsplit=1)[0].strip()
                     target_name = re.sub(r'(项目|文件夹|目录|文件)\s*$', '', target_name).strip()
                     break
 
@@ -3924,6 +3925,9 @@ class OpenMythosAgent:
                 target_name = target_name[len(alias):].lstrip("/\\")
                 break
         if not target_name or len(target_name) < 2:
+            return None
+        # 长度守卫: 超长基本是整句误捕获(如含逗号后半句没切干净), 交回正常 ReAct 循环处理
+        if len(target_name) > 40:
             return None
 
         # 用 glob 定向查找替代全盘 find: 限定在 cwd 和指定 root, 不触发权限错误/慢扫描
@@ -3948,9 +3952,10 @@ class OpenMythosAgent:
                 except Exception:
                     continue
             if not output_parts:
-                output = f"No results found for '{target_name}'."
-            else:
-                output = "\n\n".join(output_parts)
+                # 没找到: 返回 None 交回正常 ReAct 循环(列目录/换工具/真实干活),
+                # 而不是用 "Found 0" 冒充成功提前结束(会导致任务后半段被跳过)。
+                return None
+            output = "\n\n".join(output_parts)
             final = f"Found matches for '{target_name}':\n{output}"
             return {
                 "final_answer": final,
