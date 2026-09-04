@@ -100,9 +100,20 @@ class WorkingMemory:
                 metadata=metadata or {}
             ))
             if len(self.events) > self.max_events:
-                # Drop oldest quarter to avoid linear growth.
+                # Drop oldest quarter to avoid linear growth,
+                # but never drop the first user message (原始需求常驻保护).
                 drop = self.max_events // 4
-                self.events = self.events[drop:]
+                first_idx = next(
+                    (i for i, e in enumerate(self.events)
+                     if e.role == "user" and e.event_type == "message"),
+                    None,
+                )
+                if first_idx is not None and first_idx < drop:
+                    first = self.events[first_idx]
+                    rest = self.events[:first_idx] + self.events[first_idx + 1:]
+                    self.events = [first] + rest[drop:]
+                else:
+                    self.events = self.events[drop:]
 
     def add_tool_call(self, tool_name: str, arguments: Dict[str, Any]):
         self.add("assistant", f"{tool_name}({arguments})", "tool_call",
@@ -551,6 +562,45 @@ class ContextCompressor:
             cut = int(cut * 0.9)
         return text[:cut]
 
+    def summarize_narrative(self, events: List[WorkingMemoryEvent],
+                              target_tokens: int) -> str:
+        """结构化叙事摘要: 已确认事实 / 用户偏好 / 未完成事项.
+
+        替代扁平 extractive, 长会话恢复时关键信息不丢。
+        无 LLM 时回退 extractive(首请求+最近)。
+        """
+        if not events:
+            return ""
+        full_text = "\n".join(f"{e.role}: {e.content[:500]}" for e in events)
+        if self.llm_client:
+            try:
+                summary = self.llm_client.chat([
+                    {"role": "system", "content": (
+                        "Summarize the earlier conversation into a structured note "
+                        "for resuming work. Output exactly three sections, each 1-3 bullets:\n"
+                        "Facts: confirmed facts/decisions/results\n"
+                        "Preferences: user preferences/constraints discovered\n"
+                        "Open: unfinished items, open questions, next steps\n"
+                        "Be concise, no filler."
+                    )},
+                    {"role": "user", "content": full_text[:4000]},
+                ], temperature=0.2, max_tokens=max(64, target_tokens // 2))
+                summary = (summary or "").strip()
+                if summary:
+                    return summary
+            except Exception:
+                pass
+        # Extractive 回退
+        first_user = next((e for e in events if e.role == "user"), None)
+        recent = events[-4:]
+        parts = []
+        if first_user:
+            parts.append(f"Facts: original request: {first_user.content[:200]}")
+        for e in recent:
+            prefix = "User" if e.role == "user" else e.role.capitalize()
+            parts.append(f"- {prefix}: {e.content[:150]}")
+        return self._truncate_to_tokens("\n".join(parts), target_tokens)
+
     def compress_observations(self, observations: List[str],
                               target_tokens: int) -> str:
         if not observations:
@@ -638,6 +688,16 @@ class ContextEngine:
                 except Exception as e:
                     print(_style(f"  ContextEngine: semantic memory init failed ({e})", "2"))
 
+    @staticmethod
+    def _task_budget_multiplier(task: str) -> float:
+        """按任务类型动态调整工作记忆预算."""
+        t = (task or "").lower()
+        heavy = ("研究", "分析", "调研", "报告", "重构", "实现", "代码", "debug",
+                 "research", "analy", "report", "refactor", "implement", "code", "debug")
+        if any(k in t for k in heavy):
+            return 1.5
+        return 1.0
+
     def _llm_client(self) -> Optional[Any]:
         """Return a lightweight LLM client for memory operations if available."""
         if self.backend is None:
@@ -672,24 +732,32 @@ class ContextEngine:
             current = self.working_memory.format_for_prompt(max_tokens=budget * 4)
             if _estimate_tokens(current) <= budget:
                 return 0
-            # 保留最近 1/3 事件, 把更旧的部分压缩为摘要塞回
-            keep = max(10, len(events) // 3)
-            old = events[:-keep]
-            recent = events[-keep:]
+            # 首轮保护: 第一个用户消息(原始需求)常驻, 永不压缩/丢弃;
+            # 只压缩"中间段", 保留最近 1/3 事件
+            first = None
+            for e in events:
+                if e.role == "user" and e.event_type == "message":
+                    first = e
+                    break
+            rest = [e for e in events if e is not first]
+            keep = max(10, len(rest) // 3)
+            old = rest[:-keep]
+            recent = rest[-keep:]
             if not old:
                 return 0
             summary = ""
             try:
                 if self.compressor is not None:
-                    summary = self.compressor.compress_events(old, target_tokens=min(256, budget // 4))
+                    summary = self.compressor.summarize_narrative(old, target_tokens=min(256, budget // 4))
             except Exception:
                 pass
             with self.working_memory._lock:
-                new_events = recent[:]
+                new_events = ([first] if first is not None else []) + recent[:]
                 if summary:
-                    new_events.insert(0, WorkingMemoryEvent(
+                    insert_at = 1 if first is not None else 0
+                    new_events.insert(insert_at, WorkingMemoryEvent(
                         role="assistant",
-                        content=f"[压缩的早前对话] {summary}"[:2000],
+                        content=f"[早前对话摘要] {summary}"[:2000],
                         event_type="summary",
                         metadata={"compressed": len(old)},
                     ))
@@ -746,7 +814,9 @@ class ContextEngine:
             return {"working": self.working_memory.format_for_prompt(self.working_budget)}
 
         # 1. Working memory (most important, freshest)
-        working_ctx = self.working_memory.format_for_prompt(self.working_budget)
+        # 动态预算: 研究/分析/代码类任务给更多工作记忆, 简单问答保持默认
+        working_ctx = self.working_memory.format_for_prompt(
+            int(self.working_budget * self._task_budget_multiplier(task)))
 
         # 2. User profile
         profile_ctx = self.user_profile.format(self.profile_budget)
