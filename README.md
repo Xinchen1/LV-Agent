@@ -205,6 +205,7 @@ cp config.example.yaml config.yaml
 - **记忆与上下文** — `compress_events` 防膨胀守卫（短文本不再越压越大）+ token-aware 硬截断（中英文都守预算）。
 - **打包** — `build_mac_app.sh` 补 `VERSION`/`ARCH` 变量（DMG 文件名修正）、launcher 加 shebang；Electron 客户端（`desktop/`）可打 `LV Agent-1.0.0-arm64.dmg`，首次运行自动落配置到用户目录。
 - **定位快路** — 修 `_try_location_fast_path` 三处误劫持：目标名截断到第一个分句标点（整句中文不再被当文件名）+ 长度守卫；只收 `metadata.count>0` 真实命中，空结果/复合任务（定位+修改）回退正常循环，避免假完成跳过后半任务。
+- **学习闭环 P1** — 任务前注入 memskill 选中技能（之前学完永不使用）；成功率按任务成败记分；技能选择加中文二元组匹配；`/memskill list` 显示 score。
 
 ### 2026-09-02
 
