@@ -1829,11 +1829,35 @@ class OpenMythosAgent:
         return None
 
     def _get_skill_context(self, task: str) -> str:
-        """Return the rendered prompt of the active skill, if any."""
+        """Return the rendered prompt of the active skill, if any.
+
+        闭环关键: 除旧 skill_engine 外, 同时注入 memskill 学到的技能,
+        否则 learn_from_interaction 学完后永远进不了下一次任务的 prompt。
+        """
+        parts = []
         engine = getattr(self, "skill_engine", None)
-        if engine is None:
-            return ""
-        return engine.render_active(task)
+        if engine is not None:
+            try:
+                rendered = engine.render_active(task)
+                if rendered:
+                    parts.append(rendered)
+            except Exception:
+                pass
+        mem = getattr(self, "memskill_engine", None)
+        if mem is not None:
+            try:
+                selected = mem.controller.select(task)
+                for s, score in (selected or [])[:3]:
+                    try:
+                        body = s.to_markdown()
+                    except Exception:
+                        body = getattr(s, "description", "") or ""
+                    parts.append(
+                        f"### Learned skill: {s.name} (relevance {score:.2f})\n{body}"
+                    )
+            except Exception:
+                pass
+        return "\n\n".join(parts)
 
     def _get_skill_tool_hint(self) -> List[str]:
         """Return preferred tools declared by the active skill."""
