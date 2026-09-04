@@ -2070,7 +2070,9 @@ class OpenMythosAgent:
                 is_continuation = False  # 走工具执行路径
                 task = f"继续执行上一条任务: {last_task}\n(用户已同意/确认, 若已完成则确认结果; 若未完成则现在真正执行并给出结果)"
                 self.logger.info(f"continuation agree -> re-execute last task: {last_task[:60]}")
-        if is_continuation and self._is_pure_nudge(task):
+        # 纯催促本身即延续(无新任务信息), 无需 is_continuation 前提;
+        # 否则"可以了没"类状态追问走单次空答, 永不回头干活。
+        if self._is_pure_nudge(task):
             last_task = self._last_user_task()
             if last_task:
                 is_continuation = False  # 走工具执行路径
@@ -3872,7 +3874,7 @@ class OpenMythosAgent:
         locate_verbs = ["查找", "找一下", "搜索", "搜一下", "看看有没有", "看看", "看下", "在哪里", "在哪", "位于", "找", "查", "搜"]
         # 复合任务守卫: 定位只是第一步, 后面还有修改/运行等动作时不走 fast path,
         # 否则后半段任务会被跳过(如"看下X文件夹，修改它为免登录"只定位不修改)
-        if re.search(r'(修改|更新|优化|完善|改进|增强|重构|修复|调整|删除|去除|运行|执行|启动|安装|部署|重写|改写)', task):
+        if re.search(r'(修改|改为|改成|改动|更新|优化|完善|改进|增强|重构|修复|调整|删除|去除|运行|执行|启动|安装|部署|重写|改写|免登|不用登录|去登录|跳过登录)', task):
             return None
         locate_suffixes = ["项目", "文件夹", "目录", "文件"]
         has_verb = any(v in task for v in locate_verbs)

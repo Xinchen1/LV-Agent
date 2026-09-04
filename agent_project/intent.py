@@ -23,6 +23,16 @@ def is_pure_nudge(task: str) -> bool:
     # 常见纯催促短句
     if t in {"继续", "继续啊", "继续吧", "接着", "接着呢", "继续做", "继续啊！", "go on", "continue", "continue please"}:
         return True
+    # 状态追问(好了没/可以了没/看了没…): 无新任务信息, 答案只能来自历史任务状态
+    if re.fullmatch(r"[?？]*", t):
+        return True
+    if re.fullmatch(
+        r"(那|所以|现在)?(好了没|好了吗|可以了没|可以了吗|看了没|看了吗|怎么样了|如何了|"
+        r"完成了吗|完成没|搞定没|搞定了吗|行了没|行了吗|查到了吗|找到了吗|"
+        r"done yet|is it done|ready yet|any update|status)[?？!！.。]*",
+        t,
+    ):
+        return True
     return False
 
 

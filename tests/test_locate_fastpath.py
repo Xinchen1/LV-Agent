@@ -62,6 +62,14 @@ def test_empty_results_not_success():
     assert a._try_location_fast_path("找一下桌面的不存在xyz123文件夹") is None
 
 
+def test_change_to_compound_falls_through():
+    # "改为/不用登录" 等后继动作 → 不走定位快路
+    g = FakeGlob(hits=("x",))
+    a = make_agent(g)
+    assert a._try_location_fast_path("看下桌面的grok文件夹，需要改为不用登录就可以使用") is None
+    assert a._try_location_fast_path("找下桌面的app文件夹，改成免登录版") is None
+
+
 def test_real_hit_returns_success():
     g = FakeGlob(hits=("a", "b"))
     a = make_agent(g)
