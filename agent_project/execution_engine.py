@@ -941,7 +941,9 @@ class ExecutionEngine:
             return None
         try:
             from .tools import TOOLS_REGISTRY
-            tools = TOOLS_REGISTRY.get_openai_tools()
+            # P3: 只传任务相关子集(ctx.available_tools), 而非全量19个schema
+            names = set(ctx.available_tools.keys()) if ctx.available_tools else None
+            tools = TOOLS_REGISTRY.get_openai_tools(names=names)
             if not tools:
                 return None
             max_tokens = 16384 if ctx.code_mode else 2048

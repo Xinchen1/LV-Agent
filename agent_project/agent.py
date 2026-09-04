@@ -3502,7 +3502,12 @@ class OpenMythosAgent:
                 task_with_context = "\n\n".join(context_parts) + f"\n\n## Current Task:\n{task}"
             # MCP orchestrator: dynamically select relevant tools and suggest combinations
             all_tools = TOOLS_REGISTRY.get_tools_dict()
-            available_tools = all_tools
+            # P3: 任务感知子集(常驻核心+关键词加挂), 省每轮schema token
+            try:
+                from .tools import select_tools_for_task
+                available_tools = select_tools_for_task(task, all_tools)
+            except Exception:
+                available_tools = all_tools
             skill_tools = self._get_skill_tool_hint()
             if skill_tools:
                 # Boost skill-preferred tools to the front of the available map.
@@ -3608,9 +3613,14 @@ class OpenMythosAgent:
             }
         else:
             # Unified fallback: single-shot DirectPolicy loop via ExecutionEngine
+            try:
+                from .tools import select_tools_for_task as _select
+                _fallback_tools = _select(task, TOOLS_REGISTRY.get_tools_dict())
+            except Exception:
+                _fallback_tools = TOOLS_REGISTRY.get_tools_dict()
             direct_ctx = ExecutionContext(
                 task=task,
-                available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                available_tools=_fallback_tools,
                 config=self.config,
                 max_steps=n_loops,
                 stream_callback=stream_callback,
