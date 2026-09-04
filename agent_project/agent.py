@@ -469,7 +469,11 @@ class OpenMythosAgent:
         elif self.config.backend == "openai":
             """OpenAI-compatible endpoint (local or cloud)"""
             openai_cfg = self.config.openai
-            api_key = openai_cfg.get('api_key') or os.getenv('OPENAI_API_KEY')
+            # LV_API_KEY 为通用兜底(c5e5946 把 config.yaml 内 key 外置后的约定),
+            # 避免 key 置空后终端 TUI 直接 401。
+            api_key = (openai_cfg.get('api_key')
+                       or os.getenv('OPENAI_API_KEY')
+                       or os.getenv('LV_API_KEY'))
             
             # api_key can be None for local endpoints without auth
             if api_key == "skip" or api_key is None:
