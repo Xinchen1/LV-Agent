@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+  <title>LV Agent</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Splash -->
+  <div id="splash">
+    <div class="splash-inner">
+      <div class="splash-logo">LV</div>
+      <div class="splash-title">LV Agent</div>
+      <div class="splash-slogan">Deep thinking, real tools — Cleveris Research</div>
+      <div class="splash-loader"><span></span></div>
+      <div class="splash-tip">Terminal-native · Harness kernel · Memory</div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-traffic"></div>
+        <div class="sidebar-tabs">
+          <button class="tab active">SESSIONS</button>
+          <button class="tab">BOTS</button>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-item" id="btnNewSession"><span class="nav-icon">＋</span> New session <span class="nav-short">⌘ N</span></button>
+        <button class="nav-item" data-view="capabilities"><span class="nav-icon">◈</span> Capabilities</button>
+        <button class="nav-item" data-view="messaging"><span class="nav-icon">✉</span> Messaging</button>
+        <button class="nav-item" data-view="artifacts"><span class="nav-icon">▭</span> Artifacts</button>
+        <button class="nav-item" data-view="scheduled"><span class="nav-icon">◎</span> Scheduled jobs</button>
+      </nav>
+      <div class="sidebar-search">
+        <input id="sidebarSearch" type="text" placeholder="Search sessions..." />
+      </div>
+      <div class="sidebar-section">
+        <div class="section-title">PINNED</div>
+        <div class="section-hint">Shift-click a chat to pin</div>
+      </div>
+      <div class="sidebar-section">
+        <div class="section-title">SESSIONS <span class="section-filter">≡</span></div>
+        <div class="session-item active"><span>•</span> 你好 <span class="session-time">1d</span></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="section-title subtle">LAST WEEK</div>
+        <div class="session-item"><span>•</span> 友好问候 <span class="session-time">3d</span></div>
+        <div class="session-item"><span>•</span> Friendly greeting <span class="session-time">9d</span></div>
+      </div>
+      <div class="sidebar-bottom">
+        <button class="sidebar-bottom-btn" title="Home">⌂</button>
+        <button class="sidebar-bottom-btn">＋</button>
+        <button class="sidebar-bottom-btn">◈</button>
+        <span class="sidebar-version">Gateway ready · mac · v0.1.0</span>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div id="main">
+      <header id="topbar" style="-webkit-app-region: drag;">
+        <div class="topbar-left">
+          <span class="topbar-title">LV Agent</span>
+          <span id="statusDot" class="status-dot offline" title="Offline"></span>
+          <span class="topbar-subtitle" id="modelBadge">Harness · ReAct</span>
+        </div>
+        <div class="topbar-right" style="-webkit-app-region: no-drag;">
+          <button id="btnTheme" class="icon-btn" title="切换主题 (深色/浅色)">◐</button>
+          <button id="btnSettings" class="icon-btn" title="Settings (⌘,) — 配置模型与密钥">⚙</button>
+          <button id="btnNew" class="icon-btn" title="Start / Restart Agent">▶</button>
+        </div>
+      </header>
+
+      <!-- Update banner (shown when a newer version is available) -->
+      <div id="updateBanner" class="update-banner hidden">
+        <span class="update-icon">↑</span>
+        <span class="update-text"><strong id="updateTitle">Update available</strong> <span id="updateDetail"></span></span>
+        <button id="btnUpdateDownload" class="update-btn">Download</button>
+        <button id="btnUpdateSkip" class="update-btn ghost">Skip</button>
+        <button id="btnUpdateDismiss" class="update-btn ghost" title="Dismiss">×</button>
+      </div>
+
+      <!-- Settings Panel -->
+      <div id="settingsPanel" class="settings-panel hidden">
+        <div class="settings-header">
+          <span>Model Configuration — stored to ~/Library/Application Support/LV Agent/config.yaml</span>
+          <button id="btnCloseSettings" class="icon-btn">×</button>
+        </div>
+        <div class="settings-body">
+          <div class="form-row">
+            <label>Backend</label>
+            <select id="cfgBackend">
+              <option value="openai">OpenAI Compatible</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Model</label>
+            <input id="cfgModel" type="text" placeholder="e.g. poolside/laguna-xs-2.1" />
+          </div>
+          <div class="form-row">
+            <label>API Base URL</label>
+            <input id="cfgBaseUrl" type="text" placeholder="https://integrate.api.nvidia.com/v1" />
+          </div>
+          <div class="form-row">
+            <label>API Key <span style="color:var(--text-dim);font-weight:400;">— 点击显示，失焦自动隐藏；不会写入日志</span></label>
+            <input id="cfgApiKey" type="text" placeholder="nvapi-... / sk-..." autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="form-row two-col">
+            <div>
+              <label>Temperature</label>
+              <input id="cfgTemp" type="number" min="0" max="2" step="0.1" />
+            </div>
+            <div>
+              <label>Max Tokens</label>
+              <input id="cfgMaxTokens" type="number" min="256" max="131072" step="256" />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="btnSaveConfig" class="primary-btn">Save</button>
+            <span id="cfgStatus" class="cfg-status"></span>
+          </div>
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">Updates</div>
+          <div class="form-row">
+            <label>Manifest URL <span style="color:var(--text-dim);font-weight:400;">— GitHub raw JSON with latest version & download link</span></label>
+            <input id="cfgUpdateUrl" type="text" placeholder="https://raw.githubusercontent.com/user/repo/main/update-manifest.json" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="form-actions">
+            <button id="btnCheckUpdates" class="primary-btn">Check now</button>
+            <span id="updateCheckStatus" class="cfg-status"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- View Panels (sidebar nav targets) -->
+      <section id="viewCapabilities" class="view-panel hidden" data-view="capabilities">
+        <header class="view-header">
+          <button class="view-back" data-back="chat" title="Back to chat">‹</button>
+          <h2 class="view-title">Capabilities</h2>
+          <span class="view-sub">Harness kernel · ReAct · 20+ tools</span>
+        </header>
+        <div class="view-body" id="capabilitiesBody"></div>
+      </section>
+
+      <section id="viewMessaging" class="view-panel hidden" data-view="messaging">
+        <header class="view-header">
+          <button class="view-back" data-back="chat" title="Back to chat">‹</button>
+          <h2 class="view-title">Messaging</h2>
+          <span class="view-sub">Telegram bot bridge</span>
+        </header>
+        <div class="view-body" id="messagingBody"></div>
+      </section>
+
+      <section id="viewArtifacts" class="view-panel hidden" data-view="artifacts">
+        <header class="view-header">
+          <button class="view-back" data-back="chat" title="Back to chat">‹</button>
+          <h2 class="view-title">Artifacts</h2>
+          <span class="view-sub">Generated reports & files</span>
+          <button class="view-refresh" id="btnRefreshArtifacts" title="Refresh">⟳</button>
+        </header>
+        <div class="view-body" id="artifactsBody"></div>
+      </section>
+
+      <section id="viewScheduled" class="view-panel hidden" data-view="scheduled">
+        <header class="view-header">
+          <button class="view-back" data-back="chat" title="Back to chat">‹</button>
+          <h2 class="view-title">Scheduled jobs</h2>
+          <span class="view-sub">Recurring agent tasks</span>
+          <button class="view-refresh" id="btnRefreshJobs" title="Refresh">⟳</button>
+        </header>
+        <div class="view-body" id="scheduledBody"></div>
+      </section>
+
+      <!-- Chat Area -->
+      <div id="chatArea" class="chat-view">
+        <div id="chatMessages">
+          <div class="welcome-msg">
+            <div class="welcome-icon">LV</div>
+            <p class="welcome-title">LV Agent</p>
+            <p class="welcome-sub">Deep thinking, real tools. 开始对话吧。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input Bar -->
+      <div id="inputBar" class="chat-view">
+        <div class="input-wrap">
+          <button class="input-plus" title="Add">＋</button>
+          <textarea id="userInput" placeholder="Type a message..." rows="1"></textarea>
+          <span class="input-meta">Hy3 Free · Med ▾</span>
+          <button id="btnSend" class="send-btn" disabled>↑</button>
+        </div>
+        <div class="input-hint">model changed · Press Enter to send, Shift+Enter newline</div>
+      </div>
+    </div>
+  </div>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -178,7 +178,13 @@ class ReasoningEngine:
         self.tokenizer = tokenizer
         self.config = config
 
-        if hasattr(config, "loop_controller_min_loops"):
+        # Priority: config.thinking.* > loop_controller_* (old) > legacy defaults
+        thinking = getattr(config, "thinking", {})
+        if isinstance(thinking, dict) and thinking.get("min_loops") is not None:
+            min_loops = thinking.get("min_loops", 2)
+            max_loops = thinking.get("max_loops", 16)
+            default_loops = thinking.get("default_loops", 4)
+        elif hasattr(config, "loop_controller_min_loops"):
             min_loops = config.loop_controller_min_loops
             max_loops = config.loop_controller_max_loops
             default_loops = config.loop_controller_default_loops
