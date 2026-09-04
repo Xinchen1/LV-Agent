@@ -93,10 +93,15 @@ class ToolRegistry:
     def get_tools_dict(self) -> Dict[str, str]:
         return {t.name: t.description for t in self._tools.values()}
 
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
-        """Convert registered tools to OpenAI / Anthropic function-calling format."""
+    def get_openai_tools(self, names: Optional[set] = None) -> List[Dict[str, Any]]:
+        """Convert registered tools to OpenAI / Anthropic function-calling format.
+
+        names 非空时只返回子集(Hermes式渐进披露: 每轮只传任务相关工具schema)。
+        """
         tools = []
         for desc in self._descriptions:
+            if names is not None and desc["name"] not in names:
+                continue
             tools.append({
                 "type": "function",
                 "function": {
@@ -152,6 +157,40 @@ class ToolRegistry:
 
 # Global singleton
 TOOLS_REGISTRY = ToolRegistry()
+
+# ---- P3: 任务感知工具子集(Hermes式渐进披露轻量版) ----
+# 常驻核心工具 + 按任务关键词动态加挂, 避免每轮全量 19 个 schema 燒 token。
+CORE_TOOLS = {
+    "bash_exec", "file_ops", "glob", "search_files",
+    "web_search", "python_exec", "calculator", "project_context",
+}
+
+TASK_TOOL_HINTS = [
+    (("天气", "weather", "气温", "降雨"), {"weather"}),
+    (("git", "仓库", "提交", "commit", "分支"), {"git"}),
+    (("github", "issue", "pr", "repo"), {"github_search"}),
+    (("pdf", "论文", "paper"), {"pdf_tool"}),
+    (("数据库", "sql", "database", "表结构"), {"database"}),
+    (("网页", "打开链接", "网址", "url", "http"), {"read_web", "browser"}),
+    (("api", "接口", "http请求", "webhook"), {"api_call"}),
+    (("进程", "process", "后台任务"), {"process_manager"}),
+    (("mcp",), {"mcp_setup"}),
+    (("图灵", "turing"), {"turing_machine"}),
+]
+
+
+def select_tools_for_task(task: str, all_tools: Dict[str, str]) -> Dict[str, str]:
+    """按任务选工具子集: 常驻核心 + 关键词命中加挂; 无命中回退全量(安全)。"""
+    if not task:
+        return all_tools
+    tl = task.lower()
+    want = set(CORE_TOOLS) & set(all_tools)
+    for keywords, names in TASK_TOOL_HINTS:
+        if any(k in tl for k in keywords):
+            want |= (set(names) & set(all_tools))
+    if len(want) >= len(all_tools):
+        return all_tools
+    return {n: all_tools[n] for n in all_tools if n in want}
 
 # Optional harness kernel reference set by the agent at init time.
 _harness_kernel_ref: Dict[str, Any] = {"kernel": None}
