@@ -378,17 +378,51 @@ class WebSearchTool(BaseTool):
 
         final = fused[:effective_max_results]
 
+        # 空结果早停: 融合/过滤后无结果时明确失败, 让模型直接作答而非换词死循环
+        if not final:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"No relevant results for query '{query}' "
+                    f"(providers tried: {list(provider_results.keys()) or effective_providers}). "
+                    "Do NOT retry with rephrased queries more than once. "
+                    "Answer from your own knowledge and state that live search returned nothing relevant."
+                ),
+                metadata={
+                    "query": query,
+                    "providers": list(provider_results.keys()),
+                    "num_results": 0,
+                    "cached": False,
+                    "deep_mode": is_deep,
+                    "errors": errors if errors else None,
+                },
+            )
+
         # Disk cache
-        if final:
-            self.cache.set(query, final)
+        self.cache.set(query, final)
+
+        # 观察压缩: 只保留标题/链接/摘要(≤200字)/评分, 去掉 score_factors 等噪音字段,
+        # 把 observation 体积压到原来的约 1/3, 提高模型信噪比
+        compact = []
+        for r in final:
+            snippet = (r.get("snippet") or "").strip()
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            compact.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": snippet,
+                "score": round(float(r.get("score") or 0), 3),
+            })
 
         return ToolResult(
             success=True,
-            output=json.dumps(final, indent=2, ensure_ascii=False),
+            output=json.dumps(compact, indent=2, ensure_ascii=False),
             metadata={
                 "query": query,
                 "providers": list(provider_results.keys()),
-                "num_results": len(final),
+                "num_results": len(compact),
                 "cached": False,
                 "deep_mode": is_deep,
                 "errors": errors if errors else None,
