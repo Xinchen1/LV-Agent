@@ -692,7 +692,8 @@ class ContextEngine:
     def _task_budget_multiplier(task: str) -> float:
         """按任务类型动态调整工作记忆预算."""
         t = (task or "").lower()
-        heavy = ("研究", "分析", "调研", "报告", "重构", "实现", "代码", "debug",
+        heavy = ("研究", "分析", "调研", "报告", "重构", "实现", "代码", "函数",
+                 "排序", "算法", "debug",
                  "research", "analy", "report", "refactor", "implement", "code", "debug")
         if any(k in t for k in heavy):
             return 1.5
