@@ -205,6 +205,7 @@ cp config.example.yaml config.yaml
 - **意图识别** — 显式搜索动词（搜索/查一下/最新/新闻…）优先于 `python` 等裸关键词，`intent_classifier` 与 `agent.py` 双副本同修。
 - **记忆与上下文** — `compress_events` 防膨胀守卫（短文本不再越压越大）+ token-aware 硬截断（中英文都守预算）。
 - **打包** — `build_mac_app.sh` 补 `VERSION`/`ARCH` 变量（DMG 文件名修正）、launcher 加 shebang；Electron 客户端（`desktop/`）可打 `LV Agent-1.0.0-arm64.dmg`，首次运行自动落配置到用户目录。
+- **定位快路** — 修 `_try_location_fast_path` 三处误劫持：目标名截断到第一个分句标点（整句中文不再被当文件名）+ 长度守卫；只收 `metadata.count>0` 真实命中，空结果/复合任务（定位+修改）回退正常循环，避免假完成跳过后半任务。
 
 ### 2026-09-02
 
