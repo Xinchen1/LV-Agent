@@ -1189,35 +1189,29 @@ class WebSearchTool(BaseTool):
 
         # Wait for tasks with early exit on first real result (unless deep mode)
         try:
-            for coro in asyncio.as_completed(task_to_provider.keys(), timeout=8):
-                task = coro
-                provider = task_to_provider[task]
-                try:
-                    results = await task
-                    if error:
-                        errors.append(f"{provider}: {error}")
-                    if self._is_real_results(results):
-                        provider_results[provider] = results
-                        # Early exit: one good provider is enough for normal mode
-                        if not is_deep:
-                            # Cancel remaining tasks
-                            for t in task_to_provider:
-                                if not t.done():
-                                    t.cancel()
-                            break
-                except Exception as e:
-                    errors.append(f"{provider}: {e}")
-        except asyncio.TimeoutError:
-            # Timeout: collect any completed tasks
-            for task, provider in task_to_provider.items():
-                if task.done() and provider not in provider_results:
+            pending = set(task_to_provider.keys())
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=8, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    for t in pending:
+                        t.cancel()
+                    break
+                for task in done:
+                    provider = task_to_provider[task]
                     try:
                         results = task.result()
                         if self._is_real_results(results):
                             provider_results[provider] = results
+                            if not is_deep:
+                                for t in pending:
+                                    t.cancel()
+                                pending.clear()
+                                break
                     except Exception as e:
                         errors.append(f"{provider}: {e}")
-            # Cancel pending
+        except Exception:
             for task in task_to_provider:
                 if not task.done():
                     task.cancel()

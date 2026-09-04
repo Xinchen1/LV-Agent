@@ -2,6 +2,9 @@ FROM docker.m.daocloud.io/library/python:3.12-slim
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget git jq && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
     "openai>=1.0.0" \
     "anthropic>=0.40.0" \
@@ -16,7 +19,11 @@ RUN pip install --no-cache-dir \
     "fastapi>=0.110.0" \
     "uvicorn[standard]>=0.30.0" \
     "websockets>=12.0" \
-    "aiohttp>=3.9.0"
+    "aiohttp>=3.9.0" \
+    "lxml>=5.0.0" \
+    "playwright>=1.40.0"
+
+RUN playwright install chromium --with-deps
 
 COPY agent_project /app/agent_project
 COPY web/server.py /app/web/server.py

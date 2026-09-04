@@ -68,7 +68,13 @@ class Session:
         self.workspace = ws_dir
 
         try:
+            cfg.tools.file_ops.enabled = True
             cfg.tools.file_ops.allowed_dirs = [str(ws_dir)]
+        except Exception:
+            pass
+        try:
+            cfg.tools.code_exec.enabled = True
+            cfg.tools.code_exec.timeout = 30
         except Exception:
             pass
         try:
