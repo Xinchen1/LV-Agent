@@ -619,7 +619,12 @@ class SuperAgentCLI:
         for s in skills:
           src = s.get('source', 'builtin')
           ver = s.get('version', '')
-          print(f" \033[2m · {s['name']} v{ver} ({src}) - {s.get('description', '')[:60]}\033[0m")
+          try:
+            score = engine.bank.get_skill_score(s['name'])
+            score_str = f" score={score:.2f}"
+          except Exception:
+            score_str = ""
+          print(f" \033[2m · {s['name']} v{ver} ({src}){score_str} - {s.get('description', '')[:60]}\033[0m")
       elif cmd == 'evolve':
         evolved = engine.force_evolve()
         if evolved:

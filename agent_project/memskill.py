@@ -415,15 +415,28 @@ class SkillController:
             return []
         return self._keyword_select(skills, context)
 
+    @staticmethod
+    def _cjk_bigrams(s: str) -> set:
+        """中文字符二元组: 整句中文在\\w+下是一个token, 必须用字粒度匹配."""
+        chars = [c for c in s if '\u4e00' <= c <= '\u9fff']
+        return {''.join(chars[i:i + 2]) for i in range(len(chars) - 1)}
+
     def _keyword_select(self, skills: List[MemorySkill], context: str) -> List[Tuple[MemorySkill, float]]:
         ctx_words = set(re.findall(r"\w+", context.lower()))
+        ctx_bigrams = self._cjk_bigrams(context)
         scored = []
         for skill in skills:
-            skill_words = set(re.findall(r"\w+", skill.embedding_text().lower()))
+            text = skill.embedding_text().lower()
+            skill_words = set(re.findall(r"\w+", text))
             if not skill_words:
                 continue
             overlap = len(ctx_words & skill_words)
             score = overlap / max(1, len(skill_words))
+            # 中文回退: 字二元组重合度(取两者较高值)
+            skill_bigrams = self._cjk_bigrams(text)
+            if skill_bigrams and ctx_bigrams:
+                bi_score = len(ctx_bigrams & skill_bigrams) / max(1, len(skill_bigrams))
+                score = max(score, bi_score)
             if score > 0.05:
                 scored.append((skill, score))
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -832,7 +845,9 @@ class MemSkillEngine:
         # 之前无调用点导致 .skill_stats.json 恒空, 剪枝/回滚闭环休眠
         for name in skill_names:
             try:
-                self.bank.record_skill_usage(name, success=bool(applied))
+                # 成功归因必须是任务本身的成败, 而非记忆操作是否落盘
+                # (之前用 bool(applied) 导致任务失败也记成功, 成功率失真)
+                self.bank.record_skill_usage(name, success=bool(success))
             except Exception as e:
                 logger.debug(f"record_skill_usage failed for {name}: {e}")
 
