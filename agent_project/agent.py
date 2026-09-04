@@ -3832,6 +3832,10 @@ class OpenMythosAgent:
         task_lower = task.lower()
         # Only trigger for locate/find intents
         locate_verbs = ["查找", "找一下", "搜索", "搜一下", "看看有没有", "看看", "看下", "在哪里", "在哪", "位于", "找", "查", "搜"]
+        # 复合任务守卫: 定位只是第一步, 后面还有修改/运行等动作时不走 fast path,
+        # 否则后半段任务会被跳过(如"看下X文件夹，修改它为免登录"只定位不修改)
+        if re.search(r'(修改|更新|优化|完善|改进|增强|重构|修复|调整|删除|去除|运行|执行|启动|安装|部署|重写|改写)', task):
+            return None
         locate_suffixes = ["项目", "文件夹", "目录", "文件"]
         has_verb = any(v in task for v in locate_verbs)
         has_suffix = any(s in task for s in locate_suffixes)
@@ -3947,7 +3951,15 @@ class OpenMythosAgent:
             for r in roots:
                 try:
                     res = glob_tool.execute(pattern=search_pattern, path=r, max_results=40)
-                    if res.success and res.output:
+                    # 只要真实命中: "Found 0 file(s)…(none)" 也是 success+非空输出,
+                    # 必须看 count, 否则空结果会被当成功提前返回(劫持 web_search 等任务)
+                    count = 0
+                    try:
+                        count = int((res.metadata or {}).get("count", 0))
+                    except Exception:
+                        m0 = re.search(r'Found\s+(\d+)\s+file', res.output or "")
+                        count = int(m0.group(1)) if m0 else 0
+                    if res.success and count > 0 and res.output:
                         output_parts.append(f"[{r}]\n{res.output}")
                 except Exception:
                     continue
