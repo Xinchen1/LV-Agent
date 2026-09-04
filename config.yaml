@@ -102,7 +102,7 @@ tools:
     quality_threshold: 0.3
     cache_ttl: 300
     use_playwright: false
-    sequential_fallback: false
+    sequential_fallback: true
     max_fetch_urls: 3
     domain_trust:
       wikipedia.org: 1.0
@@ -168,7 +168,7 @@ logging:
   file: ./logs/agent.log
   console: false
   rich_markup: true
-  output_mode: auto\ thinking:
+  output_mode: auto
   # Unified thinking/loop configuration (priority over scattered individual keys)
   #  此配置区域优先于各散落键; 旧键仍为向后兼容
   min_loops: 2
@@ -183,6 +183,29 @@ logging:
   # loop_controller_min_loops:
   # loop_controller_max_loops:
   # loop_controller_default_loops:
+
+thinking:
+  # Unified thinking/loop configuration (priority over scattered individual keys)
+  # 此配置区域优先于各散落键; 旧键仍为向后兼容
+  min_loops: 2
+  max_loops: 16
+  default_loops: 4
+
+  # Hard upper limit for outer loops (user-editable; also bounds LoopController output)
+  max_outer_loops: 12
+
+  # The following keys are kept for backward compatibility;
+  # if missing, Thinking section values are used.
+  # loop_controller_min_loops: 2
+  # loop_controller_max_loops: 16
+  # loop_controller_default_loops: 4
+
+  # Reflection model thinking loops (how many loops for reflection per episode)
+  thinking_loops_for_reflection: 16
+
+  # Legacy top-level keys (deprecated but still supported for backward compatibility:)
+  # default_thinking_loops: 2
+  # max_thinking_loops: 3
 planning:
   enabled: true
   default_strategy: adaptive
@@ -274,9 +297,9 @@ display: {}
 agent:
   backend: openai
   openai:
-    api_key: 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
-    base_url: https://integrate.api.nvidia.com/v1
-    model: meta/muse-glimmer-30b
+    api_key: null
+    base_url: https://developer.amd.com.cn/radeon/api/v1
+    model: DeepSeek-V4-Flash
     temperature: 0.7
     top_p: 0.95
     max_tokens: 16384
