@@ -1077,6 +1077,15 @@ class OpenMythosAgent:
         ):
             return False
 
+        # 1.5) 有实质内容的延续追问("继续刚才X问题") → deep
+        # 单次快路干不了多步活(查看→分析→修改), 必须走主循环; 纯催促除外。
+        try:
+            if (self._is_continuation_query(task) and not self._is_pure_nudge(task)
+                    and len(task.strip()) > 8):
+                return False
+        except Exception:
+            pass
+
         # 2) 纯问候/礼貌/确认 → 先于关键词检查匹配,避免被误判为需要工具
         simple_patterns = [
             r'^(你好|嗨|哈喽|hello|hi|hey|在吗|在嘛|您好|早上好|晚上好|下午好)[!!??\.,\s]*$',
@@ -2521,6 +2530,9 @@ class OpenMythosAgent:
                 summary = self._summarize_tool_answer(task, action, tool_result.output, token_callback)
                 if summary and not self._is_truncated_answer(summary):
                     final_answer = summary
+                if tool_result.success and not (final_answer or "").strip():
+                    # 总结链路异常兜底: 绝不带着空答案静默结束(用户看到"读了没总结")
+                    final_answer = (tool_result.output or "").strip()[:800]
             # One-shot retry on tool failure to recover from bad args/format
             if not tool_result.success:
                 if self._skip_tool_retry(action, tool_result):
@@ -4740,6 +4752,25 @@ class OpenMythosAgent:
             self._stream_tool_observation(action, tool_result, final_answer, stream_callback, suppress_content)
         return tool_result, final_answer
 
+    _SECRET_RES = [
+        re.compile(r'nvapi-[A-Za-z0-9_\-]{16,}'),
+        re.compile(r'AIza[A-Za-z0-9_\-]{35}'),
+        re.compile(r'sk-[A-Za-z0-9]{16,}'),
+        re.compile(r'ghp_[A-Za-z0-9]{20,}'),
+        re.compile(r'xox[bap]-[A-Za-z0-9\-]+'),
+        re.compile(r'AKIA[0-9A-Z]{16}'),
+    ]
+
+    @classmethod
+    def _redact_secrets(cls, text: str) -> str:
+        """展示层脱敏: API key 明文绝不上屏(如读到的 .sh/.env 文件内容)。"""
+        if not text:
+            return text
+        out = text
+        for rx in cls._SECRET_RES:
+            out = rx.sub(lambda m: m.group(0)[:7] + '••••••••', out)
+        return out
+
     def _stream_tool_observation(self, action: ToolCall, tool_result: ToolResult,
                                  final_answer: str, stream_callback: callable,
                                  suppress_content: bool = False) -> None:
@@ -4748,7 +4779,7 @@ class OpenMythosAgent:
         suppress_content: 为 True 时不播放原始内容(避免先播列表又播总结);
         工具调用框(名称/参数/结果预览)仍会显示, 让用户看到"做了什么"。
         """
-        display_text = final_answer
+        display_text = self._redact_secrets(final_answer)
         try:
             if action.tool_name == "web_search" and tool_result.success:
                 parsed = json.loads(tool_result.output or "[]")
@@ -4759,8 +4790,8 @@ class OpenMythosAgent:
             pass
 
         try:
-            stream_callback("tool_call", f"{action.tool_name}: {action.arguments}")
-            stream_callback("tool_result", final_answer if not tool_result.success else display_text)
+            stream_callback("tool_call", f"{action.tool_name}: {self._redact_secrets(str(action.arguments))}")
+            stream_callback("tool_result", self._redact_secrets(final_answer) if not tool_result.success else display_text)
             if not suppress_content:
                 # Mark content as started so the final answer is not re-printed verbatim.
                 stream_callback("content", "\n" + display_text)
