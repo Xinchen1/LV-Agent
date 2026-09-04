@@ -141,7 +141,7 @@ cp config.example.yaml config.yaml
 ./lv            # 或 python super_agent.py
 ```
 
-**支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
+**支持后端：** AMD Radeon（默认，DeepSeek-V4-Flash）/ DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
 
 ---
 
@@ -198,6 +198,7 @@ cp config.example.yaml config.yaml
 ## 更新日志
 
 ### 2026-09-04
+
 
 - **执行引擎** — 跨步重复调用强制收敛：首次重复返回缓存+换工具提示，二次重复直接下 `STOP` 指令要求输出最终答案；去重不再覆盖原始缓存；`policies` 历史回注补 `Action` 行（Thought→Action→Observation 完整链）。
 - **工具能力** — `web_search` 空结果早停（失败明示，不再换词死循环）；observation 压缩为 title/url/snippet/score 四字段（约 1/3 体积）；`sequential_fallback` 默认开启。
