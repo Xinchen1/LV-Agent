@@ -141,7 +141,7 @@ cp config.example.yaml config.yaml
 ./lv            # 或 python super_agent.py
 ```
 
-**支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
+**支持后端：** AMD Radeon（默认，DeepSeek-V4-Flash）/ DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
 
 ---
 
@@ -199,18 +199,12 @@ cp config.example.yaml config.yaml
 
 ### 2026-09-04
 
+
 - **执行引擎** — 跨步重复调用强制收敛：首次重复返回缓存+换工具提示，二次重复直接下 `STOP` 指令要求输出最终答案；去重不再覆盖原始缓存；`policies` 历史回注补 `Action` 行（Thought→Action→Observation 完整链）。
 - **工具能力** — `web_search` 空结果早停（失败明示，不再换词死循环）；observation 压缩为 title/url/snippet/score 四字段（约 1/3 体积）；`sequential_fallback` 默认开启。
 - **意图识别** — 显式搜索动词（搜索/查一下/最新/新闻…）优先于 `python` 等裸关键词，`intent_classifier` 与 `agent.py` 双副本同修。
 - **记忆与上下文** — `compress_events` 防膨胀守卫（短文本不再越压越大）+ token-aware 硬截断（中英文都守预算）。
 - **打包** — `build_mac_app.sh` 补 `VERSION`/`ARCH` 变量（DMG 文件名修正）、launcher 加 shebang；Electron 客户端（`desktop/`）可打 `LV Agent-1.0.0-arm64.dmg`，首次运行自动落配置到用户目录。
-- **定位快路** — 修 `_try_location_fast_path` 三处误劫持：目标名截断到第一个分句标点（整句中文不再被当文件名）+ 长度守卫；只收 `metadata.count>0` 真实命中，空结果/复合任务（定位+修改）回退正常循环，避免假完成跳过后半任务。
-- **学习闭环 P1** — 任务前注入 memskill 选中技能（之前学完永不使用）；成功率按任务成败记分；技能选择加中文二元组匹配；`/memskill list` 显示 score。
-- **上下文 P2** — 首轮用户需求常驻保护（压缩/溢出永不丢）；叙事摘要 Facts/Preferences/Open 三段结构；研究/分析/代码类任务工作记忆预算 x1.5。
-- **工具 P3** — 任务感知子集：8 常驻核心 + 关键词加挂（天气/git/pdf/网页…），无命中回退全量；native 调用只传子集 schema，省约 2400 tokens/轮。
-- **回归 P4** — `tests/` 新增 5 个离线回归文件 29 用例（意图/子集/上下文/防劫持/技能闭环），0.4s 跑完；换模型改引擎先跑分。
-- **code 模式假完成** — 状态追问（可以了没/看了没/?）回注上任务继续干活；定位快路加`改为/免登`等复合守卫，两段式任务不再秒回 ok。
-- **只读不总结** — 有实质内容的延续追问改走主循环（单次快路干不了多步活）；工具成功但总结为空时兜底；展示层脱敏 API key（nvapi/AIzaSy/sk…不上屏）。
 
 ### 2026-09-02
 
