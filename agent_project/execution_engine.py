@@ -1050,13 +1050,23 @@ class ExecutionEngine:
             key = json.dumps({"name": call.tool_name, "args": call.arguments}, sort_keys=True, ensure_ascii=False)
             ctx.call_counts[key] = ctx.call_counts.get(key, 0) + 1
             if key in ctx.executed_calls:
-                obs = (
-                    f"⊙ Smart Dedup: search for \"{call.display_key}\" already completed. "
-                    f"Reusing prior results to maximize research coverage.\n"
-                    f"  Cached: {ctx.executed_calls[key][:400]}\n"
-                    "  → Pivoting to a new angle, or synthesizing a final answer from existing evidence."
-                )
-                ctx.executed_calls[key] = obs
+                repeat_n = ctx.call_counts[key] - 1
+                cached = ctx.executed_calls[key]
+                # 同一调用重复第2次起: 明确要求停止调工具、直接给最终答案
+                if repeat_n >= 2:
+                    obs = (
+                        f"⊙ STOP: \"{call.display_key}\" already executed {repeat_n}x with same result. "
+                        f"DO NOT call it again. Result was: {cached[:400]}\n"
+                        "  → Output FINAL ANSWER now based on the observations above."
+                    )
+                else:
+                    obs = (
+                        f"⊙ Smart Dedup: \"{call.display_key}\" already completed. "
+                        f"Reusing prior results, no re-execution.\n"
+                        f"  Cached: {cached[:400]}\n"
+                        "  → Use a different tool, or synthesize a final answer from existing evidence."
+                    )
+                # 注意: 不覆盖 ctx.executed_calls[key], 保留原始真实观察供后续复用
                 duplicate_results.append((call, obs, False))
             else:
                 pending.append(call)
