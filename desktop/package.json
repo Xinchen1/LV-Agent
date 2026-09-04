@@ -1,0 +1,114 @@
+{
+  "name": "lv-agent-desktop",
+  "version": "1.0.0",
+  "description": "LV Agent Desktop - Terminal-native AI Agent with Electron",
+  "main": "src/main/index.js",
+  "author": "Cleveris Research <xinchen@cleveris.research>",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "NODE_ENV=development electron .",
+    "build": "electron-builder",
+    "build:dir": "electron-builder --dir",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac --publish never",
+    "postinstall": "electron-builder install-app-deps 2>/dev/null || true"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.cleveris.lv-agent",
+    "productName": "LV Agent",
+    "copyright": "Copyright \u00A9 2026 Cleveris Research",
+    "directories": {
+      "output": "../dist/electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../super_agent.py",
+        "to": "super_agent.py"
+      },
+      {
+        "from": "../agent_project",
+        "to": "agent_project",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.pytest_cache/**",
+          "!**/data/**",
+          "!**/logs/**"
+        ]
+      },
+      {
+        "from": "../config.yaml",
+        "to": "config.yaml"
+      },
+      {
+        "from": "../config.example.yaml",
+        "to": "config.example.yaml"
+      },
+      {
+        "from": "../requirements-core.txt",
+        "to": "requirements-core.txt"
+      },
+      {
+        "from": "../assets/portrait.png",
+        "to": "assets/portrait.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        {
+          "x": 410,
+          "y": 150,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 130,
+          "y": 150,
+          "type": "file"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "category": "Development",
+      "target": ["AppImage"]
+    }
+  }
+}
