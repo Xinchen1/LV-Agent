@@ -1025,6 +1025,12 @@ Rules:
         for step in steps:
             if step.reasoning:
                 lines.append(f"Thought: {step.reasoning[:300]}")
+            # Action 行: 让模型看到自己每步调了什么工具, 避免重复调用同一工具
+            for c in (step.tool_calls or []):
+                try:
+                    lines.append(f"Action: {c.display_key}")
+                except Exception:
+                    lines.append(f"Action: {getattr(c, 'tool_name', '?')}")
             for obs in step.observations:
                 lines.append(f"Observation: {obs[:2000]}")
         return "\n".join(lines)

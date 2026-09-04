@@ -1276,7 +1276,9 @@ class OpenMythosAgent:
                 return ("file_ops", {"action": "list", "path": name}, 0.85, "detected folder-analysis intent")
 
         # 0) 先判断代码执行/命令意图, 避免 "print(1+1)" 这类被算术规则误判为 calculator
-        if any(k in tl for k in ("python", "写代码", "运行代码", "执行代码", "写个程序", "写个脚本", "跑一下", "run code", "execute python", "写段代码")):
+        # 守卫: 显式搜索动词优先(如"搜索一下Python 3.14发布时间"里的 python 只是关键词, 真实意图是搜索)
+        _explicit_search = any(k in tl for k in ("搜索", "查一下", "查下", "查询", "最新", "新闻", "资讯", "search", "look up", "find out"))
+        if any(k in tl for k in ("python", "写代码", "运行代码", "执行代码", "写个程序", "写个脚本", "跑一下", "run code", "execute python", "写段代码")) and not _explicit_search:
             return ("python_exec", {"code": ""}, 0.85, "detected code-execution intent")
         if any(k in tl for k in ("npm install", "pip install", "git clone", "shell", "终端", "命令行", "bash ", "apt install", "brew install", "运行命令", "执行命令", "cargo build")):
             return ("bash_exec", {}, 0.85, "detected shell-command intent")
@@ -3532,7 +3534,6 @@ class OpenMythosAgent:
             base_loops = self.reasoning_engine.loop_controller.determine_loops(
                 task,
                 getattr(self, "_strategy_override", None)
-                or self.reasoning_engine.strategy
                 or ReasoningStrategy.REACT,
             )
             # Hard cap from config (user-editable)

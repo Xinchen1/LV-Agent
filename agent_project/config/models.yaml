@@ -67,6 +67,19 @@ models:
             max_tokens: 8192
             recommended_for: ["agent", "reasoning", "tools"]
 
+      # AMD Radeon 平台（默认）
+      amd:
+        provider_id: "amd"
+        base_url: "https://developer.amd.com.cn/radeon/api/v1"
+        api_key_env: "AMD_API_KEY"
+        model_list:
+          - id: "DeepSeek-V4-Flash"
+            name: "cancri fast"
+            model_name: "DeepSeek-V4-Flash"
+            description: "AMD Radeon 平台默认模型，超级智能编程专家，支持工具调用与深度推理"
+            max_tokens: 16384
+            recommended_for: ["agent", "code", "reasoning", "tools"]
+
       # Qwen / 通义千问 官方
       qwen:
         provider_id: "qwen"

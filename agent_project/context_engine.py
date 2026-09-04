@@ -517,7 +517,9 @@ class ContextCompressor:
             prefix = "User" if e.role == "user" else e.role.capitalize()
             parts.append(f"- {prefix}: {e.content[:200]}")
         extractive = "\n".join(parts)
-        if _estimate_tokens(extractive) <= target_tokens:
+        # 守卫: 短文本下包装词("Original request:"等)+首请求重复会导致
+        # extractive 比原文还大, 此时不返回膨胀结果, 落到 LLM 摘要/硬截断
+        if _estimate_tokens(extractive) <= target_tokens and len(extractive) < len(full_text):
             return extractive
 
         # LLM abstractive summary.
@@ -534,8 +536,20 @@ class ContextCompressor:
             except Exception:
                 pass
 
-        # Hard truncate.
-        return extractive[:target_tokens * 4]
+        # Hard truncate (token-aware: 中文 1 token≈1-2 字符, 不能按英文 *4 估算).
+        return self._truncate_to_tokens(extractive, target_tokens)
+
+    @staticmethod
+    def _truncate_to_tokens(text: str, target_tokens: int) -> str:
+        """按 token 估算截断文本, 保证输出不超预算(中文/英文都适用)."""
+        if _estimate_tokens(text) <= target_tokens:
+            return text
+        # 按比例粗切后再微调
+        ratio = target_tokens / max(1, _estimate_tokens(text))
+        cut = max(1, int(len(text) * ratio * 0.95))
+        while cut > 1 and _estimate_tokens(text[:cut]) > target_tokens:
+            cut = int(cut * 0.9)
+        return text[:cut]
 
     def compress_observations(self, observations: List[str],
                               target_tokens: int) -> str:

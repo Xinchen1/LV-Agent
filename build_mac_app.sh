@@ -18,6 +18,9 @@ CONTENTS="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
+VERSION="0.1.0"
+ARCH="$(uname -m 2>/dev/null || echo 'universal')"
+
 echo "=== Building ${APP_NAME}.app ==="
 
 # Clean previous build
@@ -75,6 +78,7 @@ PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
 # ── 3. Create the launcher script ──
 echo "[3/5] Creating launcher script..."
 cat > "$MACOS_DIR/$APP_NAME" << 'LAUNCHER_EOF'
+#!/bin/bash
 # LV Agent - macOS App Launcher
 
 # Resolve the .app bundle path
@@ -213,3 +217,27 @@ echo ""
 echo "Or copy to /Applications:"
 echo "  cp -R \"$APP_BUNDLE\" /Applications/"
 echo ""
+
+# ── DMG Generation ──
+if command -v hdiutil >/dev/null 2>&1; then
+    echo "  Creating DMG..."
+    DMG_PATH="$PROJECT_DIR/dist/LV-Agent-macOS-${ARCH}-${VERSION}.dmg"
+    DMG_TMP="$PROJECT_DIR/dist/.dmg_tmp"
+    rm -rf "$DMG_TMP" "$DMG_PATH"
+    mkdir -p "$DMG_TMP"
+    cp -R "$APP_BUNDLE" "$DMG_TMP/"
+    # Add Applications symlink for drag-install UX
+    ln -s /Applications "$DMG_TMP/Applications" 2>/dev/null || true
+    hdiutil create -volname "LV Agent ${VERSION}" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_PATH" 2>&1 | tail -5 && echo "  DMG: $DMG_PATH" || echo "  DMG creation failed (non-fatal)"
+    rm -rf "$DMG_TMP"
+else
+    echo "  hdiutil not found, skipping DMG."
+fi
+
+# Size report
+echo ""
+echo "=== Build complete! ==="
+du -sh "$APP_BUNDLE" 2>/dev/null || true
+[ -f "$DMG_PATH" ] && du -sh "$DMG_PATH" 2>/dev/null || true
+[ -f "$ZIP_PATH" ] && du -sh "$ZIP_PATH" 2>/dev/null || true
+echo "  App: $APP_BUNDLE"
