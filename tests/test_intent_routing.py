@@ -56,3 +56,12 @@ def test_weather():
 def test_ambiguous_returns_none():
     assert classify("帮我看一下那个东西") is None
     assert classify("嗯") is None
+
+
+def test_pure_nudge_status_checks():
+    from agent_project.intent import is_pure_nudge
+    for t in ["可以了没", "看了没", "好了吗", "怎么样了", "搞定没", "？", "?",
+              "done yet", "继续", "继续啊"]:
+        assert is_pure_nudge(t), t
+    for t in ["你好", "搜索AI新闻", "计算12*34", "嗯"]:
+        assert not is_pure_nudge(t), t
