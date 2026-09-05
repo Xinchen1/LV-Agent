@@ -4,8 +4,10 @@
   let ws = null, fullText = '';
   let outputCb = () => {}, chunkCb = () => {}, exitCb = () => {}, stderrCb = () => {};
   const DEFAULT_CFG = { backend:'openai', model:'DeepSeek-V4-Flash', base_url:'https://developer.amd.com.cn/radeon/api/v1', api_key:'', temperature:0.7, max_tokens:4096 };
+  let dirHandle = null;
   function connect(){
     ws = new WebSocket(wsUrl);
+    ws.onopen = () => { if (dirHandle) { send({type: 'fs_ready', folder: dirHandle.name}); } };
     ws.onclose = () => setTimeout(connect, 2000);
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
@@ -14,14 +16,13 @@
       else if (m.type === 'done') { outputCb(m.final_answer || fullText); exitCb(0); fullText = ''; }
       else if (m.type === 'error') { stderrCb((m.message || 'error').slice(0, 500)); }
       else if (m.type === 'tool_call') { handleToolCall(m); }
-      else if (m.type === 'fs_status') { const b = document.getElementById('modelBadge'); if (b && m.enabled) b.textContent = (b.textContent || '') + ' · 📁' + m.folder; }
+      else if (m.type === 'fs_status') { const b = document.getElementById('modelBadge'); if (b && m.enabled) b.textContent = (b.textContent || '').split(' · 📁')[0] + ' · 📁' + m.folder; }
     };
   }
   connect();
   function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
   // === File System Access API: 本地文件操作 ===
-  let dirHandle = null;
   async function selectFolder() {
     if (!window.showDirectoryPicker) { alert('浏览器不支持 File System Access API，请用 Chrome/Edge 86+'); return; }
     try {
@@ -35,9 +36,10 @@
   }
   async function handleToolCall(msg) {
     const {call_id, tool, args} = msg;
+    console.log('[tool_call]', {tool, hasDir: !!dirHandle, args});
     if (tool !== 'file_ops' || !dirHandle) { send({type: 'tool_result', call_id, result: {success: false, error: '未选择本地文件夹'}}); return; }
     try { const r = await execFileOps(args); send({type: 'tool_result', call_id, result: r}); }
-    catch (e) { send({type: 'tool_result', call_id, result: {success: false, error: String(e)}}); }
+    catch (e) { console.error('[tool_call error]', e); send({type: 'tool_result', call_id, result: {success: false, error: String(e)}}); }
   }
   async function resolvePath(path) {
     if (!path || path === '.' || path === './') return dirHandle;
