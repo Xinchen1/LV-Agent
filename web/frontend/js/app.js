@@ -13,10 +13,107 @@
       else if (m.type === 'stream') { fullText += m.token; outputCb(fullText); }
       else if (m.type === 'done') { outputCb(m.final_answer || fullText); exitCb(0); fullText = ''; }
       else if (m.type === 'error') { stderrCb((m.message || 'error').slice(0, 500)); }
+      else if (m.type === 'tool_call') { handleToolCall(m); }
+      else if (m.type === 'fs_status') { const b = document.getElementById('modelBadge'); if (b && m.enabled) b.textContent = (b.textContent || '') + ' · 📁' + m.folder; }
     };
   }
   connect();
   function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+  // === File System Access API: 本地文件操作 ===
+  let dirHandle = null;
+  async function selectFolder() {
+    if (!window.showDirectoryPicker) { alert('浏览器不支持 File System Access API，请用 Chrome/Edge 86+'); return; }
+    try {
+      dirHandle = await window.showDirectoryPicker({mode: 'readwrite'});
+      const perm = await dirHandle.requestPermission({mode: 'readwrite'});
+      if (perm !== 'granted') { alert('需要读写权限才能操作文件'); dirHandle = null; return; }
+      send({type: 'fs_ready', folder: dirHandle.name});
+      const badge = document.getElementById('modelBadge');
+      if (badge) { badge.textContent = (badge.textContent || '').split(' · 📁')[0] + ' · 📁' + dirHandle.name; }
+    } catch (e) { if (e.name !== 'AbortError') console.error('selectFolder:', e); }
+  }
+  async function handleToolCall(msg) {
+    const {call_id, tool, args} = msg;
+    if (tool !== 'file_ops' || !dirHandle) { send({type: 'tool_result', call_id, result: {success: false, error: '未选择本地文件夹'}}); return; }
+    try { const r = await execFileOps(args); send({type: 'tool_result', call_id, result: r}); }
+    catch (e) { send({type: 'tool_result', call_id, result: {success: false, error: String(e)}}); }
+  }
+  async function resolvePath(path) {
+    if (!path || path === '.' || path === './') return dirHandle;
+    const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    let cur = dirHandle;
+    for (const part of parts) {
+      try { cur = await cur.getDirectoryHandle(part); }
+      catch { try { cur = await cur.getFileHandle(part); } catch { return null; } }
+    }
+    return cur;
+  }
+  async function execFileOps(args) {
+    const {action, path = '', content, offset, limit} = args;
+    if (action === 'list') return await listDir(path);
+    if (action === 'read' || action === 'fast_read') return await readFile(path, offset, limit);
+    if (action === 'write') return await writeFile(path, content);
+    if (action === 'exists') return await existsPath(path);
+    if (action === 'delete') return await deletePath(path);
+    if (action === 'multi_read') {
+      const paths = args.paths || [path];
+      const results = [];
+      for (const p of paths) { const r = await readFile(p); results.push(`--- ${p} ---\n${r.output || r.error}`); }
+      return {success: true, output: results.join('\n\n')};
+    }
+    return {success: false, error: `action "${action}" 暂不支持本地执行`};
+  }
+  async function listDir(path) {
+    const h = await resolvePath(path);
+    if (!h) return {success: false, error: `路径不存在: ${path}`};
+    const entries = [];
+    for await (const [name, handle] of h.entries()) {
+      let size = 0;
+      if (handle.kind === 'file') { try { size = (await handle.getFile()).size; } catch {} }
+      entries.push(`${handle.kind === 'directory' ? '📁' : '📄'} ${name}${size ? `  (${size} bytes)` : ''}`);
+    }
+    entries.sort();
+    return {success: true, output: entries.join('\n') || '(空目录)', metadata: {count: entries.length}};
+  }
+  async function readFile(path, offset, limit) {
+    const h = await resolvePath(path);
+    if (!h || h.kind !== 'file') return {success: false, error: `文件不存在: ${path}`};
+    const file = await h.getFile();
+    const text = await file.text();
+    const lines = text.split('\n');
+    const start = offset || 0;
+    const end = limit ? start + limit : lines.length;
+    const sliced = lines.slice(start, end);
+    const output = sliced.map((line, i) => `${start + i + 1}: ${line}`).join('\n');
+    return {success: true, output, metadata: {total_lines: lines.length, shown: sliced.length}};
+  }
+  async function writeFile(path, content) {
+    const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    const fileName = parts.pop();
+    let dir = dirHandle;
+    for (const part of parts) { dir = await dir.getDirectoryHandle(part, {create: true}); }
+    const fh = await dir.getFileHandle(fileName, {create: true});
+    const writable = await fh.createWritable();
+    await writable.write(content || '');
+    await writable.close();
+    return {success: true, output: `已写入 ${path} (${(content || '').length} bytes)`};
+  }
+  async function existsPath(path) {
+    const h = await resolvePath(path);
+    return {success: true, output: h ? 'exists' : 'not found', metadata: {exists: !!h, kind: h?.kind}};
+  }
+  async function deletePath(path) {
+    const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    const name = parts.pop();
+    let dir = dirHandle;
+    for (const part of parts) { dir = await dir.getDirectoryHandle(part); }
+    await dir.removeEntry(name, {recursive: true});
+    return {success: true, output: `已删除 ${path}`};
+  }
+  window.lvSelectFolder = selectFolder;
+  // === end File System Access API ===
+
   window.electronAPI = {
     startAgent: async () => ({ success: true, pid: 1 }),
     stopAgent: async () => ({ success: true }),
@@ -606,6 +703,10 @@ btnNew.addEventListener('click', async () => {
 btnSettings.addEventListener('click', () => {
   settingsPanel.classList.toggle('hidden');
   if (!settingsPanel.classList.contains('hidden')) { loadSettings(); loadUpdateSettings(); }
+});
+
+document.getElementById('btnFolder')?.addEventListener('click', () => {
+  if (window.lvSelectFolder) window.lvSelectFolder();
 });
 
 btnCloseSettings.addEventListener('click', () => {
