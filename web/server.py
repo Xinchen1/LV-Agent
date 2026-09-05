@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import traceback
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent_project.config import load_config
 from agent_project.agent import OpenMythosAgent
+from agent_project.tools import TOOLS_REGISTRY, ToolResult
 
 WORKSPACE_ROOT = ROOT / "data" / "web_workspaces"
 WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -39,11 +41,74 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
+class RemoteFileOpsTool:
+    """代理 file_ops：把调用转发到前端用 File System Access API 在用户本地执行。"""
+    name = "file_ops"
+
+    def __init__(self, local_tool):
+        self._local = local_tool
+        self._ws: Optional[WebSocket] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._pending: Dict[int, list] = {}
+        self._next_id = 0
+        self._lock = threading.Lock()
+
+    def bind(self, ws: WebSocket, loop: asyncio.AbstractEventLoop) -> None:
+        self._ws = ws
+        self._loop = loop
+
+    @property
+    def description(self):
+        return self._local.description
+
+    @property
+    def parameters(self):
+        return self._local.parameters
+
+    def execute(self, **kwargs) -> ToolResult:
+        if not self._ws or not self._loop:
+            return self._local.execute(**kwargs)
+
+        with self._lock:
+            call_id = self._next_id
+            self._next_id += 1
+            event = threading.Event()
+            self._pending[call_id] = [event, None]
+
+        msg = json.dumps({"type": "tool_call", "call_id": call_id, "tool": "file_ops", "args": kwargs})
+        asyncio.run_coroutine_threadsafe(self._ws.send_text(msg), self._loop)
+
+        if not event.wait(timeout=120):
+            with self._lock:
+                self._pending.pop(call_id, None)
+            return ToolResult(success=False, output="", error="本地文件操作超时(120s)")
+
+        with self._lock:
+            r = self._pending.pop(call_id, [None, None])[1]
+
+        if r is None:
+            return ToolResult(success=False, output="", error="无结果")
+        return ToolResult(
+            success=r.get("success", False),
+            output=r.get("output", ""),
+            error=r.get("error", ""),
+            metadata=r.get("metadata", {}),
+        )
+
+    def handle_result(self, call_id: int, result: dict) -> None:
+        with self._lock:
+            if call_id in self._pending:
+                self._pending[call_id][1] = result
+                self._pending[call_id][0].set()
+
+
 class Session:
     def __init__(self) -> None:
         self.agent: Optional[OpenMythosAgent] = None
         self.workspace: Optional[Path] = None
         self.config_info: Dict[str, Any] = {}
+        self.remote_file_ops: Optional[RemoteFileOpsTool] = None
+        self._saved_file_ops = None
 
     def build_agent(self, overrides: Dict[str, Any]) -> None:
         cfg = load_config()
@@ -148,6 +213,7 @@ async def health() -> JSONResponse:
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     session = Session()
+    loop = asyncio.get_running_loop()
     try:
         try:
             session.build_agent(DEFAULT_CONFIG)
@@ -170,6 +236,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except Exception as e:
                     await ws.send_json({"type": "error", "message": f"agent init failed: {e}",
                                         "trace": traceback.format_exc()})
+            elif mtype == "fs_ready":
+                try:
+                    local = TOOLS_REGISTRY.get("file_ops")
+                    if local and not session.remote_file_ops:
+                        session._saved_file_ops = local
+                        session.remote_file_ops = RemoteFileOpsTool(local)
+                        session.remote_file_ops.bind(ws, loop)
+                        TOOLS_REGISTRY._tools["file_ops"] = session.remote_file_ops
+                    await ws.send_json({"type": "fs_status", "enabled": True, "folder": msg.get("folder", "")})
+                except Exception as e:
+                    await ws.send_json({"type": "error", "message": f"fs bind failed: {e}"})
+            elif mtype == "fs_off":
+                if session._saved_file_ops:
+                    TOOLS_REGISTRY._tools["file_ops"] = session._saved_file_ops
+                    session.remote_file_ops = None
+                    session._saved_file_ops = None
+                await ws.send_json({"type": "fs_status", "enabled": False})
+            elif mtype == "tool_result":
+                if session.remote_file_ops:
+                    session.remote_file_ops.handle_result(msg.get("call_id", -1), msg.get("result", {}))
             elif mtype == "message":
                 task = (msg.get("task") or "").strip()
                 if not task:
