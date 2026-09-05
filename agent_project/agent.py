@@ -1757,12 +1757,59 @@ class OpenMythosAgent:
         return cleaned
 
     def _read_folder_markdown(self, folder: str) -> str:
-        """读取文件夹下的 markdown 文件内容, 供总结时参考.
+        """读取文件夹下的文本文件内容, 供总结时参考.
 
         设计文档: 看文件夹必须 list 后 read 内容, 基于内容回答而非只列目录.
-        读取前 3 个 .md 文件的内容(截断到合理长度)。
+        优先通过 TOOLS_REGISTRY 的 file_ops 工具读取(支持 web 端远程代理),
+        回退到直接文件系统访问。
         """
         if not folder:
+            return ""
+        text_exts = {'.md', '.txt', '.js', '.ts', '.tsx', '.jsx', '.py', '.json', '.yaml', '.yml', '.html', '.css', '.java', '.go', '.rs', '.c', '.cpp', '.sh', '.vue', '.sql', '.xml', '.toml', '.cfg', '.ini'}
+        try:
+            file_ops = TOOLS_REGISTRY.get("file_ops")
+            if file_ops:
+                list_result = file_ops.execute(action="list", path=folder)
+                if list_result.success and list_result.output:
+                    import re as _re
+                    text_files = []
+                    for line in list_result.output.split('\n'):
+                        m = _re.search(r'(\S+\.\w+)\s', line)
+                        if m:
+                            fname = m.group(1)
+                            ext = '.' + fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+                            if ext in text_exts:
+                                text_files.append(fname)
+                    text_files = text_files[:5]
+                    if text_files:
+                        parts = []
+                        for fname in text_files:
+                            full_path = f"{folder}/{fname}" if folder not in ('.', './') else fname
+                            read_result = file_ops.execute(action="read", path=full_path, limit=60)
+                            if read_result.success:
+                                parts.append(f"--- {fname} ---\n{read_result.output[:2000]}")
+                            else:
+                                parts.append(f"--- {fname} [读取失败: {read_result.error}] ---")
+                        return "\n\n".join(parts)
+        except Exception:
+            pass
+        try:
+            from pathlib import Path
+            p = Path(folder).expanduser()
+            if not p.is_dir():
+                return ""
+            all_files = sorted([f for f in p.iterdir() if f.is_file() and f.suffix.lower() in text_exts])[:5]
+            if not all_files:
+                return ""
+            parts = []
+            for f in all_files:
+                try:
+                    content = f.read_text(encoding="utf-8", errors="replace")[:2000]
+                    parts.append(f"--- {f.name} ---\n{content}")
+                except Exception:
+                    parts.append(f"--- {f.name} [读取失败] ---")
+            return "\n\n".join(parts)
+        except Exception:
             return ""
         try:
             from pathlib import Path
