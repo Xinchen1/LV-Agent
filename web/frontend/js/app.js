@@ -44,12 +44,37 @@
   async function resolvePath(path) {
     if (!path || path === '.' || path === './') return dirHandle;
     const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
-    let cur = dirHandle;
+    // 绝对路径: agent 可能传 /root/grok-build/src/index.js
+    // 从后往前逐级尝试, 找到第一个在 dirHandle 下存在的后缀
+    if (path.startsWith('/')) {
+      for (let i = 0; i < parts.length; i++) {
+        const suffix = parts.slice(i);
+        const h = await tryResolve(dirHandle, suffix);
+        if (h) return h;
+      }
+      return null;
+    }
+    return await tryResolve(dirHandle, parts);
+  }
+  async function tryResolve(base, parts) {
+    let cur = base;
     for (const part of parts) {
       try { cur = await cur.getDirectoryHandle(part); }
       catch { try { cur = await cur.getFileHandle(part); } catch { return null; } }
     }
     return cur;
+  }
+  async function normalizeParts(path) {
+    if (!path || path === '.' || path === './') return [];
+    let parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    if (path.startsWith('/')) {
+      for (let i = 0; i < parts.length; i++) {
+        const suffix = parts.slice(i);
+        const h = await tryResolve(dirHandle, suffix.slice(0, -1));
+        if (h !== null) return suffix;
+      }
+    }
+    return parts;
   }
   async function execFileOps(args) {
     const {action, path = '', content, offset, limit} = args;
@@ -91,7 +116,7 @@
     return {success: true, output, metadata: {total_lines: lines.length, shown: sliced.length}};
   }
   async function writeFile(path, content) {
-    const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    const parts = await normalizeParts(path);
     const fileName = parts.pop();
     let dir = dirHandle;
     for (const part of parts) { dir = await dir.getDirectoryHandle(part, {create: true}); }
@@ -106,7 +131,7 @@
     return {success: true, output: h ? 'exists' : 'not found', metadata: {exists: !!h, kind: h?.kind}};
   }
   async function deletePath(path) {
-    const parts = path.replace(/^\.\//, '').split('/').filter(p => p);
+    const parts = await normalizeParts(path);
     const name = parts.pop();
     let dir = dirHandle;
     for (const part of parts) { dir = await dir.getDirectoryHandle(part); }
