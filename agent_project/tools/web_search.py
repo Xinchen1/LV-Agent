@@ -402,23 +402,27 @@ class WebSearchTool(BaseTool):
         # Disk cache
         self.cache.set(query, final)
 
-        # 观察压缩: 只保留标题/链接/摘要(≤200字)/评分, 去掉 score_factors 等噪音字段,
-        # 把 observation 体积压到原来的约 1/3, 提高模型信噪比
+        # 观察压缩: 只保留标题/链接/摘要(≤200字), 用简洁文本列表格式输出,
+        # 把 observation 体积压到原来的约 1/4, 提高模型信噪比
         compact = []
-        for r in final:
+        lines: List[str] = []
+        for idx, r in enumerate(final, 1):
+            title = (r.get("title") or "").strip()
+            url = (r.get("url") or "").strip()
             snippet = (r.get("snippet") or "").strip()
             if len(snippet) > 200:
                 snippet = snippet[:200] + "…"
-            compact.append({
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "snippet": snippet,
-                "score": round(float(r.get("score") or 0), 3),
-            })
+            compact.append({"title": title, "url": url, "snippet": snippet})
+            lines.append(f"[{idx}] {title}")
+            if url:
+                lines.append(f"    {url}")
+            if snippet:
+                lines.append(f"    {snippet}")
+            lines.append("")
 
         return ToolResult(
             success=True,
-            output=json.dumps(compact, indent=2, ensure_ascii=False),
+            output="\n".join(lines).rstrip(),
             metadata={
                 "query": query,
                 "providers": list(provider_results.keys()),
