@@ -278,6 +278,35 @@ if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
 
+async def _keepalive_loop():
+    """Render 免费版 15min 无外部访问会休眠; 每 14min ping 自己保持活跃.
+
+    Render 自动设置 RENDER_EXTERNAL_URL 环境变量。服务被唤醒一次后,
+    后台任务持续运行, 不依赖本地 cron 或 GitHub Actions。
+    """
+    external_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not external_url:
+        return
+    health_url = f"{external_url.rstrip('/')}/api/health"
+    await asyncio.sleep(60)
+    while True:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-m", "10", health_url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=15)
+        except Exception:
+            pass
+        await asyncio.sleep(14 * 60)
+
+
+@app.on_event("startup")
+async def _start_keepalive():
+    asyncio.create_task(_keepalive_loop())
+
+
 if __name__ == "__main__":
     import uvicorn
 
