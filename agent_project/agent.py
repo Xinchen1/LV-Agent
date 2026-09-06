@@ -4727,7 +4727,7 @@ class OpenMythosAgent:
                 "web_search": 30,
                 "bash_exec": 120,
                 "python_exec": 30,
-                "file_ops": 30,
+                "file_ops": 120,
                 "project_context": 30,
                 "playwright_browser": 60,
                 "api_call": 20,
