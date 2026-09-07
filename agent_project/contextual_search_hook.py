@@ -6,8 +6,8 @@ from pathlib import Path
 import os
 from typing import List, Dict
 
-VAULT_PATH = Path("/Users/mac/Downloads/Obsidian Vault")
-AGENT_PATH = Path("/Users/mac/Desktop/agent_project")
+VAULT_PATH = Path(os.getenv("LV_VAULT_PATH", str(Path.home() / "Downloads" / "Obsidian Vault")))
+AGENT_PATH = Path(os.getenv("LV_AGENT_PATH", str(Path(__file__).resolve().parent.parent)))
 
 def local_hits(query: str, limit: int = 5) -> List[Dict]:
     keywords = query.lower().split()
