@@ -443,12 +443,21 @@ class OpenAIBackend:
                     base_url=self.base_url,
                     api_key=self.api_key or "skip",  # openai lib requires non-empty string
                 )
-                if self.bypass_proxy:
+                # 本地 Ollama 必须直连: 经 127.0.0.1:7890 类代理访问 localhost
+                # 会被代理拒掉(502), 故 localhost/127.0.0.1 永远 bypass。
+                _need_bypass = self.bypass_proxy or self._is_ollama() or any(
+                    h in (self.base_url or "").lower()
+                    for h in ("localhost", "127.0.0.1")
+                )
+                if _need_bypass:
                     # Bypass system/env proxy (Clash/V2Ray at 127.0.0.1:7891 etc.)
                     # so domestic APIs like DeepSeek connect directly and don't
                     # fail when the local proxy is down.
                     try:
-                        import httpx
+                        try:
+                            import httpx
+                        except ImportError:
+                            import httpx2 as httpx  # 兼容改名 fork
                         kwargs["http_client"] = httpx.Client(
                             trust_env=False,
                             timeout=httpx.Timeout(self.timeout, connect=10.0),
@@ -632,6 +641,9 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         Permanent 4xx client errors — including 401/403 auth failures — are NOT
         retried: they will never succeed, so retrying just wastes time/budget.
         """
+        # 客户端编程错误(如意外kwarg)永不重试: 重试只是烧时间
+        if isinstance(e, TypeError):
+            return False
         if isinstance(e, (ConnectionError, TimeoutError)):
             return True
         status = _extract_http_status(e)
@@ -716,8 +728,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                 **kwargs,
             )
             # 本地 Ollama: 钉住模型常驻显存, 消除冷启动(~5.5s)的等待
+            # (必须走 extra_body, openai-python 不接受顶层 keep_alive kwarg)
             if self._is_ollama():
-                create_args["keep_alive"] = -1
+                _eb = dict(create_args.get("extra_body") or {})
+                _eb["keep_alive"] = -1
+                create_args["extra_body"] = _eb
             completion = self.client.chat.completions.create(**create_args)
             if stream:
                 content_parts = []
@@ -847,6 +862,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                         self._cb_record_failure()
                 else:
                     raise RuntimeError(f"OpenAI API error: {e}") from e
+        # 重试耗尽: 必须抛错, 不能隐式返回 None(调用方 .strip() 会崩 AttributeError)
+        raise RuntimeError(
+            f"OpenAI API failed after {max_attempts} attempts; "
+            "check endpoint status, network, and rate limits."
+        )
 
 
     def generate_native(
@@ -898,9 +918,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             if stream:
                 payload["stream"] = True
             payload.update(kwargs)
-            # 本地 Ollama: 钉住模型常驻显存, 消除冷启动(~5.5s)的等待
+            # 本地 Ollama: 钉住模型常驻显存(openai-python 下必须走 extra_body)
             if self._is_ollama():
-                payload["keep_alive"] = -1
+                _eb2 = dict(payload.get("extra_body") or {})
+                _eb2["keep_alive"] = -1
+                payload["extra_body"] = _eb2
 
             content_parts: List[str] = []
             reasoning_parts: List[str] = []

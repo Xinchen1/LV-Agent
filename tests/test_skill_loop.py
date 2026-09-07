@@ -60,6 +60,15 @@ def test_failure_lowers_score():
     assert eng.bank.get_skill_score("s1") < before
 
 
+def test_ollama_detection():
+    from agent_project.model_backends import OpenAIBackend
+    b = OpenAIBackend.__new__(OpenAIBackend)
+    b.base_url = "http://localhost:11434/v1"
+    assert b._is_ollama()
+    b.base_url = "https://developer.amd.com.cn/radeon/api/v1"
+    assert not b._is_ollama()
+
+
 def test_history_includes_action():
     p = ReActPolicy()
     steps = [type("S", (), {
