@@ -4,7 +4,7 @@
   "description": "LV Agent Desktop - Terminal-native AI Agent with Electron",
   "main": "src/main/index.js",
   "author": "Cleveris Research <xinchen@cleveris.research>",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "private": true,
   "scripts": {
     "start": "electron .",
@@ -25,7 +25,7 @@
   "build": {
     "appId": "com.cleveris.lv-agent",
     "productName": "LV Agent",
-    "copyright": "Copyright \u00A9 2026 Cleveris Research",
+    "copyright": "Copyright © 2026 Cleveris Research",
     "directories": {
       "output": "../dist/electron",
       "buildResources": "build"
@@ -73,11 +73,17 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.icns",
@@ -108,7 +114,9 @@
     },
     "linux": {
       "category": "Development",
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     }
   }
 }

@@ -1,13 +1,13 @@
 # Contributing to LV Agent
 
 Thanks for your interest in contributing to LV Agent! This project is
-open-source under the MIT license, and we welcome all forms of contribution:
+open-source under the AGPL-3.0-only license, and we welcome all forms of contribution:
 bug reports, feature ideas, documentation, and code.
 
 ## Ground Rules
 
 1. **By submitting a pull request, you agree** that your contribution is
-   licensed under the MIT license (same as the rest of the project).
+   licensed under the AGPL-3.0-only license (same as the rest of the project).
 2. **You certify that you have the right** to submit the code (you wrote it,
    or you have permission from the original author).
 3. **Do not include** real API keys, tokens, passwords, or personal data
