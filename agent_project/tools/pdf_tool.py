@@ -15,31 +15,40 @@ from typing import Any, Dict, List, Optional
 
 from . import BaseTool, ToolResult
 
-# 中文字体源 (macOS)。找不到时回退系统内置的 Courier/Helvetica。
+# 中文字体源 (macOS + Linux)。找不到时回退系统内置的 Courier/Helvetica。
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Songti.ttc",
     "/System/Library/Fonts/Supplemental/STHeiti Medium.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
 ]
 _FONT_CACHE: Optional[str] = None
 
 
 def _resolve_cjk_font() -> Optional[str]:
-    """找到可用的中文字体 (从 TTC 提取第一个子字体到缓存目录)."""
+    """找到可用的中文字体 (TTC 提取子字体, TTF/OTF 直接用)."""
     global _FONT_CACHE
     if _FONT_CACHE and os.path.exists(_FONT_CACHE):
         return _FONT_CACHE
     cache_dir = Path(tempfile.gettempdir()) / "lv_pdf_fonts"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    for ttc in _FONT_CANDIDATES:
-        if not os.path.exists(ttc):
+    for font_path in _FONT_CANDIDATES:
+        if not os.path.exists(font_path):
             continue
+        ext = Path(font_path).suffix.lower()
         try:
+            if ext in (".ttf", ".otf"):
+                _FONT_CACHE = font_path
+                return _FONT_CACHE
             from fontTools.ttLib import TTFont
-            name = Path(ttc).stem
+            name = Path(font_path).stem
             ttf_path = cache_dir / f"{name}_0.ttf"
             if not ttf_path.exists():
-                f = TTFont(ttc, fontNumber=0)
+                f = TTFont(font_path, fontNumber=0)
                 f.save(str(ttf_path))
             _FONT_CACHE = str(ttf_path)
             return _FONT_CACHE

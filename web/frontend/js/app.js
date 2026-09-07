@@ -16,6 +16,7 @@
       else if (m.type === 'done') { outputCb(m.final_answer || fullText); exitCb(0); fullText = ''; }
       else if (m.type === 'error') { stderrCb((m.message || 'error').slice(0, 500)); }
       else if (m.type === 'tool_call') { handleToolCall(m); }
+      else if (m.type === 'artifact') { handleArtifact(m); }
       else if (m.type === 'fs_status') { const b = document.getElementById('modelBadge'); if (b && m.enabled) b.textContent = (b.textContent || '').split(' · 📁')[0] + ' · 📁' + m.folder; }
     };
   }
@@ -83,6 +84,8 @@
     if (action === 'write') return await writeFile(path, content);
     if (action === 'exists') return await existsPath(path);
     if (action === 'delete') return await deletePath(path);
+    if (action === 'mkdir') return await mkdirPath(path);
+    if (action === 'analyze') return await analyzePath(path);
     if (action === 'multi_read') {
       const paths = args.paths || [path];
       const results = [];
@@ -90,6 +93,20 @@
       return {success: true, output: results.join('\n\n')};
     }
     return {success: false, error: `action "${action}" 暂不支持本地执行`};
+  }
+  async function mkdirPath(path) {
+    const parts = await normalizeParts(path);
+    let dir = dirHandle;
+    for (const part of parts) { dir = await dir.getDirectoryHandle(part, {create: true}); }
+    return {success: true, output: `已创建目录 ${path}`};
+  }
+  async function analyzePath(path) {
+    const h = await resolvePath(path);
+    if (!h) return {success: false, error: `路径不存在: ${path}`};
+    if (h.kind === 'directory') return {success: true, output: `目录: ${path}`, metadata: {type: 'directory'}};
+    const file = await h.getFile();
+    const text = await file.text();
+    return {success: true, output: `文件: ${path}\n大小: ${file.size} bytes\n行数: ${text.split('\n').length}`, metadata: {type: 'file', size: file.size, lines: text.split('\n').length}};
   }
   async function listDir(path) {
     const h = await resolvePath(path);
@@ -139,7 +156,62 @@
     return {success: true, output: `已删除 ${path}`};
   }
   window.lvSelectFolder = selectFolder;
-  // === end File System Access API ===
+
+  // === Artifact management: 产物保存到本地文件夹 + Artifacts 面板 ===
+  let webArtifacts = [];
+  async function handleArtifact(msg) {
+    const { filename, path: serverPath, size, data } = msg;
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const entry = { name: filename, path: serverPath, dir: dirHandle ? dirHandle.name : 'downloads', ext, size, mtime: Date.now(), _data: data };
+    const existing = webArtifacts.findIndex(a => a.name === filename);
+    if (existing >= 0) webArtifacts[existing] = entry; else webArtifacts.push(entry);
+
+    if (dirHandle) {
+      try {
+        const parts = filename.split('/').filter(p => p);
+        const fn = parts.pop();
+        let dir = dirHandle;
+        for (const part of parts) { dir = await dir.getDirectoryHandle(part, {create: true}); }
+        const fh = await dir.getFileHandle(fn, {create: true});
+        const writable = await fh.createWritable();
+        const bin = atob(data);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        await writable.write(buf);
+        await writable.close();
+        entry.dir = dirHandle.name;
+        showArtifactToast(`📁 已保存到 ${dirHandle.name}/${filename}`, filename);
+      } catch (e) {
+        console.error('saveArtifact:', e);
+        showArtifactToast(`⚠ 保存失败: ${e.message}`, filename);
+      }
+    } else {
+      showArtifactToast(`📦 产物已生成(未绑定文件夹, 点击下载)`, filename);
+    }
+  }
+  function showArtifactToast(text, filename) {
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;bottom:80px;right:20px;background:#1a1a2e;color:#e0e0e0;padding:10px 16px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.3);cursor:pointer;max-width:400px';
+    toast.textContent = text;
+    toast.onclick = () => { downloadArtifact(filename); toast.remove(); };
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 8000);
+  }
+  function downloadArtifact(filename) {
+    const item = webArtifacts.find(a => a.name === filename);
+    if (!item || !item._data) return;
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const mime = {pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',csv:'text/csv',json:'application/json',txt:'text/plain',html:'text/html',md:'text/markdown'}[ext] || 'application/octet-stream';
+    const bin = atob(item._data);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    const blob = new Blob([buf], {type: mime});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  // === end Artifact management ===
 
   window.electronAPI = {
     startAgent: async () => ({ success: true, pid: 1 }),
@@ -152,7 +224,7 @@
     getModelConfig: async () => DEFAULT_CFG,
     setModelConfig: async (cfg) => { send({ type: 'config', config: cfg }); return { success: true }; },
     getAgentStatus: async () => ({ running: false }),
-    listArtifacts: async () => ({ artifacts: [] }), openArtifact: async () => {}, revealArtifact: async () => {},
+    listArtifacts: async () => ({ success: true, items: webArtifacts.map(a => ({name: a.name, path: a.name, dir: a.dir, ext: a.ext, size: a.size, mtime: a.mtime})) }), openArtifact: async (p) => { downloadArtifact(p); }, revealArtifact: async () => {},
     listJobs: async () => ({ jobs: [] }), addJob: async () => ({ success: true }), toggleJob: async () => ({ success: true }), removeJob: async () => ({ success: true }),
     startTelegram: async () => ({ success: true }), stopTelegram: async () => ({ success: true }), getTelegramStatus: async () => ({}), getTelegramConfig: async () => ({}),
     onTelegramLog: () => {}, onTelegramExit: () => {},
