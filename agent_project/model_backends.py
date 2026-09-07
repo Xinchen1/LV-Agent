@@ -403,6 +403,12 @@ class OpenAIBackend:
         self._consecutive_errors = 0
         self._last_health_check = 0
         self._health_check_interval = 300  # 5 minutes
+        # 限流熔断: 连续限流/连接失败达阈值后短路, 交互轮直接 fast-fail
+        # (每轮烧 35s+ 退避是"慢"的主因之一), 恢复后自动闭合
+        self._cb_failures = 0
+        self._cb_open_until = 0.0
+        self._cb_threshold = 3
+        self._cb_cooldown = 60.0
 
         print(_style("  OpenAI-compatible backend", "2"))
         print(f"    {_style('model', '2')} {model}")
@@ -412,6 +418,20 @@ class OpenAIBackend:
             print(f"    {_style('auth', '2')}  {'*' * 12}...")
         else:
             print(f"    {_style('auth', '2')}  none")
+
+    def _cb_check(self) -> None:
+        """熔断中则直接抛错(fast-fail), 不烧退避等待."""
+        if self._cb_failures >= self._cb_threshold and time.time() < self._cb_open_until:
+            raise RuntimeError("后端限流熔断中(AMD实验端点不稳定), 请稍后重试")
+
+    def _cb_record_success(self) -> None:
+        self._cb_failures = 0
+        self._cb_open_until = 0.0
+
+    def _cb_record_failure(self) -> None:
+        self._cb_failures += 1
+        if self._cb_failures >= self._cb_threshold:
+            self._cb_open_until = time.time() + self._cb_cooldown
 
     @property
     def client(self):
@@ -646,6 +666,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         tools: Optional[List[Dict[str, Any]]] = None,  # ignored for text mode
         stream_callback: Optional[Callable] = None,
         token_callback: Optional[Callable[[int], None]] = None,
+        quick: bool = False,
         **kwargs
     ) -> str:
         """
@@ -769,8 +790,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
 
         # Retry logic with smart status-code handling.
         # Ensure connection is fresh (handles idle timeout, proxy down, Ollama model unload)
+        self._cb_check()
         self._ensure_connection()
-        max_attempts = 3
+        # quick 模式(交互快路): 少试一次、退避减半, 宁可 fast-fail 也不 hanging 一分钟
+        max_attempts = 2 if quick else 3
+        backoff_base = 2 if quick else 5
         for attempt in range(max_attempts):
             try:
                 # Auto-continue if the model stopped due to length (max_tokens hit)
@@ -795,6 +819,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                             pass
 
                 self._consecutive_errors = 0
+                self._cb_record_success()
                 return "\n".join(collected_parts).strip()
 
             except Exception as e:
@@ -807,15 +832,19 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     ) from e
                 # Rate limit: exponential backoff.
                 if status == 429:
-                    wait = 5 * (2 ** attempt)
+                    wait = backoff_base * (2 ** attempt)
                     print(_style(f"  rate limit (429), retrying in {wait}s", "2"))
                     time.sleep(wait)
+                    if attempt == max_attempts - 1:
+                        self._cb_record_failure()
                     continue
                 # Other retryable errors.
                 if self._should_retry(e):
                     wait = self._calculate_backoff(attempt)
                     print(_style(f"  API error, retrying in {wait:.1f}s: {e}", "2"))
                     time.sleep(wait)
+                    if attempt == max_attempts - 1:
+                        self._cb_record_failure()
                 else:
                     raise RuntimeError(f"OpenAI API error: {e}") from e
 
@@ -848,6 +877,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             _streamed_content 供调用方抑制重复透出。
         """
         stream = bool(stream_callback)
+        self._cb_check()
         try:
             # Ensure connection is fresh (handles idle timeout, proxy down, Ollama model unload)
             self._ensure_connection()
@@ -908,6 +938,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                                 if ar:
                                     slot["arguments"] += ar
                     self._consecutive_errors = 0
+                    self._cb_record_success()
                     return self._finalize_native(
                         "".join(content_parts) or "".join(reasoning_parts),
                         list(tool_slots.values()),
@@ -942,9 +973,11 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                 tool_calls.append({"name": name, "arguments": arguments})
 
             self._consecutive_errors = 0
+            self._cb_record_success()
             return self._finalize_native(content, tool_calls, False)
         except Exception as e:
             # 失败时降级: 返回空 tool_calls, 由调用方回退文本协议
+            self._cb_record_failure()
             raise RuntimeError(f"generate_native failed: {e}") from e
 
     @staticmethod
