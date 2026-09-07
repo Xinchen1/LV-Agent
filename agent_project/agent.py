@@ -40,6 +40,7 @@ from .research_report import is_research_report_task, generate_research_report
 from .health import ModuleHealthChecker, ModuleStatus
 from .execution_engine import ExecutionContext, ExecutionEngine
 from .policies import DirectPolicy
+from .fast_path import FastPathRouter
 from .terminal import style as _style
 
 try:
@@ -137,6 +138,13 @@ class OpenMythosAgent:
         self.tools = TOOLS_REGISTRY
         self._setup_tools()
 
+        # 快路路由器：解耦定位快路与简单查询识别
+        self._fast_path_router = FastPathRouter(
+            status_emitter=self._status,
+            logger=self.logger,
+            cache_get=self._cache_get,
+        )
+
         # Health check: gives users visibility into which modules are ready/degraded.
         self.health_checker = ModuleHealthChecker(config)
         self.module_status = self.health_checker.check_all()
@@ -147,6 +155,17 @@ class OpenMythosAgent:
         print(f"    {_style('loops', '2')}    {config.max_outer_loops}")
         if config.health.print_status_on_startup:
             self.print_module_status()
+
+    @property
+    def fast_path_router(self) -> FastPathRouter:
+        """获取或惰性创建快路路由器，兼容无 __init__ 的测试 mock 实例。"""
+        if not hasattr(self, "_fast_path_router") or self._fast_path_router is None:
+            self._fast_path_router = FastPathRouter(
+                status_emitter=getattr(self, "_status", None),
+                logger=getattr(self, "logger", None),
+                cache_get=getattr(self, "_cache_get", None),
+            )
+        return self._fast_path_router
 
     # ============ 初始化辅助方法 ============
 
@@ -636,6 +655,11 @@ class OpenMythosAgent:
                 api_key=os.getenv('SERPAPI_KEY'),
                 config=dict(self.config.tools.web_search),
             )
+            # 查询分析用配置的模型, 不偷换
+            try:
+                TOOLS_REGISTRY._tools['web_search'].llm_backend = getattr(self, 'backend', None)
+            except Exception:
+                pass
 
         if 'python_exec' in enabled_tools:
             timeout = self.config.tools.code_exec.get('timeout', 10)
@@ -800,7 +824,10 @@ class OpenMythosAgent:
             return str(value)
 
         full_key = (namespace,) + tuple(_make_hashable(k) for k in key)
-        return self._method_cache.get_or_set(full_key, factory)
+        cache = getattr(self, "_method_cache", None)
+        if cache is None:
+            return factory()
+        return cache.get_or_set(full_key, factory)
 
     def _log_to_file(self, message: str):
         """Write a log record only to file handlers, bypassing console output."""
@@ -1036,148 +1063,19 @@ class OpenMythosAgent:
 
     def _is_simple_query(self, task: str) -> bool:
         """智能判断是否为简单对话型查询,无需深度推理/工具编排."""
-        return self._cache_get("is_simple", (task,), lambda: self._compute_is_simple_query(task))
+        return self.fast_path_router.is_simple_query(
+            task,
+            is_continuation_fn=getattr(self, "_is_continuation_query", None),
+            is_pure_nudge_fn=getattr(self, "_is_pure_nudge", None),
+        )
 
     def _compute_is_simple_query(self, task: str) -> bool:
-        """简单查询判断的实际计算逻辑.
-
-        优先级(高→低):
-        1) 空输入 → fast
-        2) 明确的纯问候/礼貌/确认短句 → fast (不包含任何动作关键词)
-        3) 包含动作/工具/深度推理关键词 → deep (无论多短)
-        4) 超短(<10字)且无动作关键词 → fast
-        5) 超长(>40字) → deep
-        6) 中等长度且无明确工具意图 → fast
-
-        关键: 步骤3)必须在长度判断之前,否则短查询如"搜索AI"(4字)会被误走 fast 路径,
-            导致模型在 _run_simple 中不能正确使用工具.
-        """
-        task = task.strip()
-        task_lower = task.lower()
-
-        # 0) 空输入直接 fast
-        if not task:
-            return True
-
-        # 0.5) 修改/优化文件意图 → deep (需走主循环执行 read→apply_diff→verify)
-        # "给XX加功能""修改XX文件""在XX里加YY" 等必须真正改动文件, 不能 fast 单次回答
-        _mod_verbs = ("加", "加上", "加入", "添加", "增加", "修改", "改", "更新", "优化",
-                      "完善", "改进", "增强", "重构", "修复", "调整", "删除", "去除",
-                      "移动", "移", "移到", "移动到", "挪", "剪切", "搬到",
-                      "add", "modify", "update", "improve", "optimize", "refactor", "fix",
-                      "move", "mv", "relocate", "rename", "重命名")
-        # 移动/重命名类任务: 只要含移动词且提到文件/目录/到目标, 就绝不能 fast 单答
-        if any(v in task for v in ("移动", "移到", "移动到", "挪", "剪切", "搬到", "move", "mv", "relocate")) and any(
-            k in task for k in ("到", "文件夹", "目录", "文件", "进去", "放到", "放进", "移入", "移至", "目录", "folder", "dir", "path")
-        ):
-            return False
-        if any(v in task for v in _mod_verbs) and any(
-            k in task for k in ("功能", "特性", "文件", "代码", "程序", "脚本", "游戏", "项目", "音效",
-                                ".py", ".js", ".ts", ".md", ".txt", "snake", "贪吃", "贪食")
-        ):
-            return False
-
-        # 1.5) 有实质内容的延续追问("继续刚才X问题") → deep
-        # 单次快路干不了多步活(查看→分析→修改), 必须走主循环; 纯催促除外。
-        try:
-            if (self._is_continuation_query(task) and not self._is_pure_nudge(task)
-                    and len(task.strip()) > 8):
-                return False
-        except Exception:
-            pass
-
-        # 2) 纯问候/礼貌/确认 → 先于关键词检查匹配,避免被误判为需要工具
-        simple_patterns = [
-            r'^(你好|嗨|哈喽|hello|hi|hey|在吗|在嘛|您好|早上好|晚上好|下午好)[!!??\.,\s]*$',
-            r'^(谢谢|感谢|不客气|再见|拜拜|goodbye|bye)[!!??\.,\s]*$',
-            r'^(好的|行|可以|ok|okay|yes|no|嗯|哦|啊|对|不对|没错)[!!??\.,\s]*$',
-            r'^(谢|对)[!!??,,.!\s]*$',
-        ]
-        for pattern in simple_patterns:
-            if re.match(pattern, task_lower, re.IGNORECASE):
-                return True
-
-        # 2.5) 明确"看/读 X 文件夹/目录" → fast
-        #     (_run_simple 有自动 list+read 文件夹逻辑; 走 fast 可避免主循环全盘 find/只列不读)
-        if re.search(r"(看下|看一下|看看|查看|浏览|打开|读一下|读取)\s*[^，。！？!?]{1,40}?(文件夹|目录|folder|dir)", task):
-            return True
-        # 2.6) "分析 X 文件夹/项目" → fast (同上, 走自动读文件夹逻辑)
-        if re.search(r"(分析|剖析|解析)\s*[^，。！？!?]{1,30}", task) and (
-            "文件夹" in task or "目录" in task or "项目" in task or "代码库" in task or "仓库" in task
-            or "folder" in task.lower() or "dir" in task.lower() or "project" in task.lower()
-        ):
-            return True
-        # 2.7) "X 分析下/分析一下" (名字在前) → fast
-        if re.search(r"[^，。！？!?]{1,30}?(分析下|分析一下|分析|剖析|解析)$", task):
-            return True
-
-        # 3) 动作/工具/深度推理关键词 → deep (无论长度多少!)
-        #    这是最高优先级的"必须使用工具"判断,必须排在长度判断之前.
-        #    否则短查询如"搜索AI"(4字)/"天气"(2字)/"写代码"(3字) 会被误走 fast 路径.
-        deep_keywords = [
-            # 中文核心动作词
-            '搜索', '查找', '调研', '研究', '考察', '融资', '股价', '行情', '资料',
-            '文件', '代码', '程序', '分析', '比较', '设计', '实现',
-            '部署', '调试', '测试', '优化', '解释', '总结', '翻译', '天气', '新闻',
-            '写', '读', '创建', '构建', '获取', '调用', '运行', '执行', '列', '览', '示',
-            '查', '改', '编', '发', '搜', '算', '整理', '归档', '分类',
-            '规划', '对比', '评估', '推荐', '方案', '步骤', '流程', '架构', '原理', '机制',
-            # 中文语义触发
-            '联网', '实时', '最新', '现在', '今天', '目前',
-            '几个', '多少', '列表', '清单', '报告',
-            '项目', '文件夹', '目录', '桌面', '下载',
-            # 英文动作词
-            'search', 'find', 'lookup', 'research', 'investigate', 'file', 'code', 'program',
-            'analyze', 'compare', 'describe', 'design', 'implement', 'deploy', 'debug', 'test', 'optimize',
-            'explain', 'summarize', 'translate', 'weather', 'news', 'write', 'read', 'create',
-            'build', 'fetch', 'call', 'run', 'execute', 'list', 'show', 'display',
-            'plan', 'evaluate', 'recommend', 'architecture', 'workflow', 'compare',
-        ]
-        # 2.8) 纯知识问答豁免: "什么是X / X是什么 / 解释一下X概念" 等定义类问题
-        #     即使含 '解释/原理/算' 等深度关键词, 也不需要工具/多轮推理 —— 走 fast 单次回答。
-        #     但涉及 文件/代码/项目/报错 等需工具场景时排除, 避免误伤。
-        _qa_exclude = ('文件', '代码', '程序', '项目', '目录', '文件夹', '脚本',
-                       '.py', '.js', '.ts', '.md', 'bug', '报错', '错误',
-                       '库', '包', '函数', '接口', '报修')
-        if not any(e in task for e in _qa_exclude):
-            if (re.match(r"^什么(是|叫|叫做)\s*\S+", task, re.IGNORECASE)
-                    or re.match(r"^\S{1,20}?(是|叫|叫做)\s*什么\??$", task, re.IGNORECASE)
-                    or re.match(r"^(解释|解释一下|简单解释|用.*话解释|介绍一下|说说|聊聊|讲讲|给我解释)\s*[^，。！？]{1,25}?",
-                                task, re.IGNORECASE)):
-                return True
-
-        if any(kw in task_lower for kw in deep_keywords):
-            return False
-
-        # 4) 超短任务(<=10字符)且无深度关键词 → fast
-        if len(task) <= 10:
-            return True
-
-        # 5) 11-15字符的查询 - 查看数量类短查询通常需要工具
-        if len(task) <= 15:
-            if re.search(r'几个\s*[文件文件夹目录个]', task_lower):
-                return False
-            return True
-
-        # 6) 较长任务(>40字符) → deep (保守起见避免漏走工具)
-        if len(task) > 40:
-            return False
-
-        # 中等长度(16-40字符)且无明确动作关键词,视为简单问题 → fast
-        # 新增: 历史/介绍查询直接返回 simple (无需搜索)
-        history_intro_keywords = [
-            "历史", "发展", "演进", "起源", "诞生", "成名",
-            "人工智能", "AI 历史", "简介", "概述", "回顾",
-            "介绍", "背景", "来历"
-        ]
-        task_lower = task.lower()
-        if any(k in task_lower for k in history_intro_keywords):
-            # 确保不是工具任务
-            tool_keywords = ["文件", "代码", "搜索", "创建", "项目", "目录"]
-            if not any(k in task_lower for k in tool_keywords):
-                pass  # continue to return True below
-        # 原有返回
-        return True
+        """简单查询判断的实际计算逻辑(委托给 fast_path 模块)."""
+        return self.fast_path_router.simple_classifier.is_simple_query(
+            task,
+            is_continuation_fn=getattr(self, "_is_continuation_query", None),
+            is_pure_nudge_fn=getattr(self, "_is_pure_nudge", None),
+        )
 
     def _classify_intent(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
         """启发式意图分类器.
@@ -3940,155 +3838,11 @@ class OpenMythosAgent:
 
     def _try_location_fast_path(self, task: str, stream_callback=None, token_callback=None) -> Optional[Dict[str, Any]]:
         """Directly locate projects/folders/files by name to avoid blind directory listing."""
-        task_lower = task.lower()
-        # Only trigger for locate/find intents
-        locate_verbs = ["查找", "找一下", "搜索", "搜一下", "看看有没有", "看看", "看下", "在哪里", "在哪", "位于", "找", "查", "搜"]
-        # 复合任务守卫: 定位只是第一步, 后面还有修改/运行等动作时不走 fast path,
-        # 否则后半段任务会被跳过(如"看下X文件夹，修改它为免登录"只定位不修改)
-        if re.search(r'(修改|改为|改成|改动|更新|优化|完善|改进|增强|重构|修复|调整|删除|去除|运行|执行|启动|安装|部署|重写|改写|免登|不用登录|去登录|跳过登录)', task):
-            return None
-        locate_suffixes = ["项目", "文件夹", "目录", "文件"]
-        has_verb = any(v in task for v in locate_verbs)
-        has_suffix = any(s in task for s in locate_suffixes)
-        has_location_marker = any(m in task for m in ["下的", "里面", "中的", "上的", "里的"])
-
-        # Detect explicit "<location>的<target>" pattern (e.g. "桌面文件夹的report")
-        location_aliases_ordered = ["下载文件夹", "桌面文件夹", "文档文件夹", "下载", "桌面", "文档"]
-        has_explicit_location_target = False
-        for alias in location_aliases_ordered:
-            pattern = re.compile(re.escape(alias) + r"(?:项目|文件夹|目录|文件)?\s*的\s*(.+)", re.IGNORECASE)
-            if pattern.search(task):
-                has_explicit_location_target = True
-                break
-
-        if not (has_verb or has_location_marker or has_explicit_location_target):
-            return None
-        if not has_suffix and not re.search(r'[a-zA-Z_\-0-9]+', task):
-            return None
-
-        # 排除文档阅读意图: "看下 X 文章/笔记/报告/这篇/那篇" 是读文档, 不是定位文件
-        # (否则会误触发全盘 find, 如"看下agent研究这篇文章")
-        doc_markers = ["文章", "笔记", "报告", "这篇", "那篇", "文档", "资料", "研究", "总结",
-                       "article", "note", "report", "doc", "paper"]
-        if any(m in task for m in doc_markers) and not has_location_marker and not has_explicit_location_target:
-            return None
-
-        # 排除明显的"搜索信息/新闻/资料"意图: 这些应走 web_search, 而非 find 文件
-        # (如"查ai新闻""搜一下最新的资讯""查查天气"等)
-        info_search_markers = ["新闻", "资讯", "消息", "动态", "最新", "信息", "资料", "教程",
-                               "怎么", "如何", "教程", "介绍", "是什么", "怎么做", "天气",
-                               "news", "update", "info", "how to", "what is", "weather",
-                               "股票", "行情", "价格", "比分", "比赛"]
-        if has_suffix is False and any(m in task_lower for m in info_search_markers):
-            return None
-        # 即便含"文件夹/文件"后缀, 若是搜索网络信息意图也不触发 find
-        if any(m in task_lower for m in ["新闻", "资讯", "动态", "最新", "消息", "news", "update"]) and \
-           not has_location_marker and not has_explicit_location_target:
-            return None
-
-        # Resolve search root
-        root = str(Path.home())
-        for alias, target in [
-            ("文档文件夹", "Documents"), ("文档目录", "Documents"), ("文档", "Documents"),
-            ("桌面文件夹", "Desktop"), ("桌面", "Desktop"),
-            ("下载文件夹", "Downloads"), ("下载", "Downloads"),
-        ]:
-            if alias in task:
-                root = str(Path.home() / target)
-                break
-
-        # Extract target name:
-        # 1) Prefer explicit pattern: "<location>的<target>" or "<location><suffix>的<target>"
-        # 2) Then markers like "下的/里面/中的/上的/里的"
-        # 3) Finally fallback to verb-based extraction.
-        target_name = None
-
-        # Pattern: "下载文件夹的claude code" -> target = "claude code"
-        # Handles: 下载/桌面/文档/下载文件夹/桌面文件夹/文档文件夹 + optional 项目/文件夹/目录/文件 + 的
-        for alias in location_aliases_ordered:
-            pattern = re.compile(re.escape(alias) + r"(?:项目|文件夹|目录|文件)?\s*的\s*(.+)", re.IGNORECASE)
-            m = pattern.search(task)
-            if m:
-                # 截断到第一个分句标点: "桌面的grok-build文件夹，修改它…" → "grok-build文件夹"
-                target_name = re.split(r'[，。！？、；;,.!?]', m.group(1).strip(), maxsplit=1)[0].strip()
-                target_name = re.sub(r'(项目|文件夹|目录|文件)\s*$', '', target_name).strip()
-                break
-
-        # Marker-based fallback: part after 下的/里面/中的/上的/里的
-        if not target_name:
-            for marker in ["下的", "里面", "中的", "上的", "里的"]:
-                if marker in task:
-                    idx = task.rfind(marker)
-                    target_name = re.split(r'[，。！？、；;,.!?]', task[idx + len(marker):].strip(), maxsplit=1)[0].strip()
-                    target_name = re.sub(r'(项目|文件夹|目录|文件)\s*$', '', target_name).strip()
-                    break
-
-        # Verb-based fallback: between verb and optional suffix
-        # Order verbs longest-first to avoid "搜索" being split as "搜" + "索...".
-        if not target_name:
-            m = re.search(r'(?:查找|找一下|搜索|搜一下|查一下|看看有没有|看看|看下|找|查|搜)\s*([\w\s\-_.]+?)(?:项目|文件夹|目录|文件)?\s*$', task)
-            if m:
-                target_name = m.group(1).strip()
-
-        if not target_name:
-            return None
-
-        # Clean common prefixes/suffixes and Chinese alias roots
-        target_name = target_name.strip('"\'`“”')
-        for alias in location_aliases_ordered:
-            if target_name.lower().startswith(alias.lower()):
-                target_name = target_name[len(alias):].lstrip("/\\")
-                break
-        if not target_name or len(target_name) < 2:
-            return None
-        # 长度守卫: 超长基本是整句误捕获(如含逗号后半句没切干净), 交回正常 ReAct 循环处理
-        if len(target_name) > 40:
-            return None
-
-        # 用 glob 定向查找替代全盘 find: 限定在 cwd 和指定 root, 不触发权限错误/慢扫描
-        # (find 全盘会误扫 Photos 库等产生 Operation not permitted)
-        search_pattern = f"**/*{target_name}*"
-        self._status(stream_callback, f"locating '{target_name}' under {root}")
-        try:
-            from .tools import GlobTool
-            glob_tool = GlobTool()
-            roots = []
-            if root != str(Path.home()):
-                roots.append(root)
-            roots.append(str(Path.cwd()))  # 优先当前工作目录(Obsidian Vault 等)
-            if Path.home().exists() and str(Path.home()) not in roots:
-                roots.append(str(Path.home()))
-            output_parts = []
-            for r in roots:
-                try:
-                    res = glob_tool.execute(pattern=search_pattern, path=r, max_results=40)
-                    # 只要真实命中: "Found 0 file(s)…(none)" 也是 success+非空输出,
-                    # 必须看 count, 否则空结果会被当成功提前返回(劫持 web_search 等任务)
-                    count = 0
-                    try:
-                        count = int((res.metadata or {}).get("count", 0))
-                    except Exception:
-                        m0 = re.search(r'Found\s+(\d+)\s+file', res.output or "")
-                        count = int(m0.group(1)) if m0 else 0
-                    if res.success and count > 0 and res.output:
-                        output_parts.append(f"[{r}]\n{res.output}")
-                except Exception:
-                    continue
-            if not output_parts:
-                # 没找到: 返回 None 交回正常 ReAct 循环(列目录/换工具/真实干活),
-                # 而不是用 "Found 0" 冒充成功提前结束(会导致任务后半段被跳过)。
-                return None
-            output = "\n\n".join(output_parts)
-            final = f"Found matches for '{target_name}':\n{output}"
-            return {
-                "final_answer": final,
-                "success": True,
-                "outer_loops": 1,
-                "thinking_steps": 1,
-                "metadata": {"duration_ms": 0},
-            }
-        except Exception:
-            return None
+        return self.fast_path_router.try_location_fast_path(
+            task=task,
+            stream_callback=stream_callback,
+            token_callback=token_callback,
+        )
 
     def _get_memory_context(self, task: str, max_pages: int = 3, mode: str = "normal") -> str:
         """Unified memory recall via ContextEngine, with raw MemoryManager fallback,
