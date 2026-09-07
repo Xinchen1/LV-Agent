@@ -76,10 +76,13 @@ class WebSearchTool(BaseTool):
         provider: str = "duckduckgo",
         api_key: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        llm_backend: Optional[Any] = None,
     ):
         self.provider = provider
         self.api_key = api_key or os.getenv("SERPAPI_KEY")
         self.cfg = config or {}
+        # 配置的模型(深度研究用什么模型, 查询分析就用什么, 不偷换)
+        self.llm_backend = llm_backend
 
         # Resolve effective provider list - default to only DuckDuckGo for speed
         self.providers = self.cfg.get("providers", ["duckduckgo", "bing", "google"])
@@ -205,8 +208,10 @@ class WebSearchTool(BaseTool):
             has_date = bool(re.search(r'20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{2}', query))
             if len(query) > 20 and not has_date and any(k in query for k in ['最新','新闻','产品','价格']):
                 try:
-                    from .model_backends import get_backend
-                    backend = get_backend()
+                    backend = self.llm_backend
+                    if backend is None:
+                        from .model_backends import get_backend
+                        backend = get_backend()
                     analysis_prompt = f"""用户原始查询：{query}
 请抽取核心实体和意图，输出一条准确、可直接用于搜索引擎的查询关键词，5-15字。只输出关键词，不要解释。"""
                     refined = backend.generate(analysis_prompt, max_tokens=64, temperature=0.0).strip()

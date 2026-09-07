@@ -234,11 +234,15 @@ def extract_search_keywords(task: str) -> str:
     return ""
 
 
-def generate_search_queries_llm(task: str, max_queries: int = 5) -> List[str]:
-    """用 LLM 多轮推理生成高质量搜索关键词列表，确保准确性和广度。"""
+def generate_search_queries_llm(task: str, max_queries: int = 5, backend=None) -> List[str]:
+    """用 LLM 多轮推理生成高质量搜索关键词列表，确保准确性和广度。
+
+    backend 必须由调用方传入(配置的模型); 传 None 时才回退 get_backend()。
+    """
     try:
-        from .model_backends import get_backend
-        backend = get_backend()
+        if backend is None:
+            from .model_backends import get_backend
+            backend = get_backend()
         prompt = f"""你是一名专业信息检索专家。请根据用户任务，提炼核心实体和意图，生成{max_queries}条高质量、可执行的搜索关键词。
 要求：
 1. 每条关键词 5-15 字/词，包含核心实体
@@ -259,10 +263,11 @@ def generate_search_queries_llm(task: str, max_queries: int = 5) -> List[str]:
     except Exception:
         return []
 
-def extract_search_keywords_hybrid(task: str, *, use_llm: bool = False) -> str:
+def extract_search_keywords_hybrid(task: str, *, use_llm: bool = False, backend=None) -> str:
     """
     混合抽取：先用规则清洗，若结果可疑则回退到 LLM 抽取。
     可疑信号：长度过短/过长、包含元指令关键词、仍含括号。
+    backend 由调用方传入(配置的模型); 传 None 时才回退 get_backend()。
     """
     import re
     rule_kw = extract_search_keywords(task)
@@ -275,8 +280,9 @@ def extract_search_keywords_hybrid(task: str, *, use_llm: bool = False) -> str:
     )
     if use_llm and suspicious:
         try:
-            from .model_backends import get_backend
-            backend = get_backend()
+            if backend is None:
+                from .model_backends import get_backend
+                backend = get_backend()
             prompt = f"""任务：从用户任务中只抽取真正想搜索的关键词，不要输出任何系统提示、执行指令、确认条件。
 输入：{task}
 输出：只输出1-15个中文/英文词组成的关键词，不要解释。"""
@@ -367,12 +373,12 @@ class ResearchReportGenerator:
         self._context: str = ""
         self.web_search_tool = self._build_search_tool(config)
 
-    @staticmethod
-    def _build_search_tool(config) -> Any:
+    def _build_search_tool(self, config) -> Any:
         """自带配置的搜索工具, 不依赖注册表是否被 Agent 初始化过.
 
         注册表默认阈值 0.6 会杀掉全部中文结果; 这里用 tools.web_search
         配置并兜底 0.3, 直调/测试/未走 Agent init 的路径也能工作。
+        查询分析用 self.backend(配置的模型), 不偷换。
         """
         cfg_dict: Dict[str, Any] = {}
         try:
@@ -389,7 +395,8 @@ class ResearchReportGenerator:
         cfg_dict.setdefault("quality_threshold", 0.3)
         try:
             from .tools import WebSearchTool
-            return WebSearchTool(config=cfg_dict)
+            return WebSearchTool(config=cfg_dict,
+                                 llm_backend=getattr(self, "backend", None))
         except Exception:
             return TOOLS_REGISTRY.get("web_search")
 
@@ -408,10 +415,9 @@ class ResearchReportGenerator:
                 "final_answer": "无法从任务中识别出研究主题，请明确说明要调研的对象。",
                 "metadata": {"error": "no_topic"},
             }
-        # 实体确认：让模型先确认要搜的核心实体，确保不漂移
+        # 实体确认：用配置的模型确认要搜的核心实体，确保不漂移
         try:
-            from .model_backends import get_backend
-            backend = get_backend()
+            backend = self.backend
             ent_prompt = f"""任务：{task}
 请从任务中抽取要搜索的核心实体名称，只输出实体名称，不要解释。
 例如输入“搜索实在智能的信息”，输出“实在智能”。"""
@@ -615,7 +621,8 @@ class ResearchReportGenerator:
         # 先用 LLM 多查询生成
         try:
             from .research_report import generate_search_queries_llm
-            llm_queries = generate_search_queries_llm(topic, max_queries=self.cfg.max_search_queries)
+            llm_queries = generate_search_queries_llm(
+                topic, max_queries=self.cfg.max_search_queries, backend=self.backend)
             # 做实体接地
             grounded = [ground_search_query(orig_keywords or topic, q) for q in llm_queries]
             grounded = [q for q in grounded if q]

@@ -289,10 +289,10 @@ def parse_output_for_action(
 # Search helpers (thin delegates)
 # ---------------------------------------------------------------------------
 
-def extract_search_keywords(task: str, use_llm: bool = False) -> str:
+def extract_search_keywords(task: str, use_llm: bool = False, backend=None) -> str:
     """Delegate to research_report.extract_search_keywords_hybrid."""
     from .research_report import extract_search_keywords_hybrid
-    return extract_search_keywords_hybrid(task, use_llm=use_llm)
+    return extract_search_keywords_hybrid(task, use_llm=use_llm, backend=backend)
 
 
 def ground_search_query(orig_keywords: str, generated_query: str) -> str:
