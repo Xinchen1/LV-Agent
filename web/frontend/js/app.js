@@ -3,7 +3,7 @@
   const wsUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
   let ws = null, fullText = '';
   let outputCb = () => {}, chunkCb = () => {}, exitCb = () => {}, stderrCb = () => {};
-  const DEFAULT_CFG = { backend:'openai', model:'DeepSeek-V4-Flash', base_url:'https://developer.amd.com.cn/radeon/api/v1', api_key:'', temperature:0.7, max_tokens:4096 };
+  const DEFAULT_CFG = { backend:'openai', model:'', base_url:'', api_key:'', temperature:0.7, max_tokens:4096 };
   let dirHandle = null;
   function connect(){
     ws = new WebSocket(wsUrl);
