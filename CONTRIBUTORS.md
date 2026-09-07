@@ -7,8 +7,8 @@ holders. Status below is based on git history identities.
 | Identity (git history) | Role | AGPL relicense consent |
 |------------------------|------|------------------------|
 | Xinchen1 <xinchen@cleveris.research> | Owner / maintainer | ✅ Confirmed (instructed the switch) |
-| mac <mac@macdeMacBook-Pro.local> | Local dev identity (presumed same person) | ⚠️ Presumed — confirm if different person |
-| 湛 <374251233@qq.com> | Contributor | ❌ **Pending — explicit confirmation required** |
+| mac <mac@macdeMacBook-Pro.local> | Local dev identity | ✅ Confirmed (same person) |
+| 湛 <374251233@qq.com> | Contributor | ✅ Confirmed (same person, owner confirmed 2026-09-07) |
 
 Notes:
 - If you contributed code and are listed (or missing) above, contact
