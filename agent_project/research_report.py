@@ -365,7 +365,33 @@ class ResearchReportGenerator:
         self.output_dir = output_dir or (Path.home() / "OpenMythos" / "reports")
         # 对话上下文: 深度研究需结合用户之前的讨论背景, 而不是孤立搜索孤立主题。
         self._context: str = ""
-        self.web_search_tool = TOOLS_REGISTRY.get("web_search")
+        self.web_search_tool = self._build_search_tool(config)
+
+    @staticmethod
+    def _build_search_tool(config) -> Any:
+        """自带配置的搜索工具, 不依赖注册表是否被 Agent 初始化过.
+
+        注册表默认阈值 0.6 会杀掉全部中文结果; 这里用 tools.web_search
+        配置并兜底 0.3, 直调/测试/未走 Agent init 的路径也能工作。
+        """
+        cfg_dict: Dict[str, Any] = {}
+        try:
+            tools = getattr(config, "tools", None)
+            ws = None
+            if tools is not None:
+                ws = getattr(tools, "web_search", None)
+                if ws is None and isinstance(tools, dict):
+                    ws = tools.get("web_search")
+            if isinstance(ws, dict):
+                cfg_dict = dict(ws)
+        except Exception:
+            pass
+        cfg_dict.setdefault("quality_threshold", 0.3)
+        try:
+            from .tools import WebSearchTool
+            return WebSearchTool(config=cfg_dict)
+        except Exception:
+            return TOOLS_REGISTRY.get("web_search")
 
     def run(
         self,
