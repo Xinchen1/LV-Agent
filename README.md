@@ -141,7 +141,7 @@ cp config.example.yaml config.yaml
 ./lv            # 或 python super_agent.py
 ```
 
-**支持后端：** AMD Radeon（默认，DeepSeek-V4-Flash）/ DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
+**支持后端：** DeepSeek / OpenAI / Anthropic / OpenRouter / Ollama（本地离线）。
 
 ---
 
