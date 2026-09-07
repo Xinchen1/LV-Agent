@@ -264,7 +264,7 @@ class Session:
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"ok": True, "workspaces": str(WORKSPACE_ROOT)})
+    return JSONResponse({"ok": True, "workspaces": str(WORKSPACE_ROOT), "ver": "2026-09-07-v2"})
 
 
 @app.websocket("/ws")
