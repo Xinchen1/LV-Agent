@@ -2360,8 +2360,8 @@ class SuperAgentCLI:
   def _configure_local_endpoint(self, cfg):
     import yaml
     print("\n\033[1mLocal endpoint\033[0m\n")
-    base_url = Prompt.ask("base URL", default="http://localhost:20128").strip()
-    model = Prompt.ask("model", default="oc/deepseek-v4-flash-free").strip()
+    base_url = Prompt.ask("base URL", default="http://localhost:11434/v1").strip()
+    model = Prompt.ask("model", default="qwen2.5-coder:7b").strip()
     cfg.setdefault('agent', {})
     cfg['agent']['backend'] = 'openai'
     cfg['agent']['openai'] = {

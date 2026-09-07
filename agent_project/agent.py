@@ -483,7 +483,7 @@ class OpenMythosAgent:
             if not base_url:
                 raise ValueError(
                     "OpenAI backend selected but no base_url provided. "
-                    "Set agent.openai.base_url in config.yaml (e.g., http://localhost:20128)"
+                    "Set agent.openai.base_url in config.yaml (e.g., http://localhost:11434/v1)"
                 )
 
             model = openai_cfg.get('model', 'gpt-4o-mini')
