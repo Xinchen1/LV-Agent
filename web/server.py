@@ -216,9 +216,13 @@ class Session:
         import base64
         import re
 
-        all_text = (result.get("final_answer", "") or "") + "\n" + "\n".join(tool_outputs or [])
+        tool_outputs = tool_outputs or []
+        all_text = (result.get("final_answer", "") or "") + "\n" + "\n".join(tool_outputs)
+        await ws.send_json({"type": "stream", "kind": "status", "token": f"[debug] tool_outputs={len(tool_outputs)}, all_text_len={len(all_text)}"})
+
         for m in re.finditer(r"(?:PDF 已生成|文件已生成|已生成文件|文件位置)[:\s`]*([^\n`]+?\.\w+)", all_text):
             p = m.group(1).strip().strip("`").strip("'").strip('"')
+            await ws.send_json({"type": "stream", "kind": "status", "token": f"[debug] regex matched: {p}, isfile={os.path.isfile(p)}"})
             if os.path.isfile(p) and p not in self.artifacts:
                 self.artifacts.append(p)
 
@@ -226,14 +230,19 @@ class Session:
         for d in scan_dirs:
             if not d or not d.exists():
                 continue
+            count = 0
             for f in d.rglob("*"):
                 try:
                     if f.is_file() and f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg", ".csv", ".json", ".txt", ".html", ".md"):
                         p = str(f)
                         if p not in self.artifacts and f.stat().st_size > 0:
                             self.artifacts.append(p)
+                            count += 1
                 except Exception:
                     continue
+            await ws.send_json({"type": "stream", "kind": "status", "token": f"[debug] scanned {d}: +{count} artifacts"})
+
+        await ws.send_json({"type": "stream", "kind": "status", "token": f"[debug] total artifacts: {len(self.artifacts)}"})
 
         for p in self.artifacts:
             try:
