@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
 
@@ -219,6 +219,37 @@ class SuperAgentCLI:
     self._drafts: list = []      # Ctrl+S 暂存的草稿栈(设计文档)
     self._last_input_pasted = False # 上轮输入是否经历 bracketed paste(用于显示粘贴确认)
     self._setup_command_completion()
+    # 金丝雀标识(企业盗用追踪用): 全网搜此字符串可定位未授权 fork/托管实例
+    self._lv_canary = "lv-agent-canary-2026-cleveris"
+    threading.Thread(target=self._version_beacon, daemon=True).start()
+
+  def _version_beacon(self):
+    """匿名版本检查(顺带使用统计): 查新版 + 让官方知道有人在用。
+
+    隐私: 只发随机安装 ID + 版本号 + 平台, 无任务内容; LV_TELEMETRY=0 关闭。
+    企业级用量会在服务端留下痕迹, 是 AGPL 执法的线索来源之一。
+    """
+    try:
+      import os as _os, json as _json, uuid as _uuid, urllib.request as _url
+      if _os.getenv("LV_TELEMETRY", "1") == "0":
+        return
+      iid_file = Path.home() / ".lv_agent" / "install_id"
+      try:
+        if iid_file.exists():
+          iid = iid_file.read_text().strip()
+        else:
+          iid = _uuid.uuid4().hex
+          iid_file.parent.mkdir(parents=True, exist_ok=True)
+          iid_file.write_text(iid)
+      except Exception:
+        iid = "unknown"
+      url = _os.getenv("LV_UPDATE_URL", "https://lv-agent.cleveris.research/api/version")
+      req = _url.Request(url, data=_json.dumps(
+        {"iid": iid, "v": "1.0.0", "platform": sys.platform}).encode(),
+        headers={"Content-Type": "application/json"})
+      _url.urlopen(req, timeout=4).read()
+    except Exception:
+      pass
 
   _COMMANDS = [
     "/deep", "/research", "/model", "/models", "/config", "/theme", "/code", "/status",
