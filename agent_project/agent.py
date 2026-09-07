@@ -2346,14 +2346,26 @@ class OpenMythosAgent:
             raw_answer = None
         if raw_answer is None:
             try:
-                raw_answer = self.backend.generate(
-                    prompt,
-                    n_loops=1,
-                    temperature=self.config.temperature,
-                    max_tokens=fast_max_tokens,
-                    stream_callback=internal_callback,
-                    token_callback=token_callback
-                )
+                # quick=True: 交互快路少重试、退避减半, 限流时 fast-fail 不 hanging
+                try:
+                    raw_answer = self.backend.generate(
+                        prompt,
+                        n_loops=1,
+                        temperature=self.config.temperature,
+                        max_tokens=fast_max_tokens,
+                        stream_callback=internal_callback,
+                        token_callback=token_callback,
+                        quick=True,
+                    )
+                except TypeError:
+                    raw_answer = self.backend.generate(
+                        prompt,
+                        n_loops=1,
+                        temperature=self.config.temperature,
+                        max_tokens=fast_max_tokens,
+                        stream_callback=internal_callback,
+                        token_callback=token_callback,
+                    )
             except Exception as e:
                 # 稳定性: 后端调用失败(重试耗尽/非连接错误)不让整轮崩溃, 降级为友好提示
                 self.logger.error(f"fast generate failed: {type(e).__name__}: {e}")
