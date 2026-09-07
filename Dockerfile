@@ -3,7 +3,9 @@ FROM docker.m.daocloud.io/library/python:3.12-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget git jq && rm -rf /var/lib/apt/lists/*
+    curl wget git jq \
+    fonts-noto-cjk fonts-noto-cjk-extra \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     "openai>=1.0.0" \
@@ -21,7 +23,9 @@ RUN pip install --no-cache-dir \
     "websockets>=12.0" \
     "aiohttp>=3.9.0" \
     "lxml>=5.0.0" \
-    "playwright>=1.40.0"
+    "playwright>=1.40.0" \
+    "reportlab>=4.0.0" \
+    "fonttools>=4.50.0"
 
 RUN playwright install chromium --with-deps
 

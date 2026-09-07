@@ -109,6 +109,7 @@ class Session:
         self.config_info: Dict[str, Any] = {}
         self.remote_file_ops: Optional[RemoteFileOpsTool] = None
         self._saved_file_ops = None
+        self.artifacts: list[str] = []
 
     def build_agent(self, overrides: Dict[str, Any]) -> None:
         cfg = load_config()
@@ -163,6 +164,7 @@ class Session:
             return
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        self.artifacts = []
 
         def stream_cb(kind: str, token: str) -> None:
             try:
@@ -193,6 +195,8 @@ class Session:
             queue.put_nowait(None)
         await pump_task
 
+        await self._collect_and_push_artifacts(result, ws)
+
         payload = {
             "type": "done",
             "success": bool(result.get("success")),
@@ -200,8 +204,44 @@ class Session:
             "metadata": result.get("metadata", {}),
             "outer_loops": result.get("outer_loops", 0),
             "thinking_steps": result.get("thinking_steps", 0),
+            "artifacts": self.artifacts,
         }
         await ws.send_json(payload)
+
+    async def _collect_and_push_artifacts(self, result: dict, ws: WebSocket) -> None:
+        """从 agent 结果和 workspace 中收集产物文件, base64 推送给前端."""
+        import base64
+        import re
+
+        final_text = result.get("final_answer", "") or ""
+        for m in re.finditer(r"(?:PDF 已生成|文件已生成|已生成文件)[:\s]*([^\n]+?\.\w+)", final_text):
+            p = m.group(1).strip().strip("`").strip("'").strip('"')
+            if os.path.isfile(p):
+                self.artifacts.append(p)
+
+        if self.workspace:
+            for f in self.workspace.rglob("*"):
+                if f.is_file() and f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg", ".csv", ".json", ".txt", ".html", ".md"):
+                    p = str(f)
+                    if p not in self.artifacts:
+                        self.artifacts.append(p)
+
+        for p in self.artifacts:
+            try:
+                size = os.path.getsize(p)
+                if size > 10 * 1024 * 1024:
+                    continue
+                with open(p, "rb") as fh:
+                    data = base64.b64encode(fh.read()).decode("ascii")
+                await ws.send_json({
+                    "type": "artifact",
+                    "filename": os.path.basename(p),
+                    "path": p,
+                    "size": size,
+                    "data": data,
+                })
+            except Exception:
+                pass
 
 
 @app.get("/api/health")
