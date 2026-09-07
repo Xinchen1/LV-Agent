@@ -165,10 +165,13 @@ class Session:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         self.artifacts = []
+        tool_output_text: list[str] = []
 
         def stream_cb(kind: str, token: str) -> None:
             try:
                 loop.call_soon_threadsafe(queue.put_nowait, (kind, token))
+                if kind == "tool_result":
+                    tool_output_text.append(token)
             except Exception:
                 pass
 
@@ -195,7 +198,7 @@ class Session:
             queue.put_nowait(None)
         await pump_task
 
-        await self._collect_and_push_artifacts(result, ws)
+        await self._collect_and_push_artifacts(result, ws, tool_output_text)
 
         payload = {
             "type": "done",
@@ -208,23 +211,29 @@ class Session:
         }
         await ws.send_json(payload)
 
-    async def _collect_and_push_artifacts(self, result: dict, ws: WebSocket) -> None:
-        """从 agent 结果和 workspace 中收集产物文件, base64 推送给前端."""
+    async def _collect_and_push_artifacts(self, result: dict, ws: WebSocket, tool_outputs: list[str] = None) -> None:
+        """从 agent 结果、工具输出和 workspace 中收集产物文件, base64 推送给前端."""
         import base64
         import re
 
-        final_text = result.get("final_answer", "") or ""
-        for m in re.finditer(r"(?:PDF 已生成|文件已生成|已生成文件)[:\s]*([^\n]+?\.\w+)", final_text):
+        all_text = (result.get("final_answer", "") or "") + "\n" + "\n".join(tool_outputs or [])
+        for m in re.finditer(r"(?:PDF 已生成|文件已生成|已生成文件|文件位置)[:\s`]*([^\n`]+?\.\w+)", all_text):
             p = m.group(1).strip().strip("`").strip("'").strip('"')
-            if os.path.isfile(p):
+            if os.path.isfile(p) and p not in self.artifacts:
                 self.artifacts.append(p)
 
-        if self.workspace:
-            for f in self.workspace.rglob("*"):
-                if f.is_file() and f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg", ".csv", ".json", ".txt", ".html", ".md"):
-                    p = str(f)
-                    if p not in self.artifacts:
-                        self.artifacts.append(p)
+        scan_dirs = [self.workspace, Path("/app"), Path.cwd()]
+        for d in scan_dirs:
+            if not d or not d.exists():
+                continue
+            for f in d.rglob("*"):
+                try:
+                    if f.is_file() and f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg", ".csv", ".json", ".txt", ".html", ".md"):
+                        p = str(f)
+                        if p not in self.artifacts and f.stat().st_size > 0:
+                            self.artifacts.append(p)
+                except Exception:
+                    continue
 
         for p in self.artifacts:
             try:
