@@ -197,6 +197,15 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-09-07
+
+- **速度优化** — 限流熔断：连续限流/连接失败达阈值后 60s 内直接 fast-fail，不再每轮烧 35s+ 退避；交互快路 `quick` 模式（2 次尝试、退避减半）。
+- **深度研究** — 搜索工具自带配置兜底阈值 0.3（不依赖注册表初始化顺序，中文结果不再被默认 0.6 全过滤）；全链路统一用配置的模型（query 变体、实体确认、查询分析 4 处偷换改为传参）。
+- **本地模型** — 切换菜单默认端点改为 Ollama `http://localhost:11434/v1` + `qwen2.5-coder:7b`（旧 20128 无服务）。
+- **通用化** — 去个人路径硬编码：hook 走环境变量/自动推导，配置走 `${HOME}` 变量，开箱即用。
+- **License** — 切 AGPL-3.0-only + 双授权声明（`COMMERCIAL-LICENSE.md`，商用托管另购）+ 贡献者授权记录；匿名版本心跳（`LV_TELEMETRY=0` 可关）。
+- **Web 端** — File System Access API（网页端选本地文件夹，file_ops 远程代理到前端执行）；Render 自保活（14min 自 ping）；工具放开（file_ops/code_exec + SSRF 防护）；PDF 生成 + workspace 产物；`web_search` 简洁文本列表；file_ops 超时 120s；前端绝对路径解析与 WebSocket 重连。
+
 ### 2026-09-04
 
 
