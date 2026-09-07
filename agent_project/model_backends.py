@@ -355,7 +355,7 @@ class OpenAIBackend:
     """
     OpenAI-compatible backend.
     Supports any OpenAI API-compatible endpoint:
-    - Local: http://localhost:20128 (your example)
+    - Local: http://localhost:11434/v1 (your example)
     - OpenRouter: https://openrouter.ai/api/v1
     - LiteLLM: http://localhost:4000
     - Ollama: http://localhost:11434/v1
@@ -378,7 +378,7 @@ class OpenAIBackend:
 
         Args:
             api_key: API key (None or "skip" for endpoints without auth)
-            base_url: API base URL (e.g., "http://localhost:20128" or "https://openrouter.ai/api/v1")
+            base_url: API base URL (e.g., "http://localhost:11434/v1" or "https://openrouter.ai/api/v1")
             model: Model name your endpoint expects (e.g., "oc/deepseek-v4-flash-free")
             temperature: Sampling temperature
             top_p: Top-p sampling parameter
