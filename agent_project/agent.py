@@ -167,6 +167,17 @@ class OpenMythosAgent:
             )
         return self._fast_path_router
 
+    @property
+    def auxiliary(self) -> "AuxiliaryClient":
+        """Side-LLM 客户端(总结/抽取): 默认复用主 backend, 可热插独立模型.
+
+        惰性创建, 兼容无 __init__ 的测试 mock 实例.
+        """
+        if not hasattr(self, "_auxiliary_client") or self._auxiliary_client is None:
+            from .auxiliary_client import AuxiliaryClient
+            self._auxiliary_client = AuxiliaryClient.from_agent(self)
+        return self._auxiliary_client
+
     # ============ 初始化辅助方法 ============
 
     def _build_harness_kernel(self):
@@ -490,12 +501,15 @@ class OpenMythosAgent:
             openai_cfg = self.config.openai
             # LV_API_KEY 为通用兜底(c5e5946 把 config.yaml 内 key 外置后的约定),
             # 避免 key 置空后终端 TUI 直接 401。
+            # config.yaml 用 ${NVAPI_KEY:-} 引用环境变量, 未设置时展开为空串;
+            # 这里同时兜底 NVAPI_KEY/OPENAI_API_KEY/LV_API_KEY 三个来源。
             api_key = (openai_cfg.get('api_key')
+                       or os.getenv('NVAPI_KEY')
                        or os.getenv('OPENAI_API_KEY')
                        or os.getenv('LV_API_KEY'))
             
             # api_key can be None for local endpoints without auth
-            if api_key == "skip" or api_key is None:
+            if api_key == "skip" or api_key in (None, ""):
                 api_key = None
 
             base_url = openai_cfg.get('base_url')
@@ -1524,8 +1538,10 @@ class OpenMythosAgent:
             "requested information, say so clearly instead of making things up. Final Answer:"
         )
         try:
-            answer = self.backend.generate(
-                prompt, n_loops=1, temperature=0.4, max_tokens=1024,
+            # Side 任务走 auxiliary(默认复用主 backend, 调用单独计数);
+            # 后续配独立小模型时零改动切换.
+            answer = self.auxiliary.summarize(
+                prompt, max_tokens=1024,
                 token_callback=token_callback,
             ).strip()
         except Exception as e:
@@ -1998,14 +2014,8 @@ class OpenMythosAgent:
 
         return False
 
-    def _run_simple(self, task: str, memory_context: str = "",
-                    history_context: str = "",
-                    stream_callback: Optional[callable] = None,
-                    token_callback: Optional[Callable[[int], None]] = None,
-                    is_continuation: Optional[bool] = None) -> Dict[str, Any]:
-        """对简单查询执行单次 LLM 调用快速返回,仍保留简短思考过程"""
-        started_at = datetime.now()
-
+    def _rewrite_nudge_task(self, task: str, is_continuation: Optional[bool]) -> Tuple[str, bool]:
+        """快车道任务重写:催促/同意词重新注入上一条任务. 纯搬移自 _run_simple 头部."""
         if is_continuation is None:
             is_continuation = self._is_continuation_query(task)
 
@@ -2032,8 +2042,50 @@ class OpenMythosAgent:
                 is_continuation = False  # 走工具执行路径
                 task = f"继续执行上一条任务: {last_task}\n(若已完成则直接确认完成结果; 若未完成则现在真正执行并给出结果)"
                 self.logger.info(f"continuation nudge -> re-execute last task: {last_task[:60]}")
+        return task, bool(is_continuation)
 
-        system_parts = [
+    def _run_simple(self, task: str, memory_context: str = "",
+                    history_context: str = "",
+                    stream_callback: Optional[callable] = None,
+                    token_callback: Optional[Callable[[int], None]] = None,
+                    is_continuation: Optional[bool] = None) -> Dict[str, Any]:
+        """对简单查询执行单次 LLM 调用快速返回,仍保留简短思考过程"""
+        started_at = datetime.now()
+
+        # 催促/同意重写见 _rewrite_nudge_task(); prompt 组装见 _build_fast_prompt().
+        # 真正执行见 _run_simple_exec(). 三段拆分, 行为与原来直列时一致.
+        task, is_continuation = self._rewrite_nudge_task(task, is_continuation)
+        prompt = self._build_fast_prompt(task, memory_context, history_context, is_continuation)
+        return self._run_simple_exec(task, prompt, memory_context, history_context,
+                                     stream_callback, token_callback,
+                                     is_continuation, started_at)
+
+    def _collect_context_parts(self, task: str, history_context: str = "",
+                                   memory_context: str = "",
+                                   memory_label: str = "") -> List[str]:
+        """快慢两路共享的上下文三件套:历史 + 记忆 + 技能指令.
+
+        纯抽取(快路 memory 带 "## Relevant Memory" 标签, 深路不带).
+        画像/跨会话召回/策略建议/计划由各调用方自行追加.
+        """
+        parts = []
+        if history_context:
+            parts.append(history_context)
+        if memory_context:
+            parts.append((memory_label + memory_context) if memory_label else memory_context)
+        skill_context = self._get_skill_context(task)
+        if skill_context:
+            parts.append("## Active Skill Instructions:\n" + skill_context)
+        return parts
+
+    def _build_fast_static_prefix(self) -> str:
+        """快车道静态前缀装配函数(供 PrefixCache 未命中时调用).
+
+        内容纯搬移自旧 _build_fast_prompt 字面量段. 缓存键=(日期,cwd,工具表版本)
+        由调用方持有, 本函数只负责组装.
+        """
+        from .tools import render_compact_tool_list
+        static_parts = [
             "You are Lv Super Agent, the Captain of the Lv Agent ship (船长OS). "
             "You steer every task like a seasoned captain navigating waters.",
             "Captain OS principle: slow on turns, fast on straights. "
@@ -2060,16 +2112,9 @@ class OpenMythosAgent:
             "  [TOOL:tool_name]",
             "  {JSON arguments}",
             "",
-            "Available tools:",
-            "- web_search(query, max_results=5) → 联网搜索最新信息(天气/新闻/股价/资料/产品/公司)",
-            "- read_web(url) → 打开网页提取正文",
-            "- file_ops(action, path, ...) → action ∈ [read, write, list, exists, grep, analyze, fast_read]",
+            "Available tools (单一事实源, 文本协议下模型唯一的工具发现源):",
+            "{TOOL_LIST}",
             "- fast_read: 长文档(访谈/报告/文章/大文件)先向量化入库, 再按语义查询取相关片段, 不全文塞入",
-            "- glob(pattern, path='.', max_results=100) → 按文件名模式定向查找文件(如 **/*.py)",
-            "- search_files(pattern, path, ...) → 在文件中搜索文本内容(grep)",
-            "- python_exec(code, lang, timeout=30) → 执行 python/bash/python_file 代码",
-            "- bash_exec(command, timeout=120) → 执行任意 shell 命令(含 git clone/install/运行)",
-            "- git(command, repository) → git 操作: clone/init/status/add/commit/push/pull 等",
             "",
             f"当前工作目录: {os.getcwd()} (文件操作用相对该目录的路径, 不要凭空编造绝对路径)",
             "",
@@ -2099,7 +2144,29 @@ class OpenMythosAgent:
             "- FINDING FILES: 用 glob(pattern, path) 定向查找, 不要用 bash find 全盘扫描(会刷屏权限错误)。只在用户明确要求全盘搜索时才用 bash find, 并加 2>/dev/null 屏蔽权限报错。",
             "- CREATING FILES/ARTICLES: 用户说'新建/创建/写一篇/保存一篇文章/把XX放进去'时, 必须直接调用 file_ops(action='write', path='<当前目录/文件名.md>', content='<完整内容>') 真正创建文件。写完用 file_ops(action='read', path=...) 验证内容已写入。绝不能只 list 目录或只说'好的'而不实际 write。",
             "- MODIFYING FILES: 用户说'给XX加功能/改一下/修改/更新/优化XX'时, 必须先 read 目标文件, 然后直接调用 file_ops(action='apply_diff', path=..., diff='<<<<<<< SEARCH\n原文\n=======\n新文\n>>>>>>> REPLACE') 或 file_ops(action='write', path=..., content='完整新内容') 真正修改文件。修改后 read 验证。绝不能只描述'应该怎么改'而不实际执行修改。",
+            "- MEMORY RECALL DISCIPLINE: 工作目录有新鲜文件时优先 read, 勿用旧经验/记忆编造内容。",
+            "- HONEST SUMMARY: 总结必须基于工具原文, 缺失直说不知道, 不编造。",
         ]
+        # Note: System prompt is now fully in English as requested. Chinese instructions kept for final answer style only.
+        # 工具表[...单一事实源...]替换后整体缓存(键=日期+cwd+工具表版本).
+        text = "\n".join(static_parts).replace("{TOOL_LIST}", render_compact_tool_list())
+        return text
+
+    def _build_fast_prompt(self, task: str, memory_context: str = "",
+                           history_context: str = "",
+                           is_continuation: bool = False) -> str:
+        """组装快车道 system prompt: 静态前缀(缓存) + 动态段(延续/技能/上下文)."""
+        from .cache import PromptPrefixCache
+        if not hasattr(self, "_fast_prefix_cache") or self._fast_prefix_cache is None:
+            self._fast_prefix_cache = PromptPrefixCache(capacity=8)
+        from .tools import TOOLS_REGISTRY
+        date_s = datetime.now().strftime("%Y-%m-%d")
+        tool_ver = ",".join(sorted(TOOLS_REGISTRY.list_tools()))
+        static_prefix = self._fast_prefix_cache.get_or_build(
+            "fast_static", (date_s, os.getcwd(), tool_ver),
+            self._build_fast_static_prefix,
+        )
+        system_parts = [static_prefix]
         # Note: System prompt is now fully in English as requested. Chinese instructions kept for final answer style only.
         if is_continuation:
             system_parts.append(
@@ -2112,14 +2179,9 @@ class OpenMythosAgent:
         if skill_tools:
             system_parts.append("")
             system_parts.append(f"Preferred tools for this task: {', '.join(skill_tools)}")
-        context_parts = []
-        if history_context:
-            context_parts.append(history_context)
-        if memory_context:
-            context_parts.append("## Relevant Memory:\n" + memory_context)
-        skill_context = self._get_skill_context(task)
-        if skill_context:
-            context_parts.append("## Active Skill Instructions:\n" + skill_context)
+        context_parts = self._collect_context_parts(
+            task, history_context, memory_context, "## Relevant Memory:\n"
+        )
         # 快车道也注入用户画像, 让简单问答同样按用户偏好行动
         if self.context_engine:
             try:
@@ -2138,53 +2200,221 @@ class OpenMythosAgent:
             self.logger.warning(f"past conversation recall failed: {e}")
         if context_parts:
             system_parts.append("\n" + "\n\n".join(context_parts))
-        prompt = "\n".join(system_parts) + f"\n\nUser: {task}\nAssistant:"
+        # 静态前缀已含渲染好的工具表(缓存中替换), 此处只拼动态段.
+        return "\n".join(system_parts) + f"\n\nUser: {task}\nAssistant:"
 
-        # 流式回调包装:支持 native reasoning_content 与 <think> 标签两种思考来源
-        reasoning_parts = []
-        content_parts = []
+    def _retry_truncated_answer(self, task: str, prompt: str, final_answer: str,
+                                  fast_max_tokens: int, token_callback=None) -> str:
+        """截断重试: 流被掐断致残缺回答时补一次完整重试. 纯搬移自 _run_simple_exec."""
+        if self._is_truncated_answer(final_answer):
+            self.logger.warning(f"fast answer looks truncated: {final_answer!r}; retrying once")
+            try:
+                retry_raw = self.backend.generate(
+                    f"{prompt}\n\n注意: 上一条回答异常(截断/过短), 请重新给出完整回答。\nUser: {task}\nAssistant:",
+                    n_loops=1,
+                    temperature=self.config.temperature,
+                    max_tokens=fast_max_tokens,
+                    token_callback=token_callback,
+                    system_override="",
+                )
+                retry_answer = self._clean_fast_answer(str(retry_raw or "")).strip()
+                if retry_answer and not self._is_truncated_answer(retry_answer):
+                    final_answer = retry_answer
+            except Exception as e:
+                self.logger.debug(f"fast retry failed {e}")
+        return final_answer
 
-        if stream_callback:
-            # fast path 的 content 先缓冲、清洗后再平滑重放:
-            # 模型常把 <thinking> 或答案片段混进 content/reasoning, 直接实时透出会产生
-            # "的，你好"/尾部回声等多余内容。
-            # 这里只透出工具/状态事件; reasoning(思考过程)默认不实时显示,
-            # 仅在交互式深度思考(非简单问答)时透出, 保证简洁输出。
-            # reasoning 到达时给一个轻量"思考中"状态, 避免用户看到空白以为卡死。
-            _thinking_shown = {"v": False}
-            _streamed_content = {"v": False}  # 是否已实时透出过正文(用于避免重复追加)
-            def _buffer_user_cb(kind, text):
-                if kind in ('tool_call', 'tool_result', 'error'):
-                    stream_callback(kind, text)
-                elif kind == 'status':
-                    stream_callback(kind, text)
-                elif kind == 'reasoning' and not _thinking_shown["v"]:
-                    # 思考过程只显示一次"thinking"轻提示(保持 fast path 简洁)
-                    _thinking_shown["v"] = True
-                    stream_callback('status', 'thinking')
-                elif kind == 'content':
-                    # 正文实时透出: 让用户逐字看到模型输出, 不再等整轮结束才一次性蹦出。
-                    # 同时标记 content_parts 已被流式累积, 供最终答案组装使用。
-                    _clean = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
-                    # 安全网: 模型常把英文自我对话混在工具调用前。以 [TOOL: 为锚点,
-                    # 丢弃 [TOOL: 之前的非标签内容, 避免把内部推理泄露到界面。
-                    if '[TOOL:' in _clean:
-                        idx = _clean.find('[TOOL:')
-                        if idx > 0:
-                            prefix = _clean[:idx]
-                            # 复用已有的英文自我对话检测: 前缀以英文为主且含特征词
-                            if self._is_mostly_english(prefix) and self._SELFTALK_RE.search(prefix):
-                                _clean = _clean[idx:]
-                    if _clean:
-                        _streamed_content["v"] = True
-                        stream_callback('content', _clean)
-                # 'reasoning' 不逐字透出(fast path 保持简洁), 但 'content' 实时逐字显示
+    def _retry_promise_no_action(self, task: str, prompt: str, final_answer: str,
+                                 actions: List[Dict[str, Any]], is_continuation: bool,
+                                 stream_callback=None, token_callback=None,
+                                 fast_max_tokens: int = 2048) -> Tuple[str, List[Dict[str, Any]]]:
+        """\"光说不做\"重试: 承诺未执行工具时强制执行一次, 仍失败则按意图强注工具.
 
-            router = self._create_stream_router(_buffer_user_cb, reasoning_parts, content_parts)
-            internal_callback = router.on_token
-        else:
-            internal_callback = None
+        纯搬移自 _run_simple_exec. 返回 (final_answer, actions).
+        """
+        # "光说不做"检测: 模型只承诺要做(如"我先看一下HealthOS文件")却未真正执行工具
+        # -> 重试一次, 强制它立即调用工具并给出结果
+        # 增强: 也检测"声称要搜索/查找/查看/分析但实际无工具调用"(知行合一)
+        _promised_but_no_action = self._is_promise_response(final_answer) and not actions
+        if not _promised_but_no_action and not actions:
+            # 说了"搜索/查找/查看/分析/打开/读取/下载/克隆"等动作词 + 未来时承诺, 却没有任何工具调用
+            _claim_words = ["搜索", "查找", "查看", "分析", "打开", "读取", "下载", "克隆",
+                            "search", "look up", "fetch", "read", "open", "analyze", "clone",
+                            "查询", "调查", "查一下", "找找", "调研", "研究一下",
+                            "整理", "保存", "存到", "写入", "写进", "存为", "创建文件", "写成",
+                            "写成文章", "生成文件", "写一篇", "保存到", "输出到",
+                            "整理成", "整理好", "汇总", "记录", "存档",
+                            "write", "save", "create file", "write file", "output to"]
+            _promise_words = ["我会", "我将", "我先", "稍后", "准备", "接下来", "下一步", "再去", "随后",
+                              "马上", "立刻", "这就", "等一等", "别急", "我现在", "我这就",
+                              "我来", "现在就来", "好的马上", "那我", "那我继续", "继续", "接着",
+                              "先换", "换个", "换更", "再试", "再搜", "再查", "等我", "待会"]
+            _promised_but_no_action = any(w in final_answer for w in _claim_words) and any(
+                w in final_answer for w in _promise_words
+            )
+        if _promised_but_no_action:
+            self.logger.warning(f"promise/claim without tool use: {final_answer!r}; forcing execution")
+            try:
+                retry_raw = self.backend.generate(
+                    f"{prompt}\n\n注意: 你刚才只是说要做什么, 但没有真正执行。"
+                    f"请立即调用对应工具完成该操作, 并基于工具结果直接回答, 不要只承诺。\nUser: {task}\nAssistant:",
+                    n_loops=1,
+                    temperature=self.config.temperature,
+                    max_tokens=fast_max_tokens,
+                    token_callback=token_callback,
+                    system_override="",
+                )
+                retry_answer = self._clean_fast_answer(str(retry_raw or "")).strip()
+                if retry_answer:
+                    # 重试后若模型真正输出了工具调用, 重新解析并直接执行
+                    retry_action = self._parse_output_for_action(retry_answer)
+                    if retry_action and TOOLS_REGISTRY.get(retry_action.tool_name):
+                        self.logger.info(f"promise retry produced tool call: {retry_action.tool_name}")
+                        try:
+                            r_needs_summary = is_continuation or self._tool_returns_listing(retry_action)
+                            r_result, r_answer = self._execute_tool_and_observe(
+                                retry_action, stream_callback, suppress_content=r_needs_summary
+                            )
+                            if r_result.success:
+                                # 后置核验: 写入类动作, 验证文件确实存在且非空
+                                verified = True
+                                verify_note = ""
+                                if retry_action.tool_name == "file_ops":
+                                    _fa = (retry_action.arguments or {}).get("action")
+                                    _fp = (retry_action.arguments or {}).get("path")
+                                    if _fa in ("write", "apply_diff") and _fp:
+                                        try:
+                                            exists = TOOLS_REGISTRY.get("file_ops").execute(
+                                                action="exists", path=_fp
+                                            )
+                                            if exists.success and exists.output.strip().lower() == "true":
+                                                verify_note = " (已核验文件存在)"
+                                            else:
+                                                verified = False
+                                        except Exception:
+                                            pass
+                                final_answer = r_answer or f"已执行: {r_result.output[:300]}"
+                                if verified:
+                                    final_answer += verify_note
+                                actions.append({
+                                    'tool_name': retry_action.tool_name,
+                                    'arguments': retry_action.arguments,
+                                    'success': True,
+                                    'output': r_result.output[:500],
+                                    'error': r_result.error,
+                                    'verified': verified,
+                                })
+                            else:
+                                # 后置核验: 工具执行失败, 不能直接返回承诺文字
+                                self.logger.warning(f"promise retry tool FAILED: {r_result.error}")
+                                final_answer = self._tool_failure_fallback(task, r_result)
+                        except Exception as e:
+                            self.logger.debug(f"promise retry tool exec failed {e}")
+                    elif not self._is_promise_response(retry_answer):
+                        final_answer = retry_answer
+                    else:
+                        # 后置感知: 重试后仍是空承诺(模型坚持不执行工具)
+                        # 直接按意图注入工具调用, 不再依赖模型自觉。
+                        self.logger.warning(f"promise retry STILL promise-only: {retry_answer!r}; forcing via intent classifier")
+                        injected = self._classify_intent(task)
+                        if injected and injected[2] >= 0.7:
+                            injected_tool, injected_args, _, _ = injected
+                            from .tools import ToolCall as _TC
+                            forced = _TC(tool_name=injected_tool, arguments=injected_args)
+                            try:
+                                f_needs_summary = is_continuation or self._tool_returns_listing(forced)
+                                f_result, f_answer = self._execute_tool_and_observe(
+                                    forced, stream_callback, suppress_content=f_needs_summary
+                                )
+                                if f_result.success:
+                                    final_answer = f_answer or f"已执行: {f_result.output[:300]}"
+                                    actions.append({
+                                        'tool_name': forced.tool_name,
+                                        'arguments': forced.arguments,
+                                        'success': True,
+                                        'output': f_result.output[:500],
+                                        'error': f_result.error,
+                                    })
+                                else:
+                                    final_answer = f"抱歉，执行时遇到问题：{f_result.error or '未知错误'}"
+                            except Exception as e:
+                                self.logger.debug(f"forced intent exec failed {e}")
+            except Exception as e:
+                self.logger.debug(f"promise retry failed {e}")
+        return final_answer, actions
 
+    def _wrap_fast_result(self, task: str, final_answer: str,
+                          actions: List[Dict[str, Any]],
+                          started_at: Optional[datetime] = None,
+                          stream_callback=None,
+                          already_streamed: bool = False) -> Dict[str, Any]:
+        """快车道收尾:平滑重放 -> 记忆落盘 -> token 守卫 -> 结果字典. 纯搬移自 _run_simple_exec."""
+        if started_at is None:
+            started_at = datetime.now()
+        # 清洗后平滑重放干净答案(非实时流式时统一输出, 避免 think 残留/回声)。
+        # 若正文已由实时流逐字透出(already_streamed), 则不再重放, 防止双重显示。
+        if stream_callback and final_answer and not already_streamed:
+            for i in range(0, len(final_answer), 8):
+                stream_callback("content", final_answer[i:i + 8])
+                time.sleep(0.003)
+
+        if self.context_engine and not self._is_truncated_answer(final_answer):
+            self.context_engine.observe_assistant(final_answer)
+
+        completed_at = datetime.now()
+        duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+
+        trajectory = {
+            'task': task,
+            'thoughts': [],
+            'actions': actions,
+            'observations': [{
+                'success': True,
+                'output': final_answer,
+                'error': None,
+                'metadata': {'fast_path': True}
+            }],
+            'thinking_steps': 1,
+            'outer_loops': 1,
+            'final_reward': self._compute_fast_reward(final_answer, actions),
+            'success': True,
+            'session_token_usage': self.session_token_usage,
+            'final_answer': final_answer,
+            'metadata': {
+                'mode': 'fast',
+                'strategy': 'direct',
+                'started_at': started_at.isoformat(),
+                'completed_at': completed_at.isoformat(),
+                'duration_ms': duration_ms,
+                'fast_path': True,
+                'confidence': getattr(self, '_last_confidence', 0.5),
+        'tokens': self.session_token_usage.get('last_call_tokens', 0)
+        }
+        }
+
+        # 统一落盘(快路新增经验/wiki/memskill, 纯闲聊跳过图谱; 见 _persist_turn).
+        self._persist_turn(task, trajectory)
+
+        # 会话 token 预算守卫: 快车道也要防止长会话悄悄涨爆上下文。
+        # 超过阈值时触发工作记忆压缩(截断/摘要旧事件), 记录状态供 UI 提示。
+        try:
+            _max_ctx = getattr(self.config.memory, "max_context_tokens", 6000) if getattr(self.config, "memory", None) else 6000
+            _used = int(self.session_token_usage.get("total", 0))
+            if _used >= _max_ctx and self.context_engine is not None:
+                _compressed = self.context_engine.compress_working_memory()
+                self.logger.info(f"context guard: {_used}/{_max_ctx} tokens, compressed working memory")
+                self.session_token_usage["compressed"] = True
+        except Exception:
+            pass
+
+        return trajectory
+
+    @staticmethod
+    def _decide_fast_max_tokens(task: str) -> int:
+        """快车道首调 token 预算:问候512, 记忆召回/长问2048, 搜索代码类4096.
+
+        纯搬移自 _run_simple_exec. 纯函数, 无副作用.
+        """
         # Dynamic max_tokens: simple greetings/questions fit in 512, but anything
         # involving search results, code, or multi-sentence answers needs more room.
         fast_max_tokens = 512
@@ -2197,7 +2427,22 @@ class OpenMythosAgent:
             fast_max_tokens = 2048
         elif len(task) > 40 or '?' in task or '？' in task:
             fast_max_tokens = 2048
+        return fast_max_tokens
 
+    def _call_fast_llm(self, task: str, prompt: str, fast_max_tokens: int,
+                         stream_callback=None, token_callback=None,
+                         internal_callback=None, router=None,
+                         reasoning_parts=None, content_parts=None,
+                         streamed_flag=None) -> str:
+        """快车道首调 LLM:原生 FC 优先, 文本兜底, token 记账, think 切分与清洗.
+
+        纯搬移自 _run_simple_exec. reasoning_parts/content_parts/streamed_flag
+        为调用方持有的可变容器, 本方法只追加不重建. 返回清洗后的 answer_text.
+        """
+        if reasoning_parts is None:
+            reasoning_parts = []
+        if content_parts is None:
+            content_parts = []
         # 原生 Function Calling 优先: 后端支持时直接拿结构化 tool_calls,
         # 转成文本协议格式供后续 _parse_output_for_action 复用, 避免模型猜格式。
         raw_answer = None
@@ -2227,7 +2472,7 @@ class OpenMythosAgent:
                     token_callback=token_callback,
                 )
                 if native.get("_streamed_content"):
-                    _streamed_content["v"] = True
+                    streamed_flag["v"] = True
                 tcs = native.get("tool_calls") or []
                 if tcs:
                     parts = []
@@ -2245,6 +2490,7 @@ class OpenMythosAgent:
         if raw_answer is None:
             try:
                 # quick=True: 交互快路少重试、退避减半, 限流时 fast-fail 不 hanging
+                # system_override="": 快 prompt 自带 system, 跳过后端默认 system 省重复计费
                 try:
                     raw_answer = self.backend.generate(
                         prompt,
@@ -2254,6 +2500,7 @@ class OpenMythosAgent:
                         stream_callback=internal_callback,
                         token_callback=token_callback,
                         quick=True,
+                        system_override="",
                     )
                 except TypeError:
                     raw_answer = self.backend.generate(
@@ -2294,7 +2541,7 @@ class OpenMythosAgent:
             else:
                 # content 已由流式路由实时透出时不再重复追加, 避免与透出内容重复。
                 # (streaming 时 content_parts 已被 router 记录; 非 streaming 时此处是唯一来源)
-                if not content_parts or not _streamed_content["v"]:
+                if not content_parts or not streamed_flag["v"]:
                     content_parts.append(raw_answer)
 
         answer_text = "".join(content_parts).strip()
@@ -2307,11 +2554,17 @@ class OpenMythosAgent:
         # 抽取置信度: 从 <think> 思考中提取(内部评估, 不展示给用户), 供 self_correction 使用
         self._last_confidence = self._extract_confidence(raw_answer)
         self.logger.info(f"confidence: {self._last_confidence}")
+        return answer_text
 
+    def _resolve_fast_action(self, task: str, answer_text: str,
+                               is_continuation: bool = False) -> Tuple[Any, str, bool]:
+        """快车道动作决策:解析模型工具调用 -> 分类器覆写 -> 快捷意图(文件/打开/目录/记忆).
+
+        纯搬移自 _run_simple_exec. 返回 (action, ambiguous_reply, memory_query_mode).
+        下游仅用这三者做执行循环 (_classifier_override 等中间量不出方法).
+        """
         # 如果模型输出了工具调用,尝试直接执行并返回结果(失败时自动纠正一次)
         action = self._parse_output_for_action(answer_text)
-        actions = []
-        final_answer = ""
         ambiguous_reply = ""
         _memory_query_mode = False
 
@@ -2444,7 +2697,72 @@ class OpenMythosAgent:
             if action is not None and action.tool_name not in ("__memory_query__",):
                 self.logger.info(f"memory query: suppressing tool {action.tool_name} (answer from memory)")
             action = None
+        return action, ambiguous_reply, _memory_query_mode
 
+    def _setup_fast_stream(self, stream_callback=None) -> Tuple[list, list, Any, Any, Dict[str, bool]]:
+        """快车道流装配:缓冲回调(含 self-talk 安全网) + 路由器 + 共享容器.
+
+        纯搬移自 _run_simple_exec 头部. 返回
+        (reasoning_parts, content_parts, internal_callback, router, streamed_flag).
+        无回调时后两者为 None, streamed_flag 为等效空字典.
+        """
+        # 流式回调包装:支持 native reasoning_content 与 <think> 标签两种思考来源
+        reasoning_parts = []
+        content_parts = []
+
+        if stream_callback:
+            # fast path 的 content 先缓冲、清洗后再平滑重放:
+            # 模型常把 <thinking> 或答案片段混进 content/reasoning, 直接实时透出会产生
+            # "的，你好"/尾部回声等多余内容。
+            # 这里只透出工具/状态事件; reasoning(思考过程)默认不实时显示,
+            # 仅在交互式深度思考(非简单问答)时透出, 保证简洁输出。
+            # reasoning 到达时给一个轻量"思考中"状态, 避免用户看到空白以为卡死。
+            _thinking_shown = {"v": False}
+            _streamed_content = {"v": False}  # 是否已实时透出过正文(用于避免重复追加)
+            def _buffer_user_cb(kind, text):
+                if kind in ('tool_call', 'tool_result', 'error'):
+                    stream_callback(kind, text)
+                elif kind == 'status':
+                    stream_callback(kind, text)
+                elif kind == 'reasoning' and not _thinking_shown["v"]:
+                    # 思考过程只显示一次"thinking"轻提示(保持 fast path 简洁)
+                    _thinking_shown["v"] = True
+                    stream_callback('status', 'thinking')
+                elif kind == 'content':
+                    # 正文实时透出: 让用户逐字看到模型输出, 不再等整轮结束才一次性蹦出。
+                    # 同时标记 content_parts 已被流式累积, 供最终答案组装使用。
+                    _clean = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    # 安全网: 模型常把英文自我对话混在工具调用前。以 [TOOL: 为锚点,
+                    # 丢弃 [TOOL: 之前的非标签内容, 避免把内部推理泄露到界面。
+                    if '[TOOL:' in _clean:
+                        idx = _clean.find('[TOOL:')
+                        if idx > 0:
+                            prefix = _clean[:idx]
+                            # 复用已有的英文自我对话检测: 前缀以英文为主且含特征词
+                            if self._is_mostly_english(prefix) and self._SELFTALK_RE.search(prefix):
+                                _clean = _clean[idx:]
+                    if _clean:
+                        _streamed_content["v"] = True
+                        stream_callback('content', _clean)
+                # 'reasoning' 不逐字透出(fast path 保持简洁), 但 'content' 实时逐字显示
+
+            router = self._create_stream_router(_buffer_user_cb, reasoning_parts, content_parts)
+            internal_callback = router.on_token
+        else:
+            internal_callback = None
+            router = None
+            _streamed_content = {"v": False}
+        return reasoning_parts, content_parts, internal_callback, router, _streamed_content
+
+    def _execute_fast_tool(self, action: Any, task: str, answer_text: str,
+                             actions: List[Dict[str, Any]], is_continuation: bool,
+                             stream_callback=None, token_callback=None,
+                             internal_callback=None) -> Tuple[str, List[Dict[str, Any]]]:
+        """快车道单工具执行:执行 -> 总结(list 自动读 md) -> 失败 one-shot 重试.
+
+        纯搬移自 _run_simple_exec. 无 action 时直接返回 answer_text.
+        返回 (final_answer, actions).
+        """
         if action:
             # 目录/文件列表等原始输出不适合直接播放, 需要总结后再给用户。
             # 执行前根据工具与参数预判, 避免先播完原始列表又播一遍总结。
@@ -2503,7 +2821,8 @@ class OpenMythosAgent:
                         temperature=self.config.temperature,
                         max_tokens=512,
                         stream_callback=internal_callback,
-                        token_callback=token_callback
+                        token_callback=token_callback,
+                        system_override="",
                     ).strip()
                     retry_action = self._parse_output_for_action(retry_answer)
                     if retry_action:
@@ -2528,6 +2847,45 @@ class OpenMythosAgent:
                         final_answer = self._tool_failure_fallback(task, tool_result)
         else:
             final_answer = answer_text
+        return final_answer, actions
+
+    def _run_simple_exec(self, task: str, prompt: str, memory_context: str = "",
+                         history_context: str = "",
+                         stream_callback: Optional[callable] = None,
+                         token_callback: Optional[Callable[[int], None]] = None,
+                         is_continuation: bool = False,
+                         started_at: Optional[datetime] = None) -> Dict[str, Any]:
+        """快车道执行体:流式调用 -> 工具循环 -> 答案清洗. 由 _run_simple 委托调用."""
+        if started_at is None:
+            started_at = datetime.now()
+
+        # 流装配见 _setup_fast_stream():缓冲回调 + 路由器 + 共享容器.
+        (reasoning_parts, content_parts, internal_callback, router,
+         _streamed_content) = self._setup_fast_stream(stream_callback)
+
+        # 首调 token 预算见 _decide_fast_max_tokens().
+        fast_max_tokens = self._decide_fast_max_tokens(task)
+
+        # 首调 LLM 见 _call_fast_llm():原生 FC 优先 -> 文本兜底 -> think 切分清洗.
+        # reasoning_parts/content_parts/_streamed_content 为本作用域容器, 传入只追加.
+        answer_text = self._call_fast_llm(
+            task, prompt, fast_max_tokens, stream_callback, token_callback,
+            internal_callback, router, reasoning_parts, content_parts,
+            _streamed_content,
+        )
+
+        # 动作决策见 _resolve_fast_action():解析 -> 分类器覆写 -> 快捷意图.
+        action, ambiguous_reply, _memory_query_mode = self._resolve_fast_action(
+            task, answer_text, is_continuation
+        )
+        actions = []
+        final_answer = ""
+
+        # 单工具执行见 _execute_fast_tool():执行 -> 总结 -> 失败 one-shot 重试.
+        final_answer, actions = self._execute_fast_tool(
+            action, task, answer_text, actions, is_continuation,
+            stream_callback, token_callback, internal_callback,
+        )
 
         # 记忆查询兜底: 即使 LLM 没从注入记忆里组织答案(如回复"没有记忆"),
         # 也直接从 memory_context 提取可见信息给用户, 避免空答或误称"无记忆"。
@@ -2575,224 +2933,30 @@ class OpenMythosAgent:
             final_answer = "你好!有什么可以帮你的吗?"
 
         # 安全兜底:清理泄漏到最终回复中的 [TOOL:...] 标签(快速路径不展示工具调用原文)
-        # 0) 先剥离包含工具调用的 markdown 代码块 (```json ... ``` 等)
-        final_answer = re.sub(r'```(?:json)?\s*(?:.*?\[TOOL:\w+].*?)\s*```', '', final_answer, flags=re.DOTALL | re.IGNORECASE)
-        # Also remove any empty markdown code blocks left behind
-        final_answer = re.sub(r'```(?:json)?\s*```', '', final_answer, flags=re.DOTALL | re.IGNORECASE)
-        # 1) 闭合的 [TOOL:...]...[/TOOL] 块
-        final_answer = re.sub(r'\[TOOL:\w+\].*?\[/TOOL\]', '', final_answer, flags=re.DOTALL)
-        # 2) 未闭合的 [TOOL:...] + JSON 参数 {…}
-        final_answer = re.sub(r'\[TOOL:\w+\]\s*\{[^}]*\}', '', final_answer)
-        # 3) 残留的 [TOOL:...] 或 [/TOOL] 碎片
-        final_answer = re.sub(r'\[/?TOOL:?\w*\]', '', final_answer)
-        # 保留段落换行, 只压缩行内多余空白
-        final_answer = re.sub(r'[ \t]+', ' ', final_answer)
-        final_answer = re.sub(r'\n{3,}', '\n\n', final_answer).strip()
+        from .response_filter import strip_tool_tags
+        final_answer = strip_tool_tags(final_answer)
         if not final_answer:
             final_answer = "你好!有什么可以帮你的吗?"
 
         # 最终清理: 移除 thinking 块、置信度、残留标签等
         final_answer = self._clean_fast_answer(final_answer)
 
-        # 截断检测: 流被掐断时后端可能返回残缺内容(如 "The"), 补一次完整重试,
+        # 截断重试见 _retry_truncated_answer(): 流被掐断致残缺回答时补一次完整重试,
         # 避免残缺回答被写进历史、污染后续所有追问。
-        if self._is_truncated_answer(final_answer):
-            self.logger.warning(f"fast answer looks truncated: {final_answer!r}; retrying once")
-            try:
-                retry_raw = self.backend.generate(
-                    f"{prompt}\n\n注意: 上一条回答异常(截断/过短), 请重新给出完整回答。\nUser: {task}\nAssistant:",
-                    n_loops=1,
-                    temperature=self.config.temperature,
-                    max_tokens=fast_max_tokens,
-                    token_callback=token_callback,
-                )
-                retry_answer = self._clean_fast_answer(str(retry_raw or "")).strip()
-                if retry_answer and not self._is_truncated_answer(retry_answer):
-                    final_answer = retry_answer
-            except Exception as e:
-                self.logger.debug(f"fast retry failed {e}")
+        final_answer = self._retry_truncated_answer(task, prompt, final_answer, fast_max_tokens, token_callback)
 
-        # "光说不做"检测: 模型只承诺要做(如"我先看一下HealthOS文件")却未真正执行工具
-        # -> 重试一次, 强制它立即调用工具并给出结果
-        # 增强: 也检测"声称要搜索/查找/查看/分析但实际无工具调用"(知行合一)
-        _promised_but_no_action = self._is_promise_response(final_answer) and not actions
-        if not _promised_but_no_action and not actions:
-            # 说了"搜索/查找/查看/分析/打开/读取/下载/克隆"等动作词 + 未来时承诺, 却没有任何工具调用
-            _claim_words = ["搜索", "查找", "查看", "分析", "打开", "读取", "下载", "克隆",
-                            "search", "look up", "fetch", "read", "open", "analyze", "clone",
-                            "查询", "调查", "查一下", "找找", "调研", "研究一下",
-                            "整理", "保存", "存到", "写入", "写进", "存为", "创建文件", "写成",
-                            "写成文章", "生成文件", "写一篇", "保存到", "输出到",
-                            "整理成", "整理好", "汇总", "记录", "存档",
-                            "write", "save", "create file", "write file", "output to"]
-            _promise_words = ["我会", "我将", "我先", "稍后", "准备", "接下来", "下一步", "再去", "随后",
-                              "马上", "立刻", "这就", "等一等", "别急", "我现在", "我这就",
-                              "我来", "现在就来", "好的马上", "那我", "那我继续", "继续", "接着",
-                              "先换", "换个", "换更", "再试", "再搜", "再查", "等我", "待会"]
-            _promised_but_no_action = any(w in final_answer for w in _claim_words) and any(
-                w in final_answer for w in _promise_words
-            )
-        if _promised_but_no_action:
-            self.logger.warning(f"promise/claim without tool use: {final_answer!r}; forcing execution")
-            try:
-                retry_raw = self.backend.generate(
-                    f"{prompt}\n\n注意: 你刚才只是说要做什么, 但没有真正执行。"
-                    f"请立即调用对应工具完成该操作, 并基于工具结果直接回答, 不要只承诺。\nUser: {task}\nAssistant:",
-                    n_loops=1,
-                    temperature=self.config.temperature,
-                    max_tokens=fast_max_tokens,
-                    token_callback=token_callback,
-                )
-                retry_answer = self._clean_fast_answer(str(retry_raw or "")).strip()
-                if retry_answer:
-                    # 重试后若模型真正输出了工具调用, 重新解析并直接执行
-                    retry_action = self._parse_output_for_action(retry_answer)
-                    if retry_action and TOOLS_REGISTRY.get(retry_action.tool_name):
-                        self.logger.info(f"promise retry produced tool call: {retry_action.tool_name}")
-                        try:
-                            r_needs_summary = is_continuation or self._tool_returns_listing(retry_action)
-                            r_result, r_answer = self._execute_tool_and_observe(
-                                retry_action, stream_callback, suppress_content=r_needs_summary
-                            )
-                            if r_result.success:
-                                # 后置核验: 写入类动作, 验证文件确实存在且非空
-                                verified = True
-                                verify_note = ""
-                                if retry_action.tool_name == "file_ops":
-                                    _fa = (retry_action.arguments or {}).get("action")
-                                    _fp = (retry_action.arguments or {}).get("path")
-                                    if _fa in ("write", "apply_diff") and _fp:
-                                        try:
-                                            exists = TOOLS_REGISTRY.get("file_ops").execute(
-                                                action="exists", path=_fp
-                                            )
-                                            if exists.success and exists.output.strip().lower() == "true":
-                                                verify_note = " (已核验文件存在)"
-                                            else:
-                                                verified = False
-                                        except Exception:
-                                            pass
-                                final_answer = r_answer or f"已执行: {r_result.output[:300]}"
-                                if verified:
-                                    final_answer += verify_note
-                                actions.append({
-                                    'tool_name': retry_action.tool_name,
-                                    'arguments': retry_action.arguments,
-                                    'success': True,
-                                    'output': r_result.output[:500],
-                                    'error': r_result.error,
-                                    'verified': verified,
-                                })
-                            else:
-                                # 后置核验: 工具执行失败, 不能直接返回承诺文字
-                                self.logger.warning(f"promise retry tool FAILED: {r_result.error}")
-                                final_answer = self._tool_failure_fallback(task, r_result)
-                        except Exception as e:
-                            self.logger.debug(f"promise retry tool exec failed {e}")
-                    elif not self._is_promise_response(retry_answer):
-                        final_answer = retry_answer
-                    else:
-                        # 后置感知: 重试后仍是空承诺(模型坚持不执行工具)
-                        # 直接按意图注入工具调用, 不再依赖模型自觉。
-                        self.logger.warning(f"promise retry STILL promise-only: {retry_answer!r}; forcing via intent classifier")
-                        injected = self._classify_intent(task)
-                        if injected and injected[2] >= 0.7:
-                            injected_tool, injected_args, _, _ = injected
-                            from .tools import ToolCall as _TC
-                            forced = _TC(tool_name=injected_tool, arguments=injected_args)
-                            try:
-                                f_needs_summary = is_continuation or self._tool_returns_listing(forced)
-                                f_result, f_answer = self._execute_tool_and_observe(
-                                    forced, stream_callback, suppress_content=f_needs_summary
-                                )
-                                if f_result.success:
-                                    final_answer = f_answer or f"已执行: {f_result.output[:300]}"
-                                    actions.append({
-                                        'tool_name': forced.tool_name,
-                                        'arguments': forced.arguments,
-                                        'success': True,
-                                        'output': f_result.output[:500],
-                                        'error': f_result.error,
-                                    })
-                                else:
-                                    final_answer = f"抱歉，执行时遇到问题：{f_result.error or '未知错误'}"
-                            except Exception as e:
-                                self.logger.debug(f"forced intent exec failed {e}")
-            except Exception as e:
-                self.logger.debug(f"promise retry failed {e}")
+        # "光说不做"重试见 _retry_promise_no_action(): 承诺未执行工具时强制执行,
+        # 仍失败则按意图强注工具. 返回 (final_answer, actions).
+        final_answer, actions = self._retry_promise_no_action(
+            task, prompt, final_answer, actions, is_continuation,
+            stream_callback, token_callback, fast_max_tokens,
+        )
 
-        # 清洗后平滑重放干净答案(非实时流式时统一输出, 避免 think 残留/回声)。
-        # 若正文已由实时流逐字透出(_streamed_content), 则不再重放, 防止双重显示。
+        # 收尾见 _wrap_fast_result():平滑重放 -> 记忆落盘 -> token 守卫 -> 结果字典.
+        # _streamed_content 是本作用域闭包, 在此计算布尔值后显式传入(方法内无 locals()).
         _already_streamed = bool(stream_callback) and bool(locals().get("_streamed_content", {}).get("v", False))
-        if stream_callback and final_answer and not _already_streamed:
-            for i in range(0, len(final_answer), 8):
-                stream_callback("content", final_answer[i:i + 8])
-                time.sleep(0.003)
-
-        if self.context_engine and not self._is_truncated_answer(final_answer):
-            self.context_engine.observe_assistant(final_answer)
-
-        if getattr(self, "skill_engine", None):
-            self.skill_engine.report_outcome(True)
-
-        completed_at = datetime.now()
-        duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-        # 快车道也写入长期记忆(之前 fast path 直接 return, 从不 consolidate,
-        # 导致简单问答中的用户事实/偏好永远进不了长期记忆库)。
-        # consolidate 内部异步执行(含用户画像更新 + importance 闸门过滤闲聊),
-        # 不阻塞返回。这是记忆写入的唯一入口, 避免多路重复写画像。
-        try:
-            if self.context_engine and self.config.memory.enabled:
-                self.context_engine.consolidate(task, {
-                    'task': task,
-                    'final_answer': final_answer,
-                    'success': True,
-                    'actions': actions,
-                    'metadata': {'mode': 'fast', 'fast_path': True},
-                })
-        except Exception:
-            pass
-
-        # 会话 token 预算守卫: 快车道也要防止长会话悄悄涨爆上下文。
-        # 超过阈值时触发工作记忆压缩(截断/摘要旧事件), 记录状态供 UI 提示。
-        try:
-            _max_ctx = getattr(self.config.memory, "max_context_tokens", 6000) if getattr(self.config, "memory", None) else 6000
-            _used = int(self.session_token_usage.get("total", 0))
-            if _used >= _max_ctx and self.context_engine is not None:
-                _compressed = self.context_engine.compress_working_memory()
-                self.logger.info(f"context guard: {_used}/{_max_ctx} tokens, compressed working memory")
-                self.session_token_usage["compressed"] = True
-        except Exception:
-            pass
-
-        return {
-            'task': task,
-            'thoughts': [],
-            'actions': actions,
-            'observations': [{
-                'success': True,
-                'output': final_answer,
-                'error': None,
-                'metadata': {'fast_path': True}
-            }],
-            'thinking_steps': 1,
-            'outer_loops': 1,
-            'final_reward': self._compute_fast_reward(final_answer, actions),
-            'success': True,
-            'session_token_usage': self.session_token_usage,
-            'final_answer': final_answer,
-            'metadata': {
-                'mode': 'fast',
-                'strategy': 'direct',
-                'started_at': started_at.isoformat(),
-                'completed_at': completed_at.isoformat(),
-                'duration_ms': duration_ms,
-                'fast_path': True,
-                'confidence': getattr(self, '_last_confidence', 0.5),
-        'tokens': self.session_token_usage.get('last_call_tokens', 0)
-        }
-        }
+        return self._wrap_fast_result(task, final_answer, actions, started_at,
+                                      stream_callback, _already_streamed)
 
     def _extract_confidence(self, raw_output: str) -> float:
         """从模型原始输出(含 <think>)中提取置信度, 供内部自校正使用.
@@ -3213,36 +3377,12 @@ class OpenMythosAgent:
 
     # ============ 核心Agent循环 ============
 
-    def run(
-        self,
-        task: str,
-        mode: str = 'production',
-        stream_callback: Optional[callable] = None,
-        token_callback: Optional[Callable[[int], None]] = None,
-        code_mode: bool = False
-    ) -> Dict[str, Any]:
+    def _prepare_run_task(self, task: str) -> Dict[str, Any]:
+        """抽取自 run() 的首部预处理:清缓存/轮次计数/延续判断/歧义补全.
+
+        Canonical 入口仍是 run(); 本 helper 只做纯预处理, 不调模型不调工具,
+        便于单测和后续继续拆分 run(). 若需直接澄清, 返回 early_result.
         """
-        运行Agent(主入口)
-
-        Args:
-            task: 用户任务
-            mode: 'production' | 'reflection' | 'exploration'
-            stream_callback: 可选的流式回调函数,接收 (kind, token) 参数
-            token_callback: 可选的 token 用量回调函数,接收 (tokens) 参数
-            code_mode: 强制启用编码模式(更激进的工程化工作流)
-
-        Returns:
-            包含完整轨迹和结果的字典
-        """
-        # Heavy enum/helpers are imported lazily inside the main entry point.
-        try:
-            from .planning import PlanningStrategy, create_simple_plan
-        except Exception:
-            PlanningStrategy = None  # type: ignore
-            create_simple_plan = None  # type: ignore
-        from .reasoning import ReasoningStrategy
-
-        # 新一轮开始时清空每轮缓存
         self._method_cache.clear()
         self._tool_result_cache.clear()
 
@@ -3264,17 +3404,34 @@ class OpenMythosAgent:
             # 优先尝试使用已解析的上下文继续;如果确实无上下文才澄清
             if resolved_task == task:
                 return {
-                    "final_answer": clarification,
-                    "success": True,
-                    "outer_loops": 0,
-                    "thinking_steps": 0,
-                    "metadata": {"clarification": True, "original_task": task},
+                    "task": task,
+                    "is_session_first_turn": is_session_first_turn,
+                    "has_persisted_history": has_persisted_history,
+                    "is_continuation_query": is_continuation_query,
+                    "early_result": {
+                        "final_answer": clarification,
+                        "success": True,
+                        "outer_loops": 0,
+                        "thinking_steps": 0,
+                        "metadata": {"clarification": True, "original_task": task},
+                    },
                 }
             task = resolved_task
-        self._status(stream_callback, f"task: {task[:80]}{'...' if len(task) > 80 else ''}")
-        self._code_mode_override = code_mode
-        self._current_task = task  # 用于后续 web_search query 锚定校正:避免模型把用户关键词"跑偏"改写
+        return {
+            "task": task,
+            "is_session_first_turn": is_session_first_turn,
+            "has_persisted_history": has_persisted_history,
+            "is_continuation_query": is_continuation_query,
+            "early_result": None,
+        }
 
+    def _dispatch_special_channels(self, task: str, stream_callback=None,
+                                         token_callback=None) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """特殊通道分发:prompt-guard -> skill slash -> deep-research.
+
+        返回 (task, early_result): early_result 非空时 run() 直接返回;
+        skill 带尾随任务时返回更新后的 task. 纯搬移, 不改行为.
+        """
         # Prompt-injection guard: log and short-circuit obvious jailbreak attempts.
         if getattr(self.config, "harness", None) and self.config.harness.prompt_injection_scan:
             try:
@@ -3286,7 +3443,7 @@ class OpenMythosAgent:
                         guard_result.category,
                         guard_result.matched_pattern,
                     )
-                    return {
+                    return task, {
                         "final_answer": (
                             "I can't process this request: it triggered the prompt-injection guard "
                             f"(category: {guard_result.category}). Please rephrase your request."
@@ -3306,43 +3463,34 @@ class OpenMythosAgent:
                 output = result.get("output", "")
                 if remaining:
                     # If a skill was activated with a trailing task, run the task with the skill loaded.
-                    task = remaining
-                else:
-                    return {
-                        "final_answer": output,
-                        "success": result.get("type") != "error",
-                        "outer_loops": 0,
-                        "thinking_steps": 0,
-                        "metadata": {"skill_command": result},
-                    }
+                    return remaining, None
+                return task, {
+                    "final_answer": output,
+                    "success": result.get("type") != "error",
+                    "outer_loops": 0,
+                    "thinking_steps": 0,
+                    "metadata": {"skill_command": result},
+                }
 
         # Deep research + Markdown report workflow: handles requests like
         # "搜索 XXX 并生成深度调研报告" or "输出 markdown 文件".
         # Also handles explicit "/deep <topic>" and "/research <topic>" commands.
         if is_research_report_task(task) or task.lstrip().lower().startswith(("/deep", "/research")):
-            return self._run_deep_research(
+            return task, self._run_deep_research(
                 task,
                 stream_callback=stream_callback,
                 token_callback=token_callback,
             )
+        return task, None
 
-        if self.context_engine:
-            self.context_engine.observe_user(task)
+    def _try_fast_routes(self, task: str, mode: str, is_session_first_turn: bool,
+                         has_persisted_history: bool, is_continuation_query: bool,
+                         stream_callback=None, token_callback=None) -> Optional[Dict[str, Any]]:
+        """快速路由:首轮 turbo -> 简单查询 -> 定位查询. 命中返回结果, 否则 None.
 
-        # Auto-detect coding tasks early so planning/loop decisions can skip overhead
-        code_mode = self._is_coding_task(task)
-        if code_mode:
-            self._status(stream_callback, "code mode")
-
-        # Holds the ReasoningTrace when the reasoning engine is used; otherwise None.
-        trace = None
-
+        内部自行构建 memory/history 上下文并落盘历史. 纯搬移自 run(), 不改行为.
+        """
         # ===== 首次对话:强制极速 Turbo 模式 =====
-        # 启动后首问必须最快响应 —— 无论问题复杂度,跳过记忆注入/规划/多轮推理,
-        # 走单次 LLM 调用快速路径(n_loops=1, 流式),最低首响延迟。
-        # 后续对话恢复正常深度推理(含编码任务的完整 ReAct 循环)。
-        # 例外: 若磁盘已持久化历史(进程重启后的首问),不跳过记忆注入。
-        # fast_mode: true 才走"首轮极速 turbo"; false 时首轮也走完整深度推理。
         if mode == 'production' and is_session_first_turn and not has_persisted_history and self.config.fast_mode:
             self._status(stream_callback, "turbo · first turn")
             history_context = self._format_history_context()  # 首次为空
@@ -3391,6 +3539,89 @@ class OpenMythosAgent:
         if location_result:
             self._append_to_history(task, location_result.get('final_answer', ''))
             return location_result
+
+        # 未命中: 把上下文存回实例供深路由复用, 避免重复计算
+        self._fast_route_cache = {"memory_context": memory_context, "history_context": history_context}
+        return None
+
+    def run(
+        self,
+        task: str,
+        mode: str = 'production',
+        stream_callback: Optional[callable] = None,
+        token_callback: Optional[Callable[[int], None]] = None,
+        code_mode: bool = False
+    ) -> Dict[str, Any]:
+        """
+        运行Agent(主入口)
+
+        Args:
+            task: 用户任务
+            mode: 'production' | 'reflection' | 'exploration'
+            stream_callback: 可选的流式回调函数,接收 (kind, token) 参数
+            token_callback: 可选的 token 用量回调函数,接收 (tokens) 参数
+            code_mode: 强制启用编码模式(更激进的工程化工作流)
+
+        Returns:
+            包含完整轨迹和结果的字典
+        """
+        # 预处理已抽取为 _prepare_run_task():清缓存/轮次/延续/歧义补全.
+        # 深循环已抽取为 _run_deep():规划 -> loops -> ExecutionEngine.
+        # run() 只做路由:预处理 -> 特殊通道 -> 快路由 -> 深循环.
+        _prep = self._prepare_run_task(task)
+        if _prep["early_result"] is not None:
+            return _prep["early_result"]
+        task = _prep["task"]
+        is_session_first_turn = _prep["is_session_first_turn"]
+        has_persisted_history = _prep["has_persisted_history"]
+        is_continuation_query = _prep["is_continuation_query"]
+        self._status(stream_callback, f"task: {task[:80]}{'...' if len(task) > 80 else ''}")
+        self._code_mode_override = code_mode
+        self._current_task = task  # 用于后续 web_search query 锚定校正:避免模型把用户关键词"跑偏"改写
+
+        # 特殊通道分发见 _dispatch_special_channels():guard -> skill -> deep-research.
+        task, _special = self._dispatch_special_channels(
+            task, stream_callback=stream_callback, token_callback=token_callback
+        )
+        if _special is not None:
+            return _special
+
+        if self.context_engine:
+            self.context_engine.observe_user(task)
+
+        # Auto-detect coding tasks early so planning/loop decisions can skip overhead
+        code_mode = self._is_coding_task(task)
+        if code_mode:
+            self._status(stream_callback, "code mode")
+
+        # 快速路由见 _try_fast_routes():首轮 turbo -> 简单查询 -> 定位查询.
+        _fast = self._try_fast_routes(
+            task, mode, is_session_first_turn, has_persisted_history,
+            is_continuation_query, stream_callback=stream_callback,
+            token_callback=token_callback,
+        )
+        if _fast is not None:
+            return _fast
+        _fast_cache = getattr(self, "_fast_route_cache", {}) or {}
+        memory_context = _fast_cache.get("memory_context", "")
+        history_context = _fast_cache.get("history_context", "")
+
+        return self._run_deep(
+            task, mode, code_mode, memory_context, history_context,
+            stream_callback=stream_callback, token_callback=token_callback,
+        )
+
+    def _plan_deep(self, task: str, mode: str, code_mode: bool,
+                   stream_callback=None) -> Tuple[Any, str, int]:
+        """深循环规划段:高级规划 -> 轻量兜底 -> loops 预算 -> 纠偏覆盖.
+
+        纯搬移自 _run_deep §1-§2. 返回 (plan, plan_context, n_loops).
+        """
+        try:
+            from .planning import PlanningStrategy, create_simple_plan
+        except Exception:
+            PlanningStrategy = None  # type: ignore
+            create_simple_plan = None  # type: ignore
 
         # 1. Use advanced planning if available (skip for simple tasks and code mode)
         plan = None
@@ -3447,264 +3678,37 @@ class OpenMythosAgent:
             self._status(stream_callback, f"correction loops {n_loops}")
 
         self._status(stream_callback, f"loops {n_loops}")
+        return plan, plan_context, n_loops
 
-        # 3. Retrieve similar cases for few-shot (if available)
-        similar_cases = self._retrieve_similar_cases(task)
-        if similar_cases:
-            self._status(stream_callback, f"similar {len(similar_cases)}")
+    def _persist_turn(self, task: str, trajectory: Dict[str, Any]) -> None:
+        """统一回合落盘:consolidate -> experience -> wiki/memskill -> skill 上报.
 
-        # 4. Build initial prompt
-        if self.reasoning_engine and self.config.reasoning.enabled:
-            # Use advanced reasoning engine — strategy auto-selected by task type
-            reasoning_strategy = self._select_strategy(task, mode, code_mode)
-            # Retrieve strategy advice from past successes
-            strategy_advice = self.strategy_db.get_advice_for_task(task) if self.strategy_db else ""
-            context_parts = []
-            if history_context:
-                context_parts.append(history_context)
-            if memory_context:
-                # memory_context 已含 profile/semantic/episodic/lessons
-                # (build_system_context 内置), 无需再单独塞 lessons_context 造成重复
-                context_parts.append(memory_context)
-            skill_context = self._get_skill_context(task)
-            if skill_context:
-                context_parts.append("## Active Skill Instructions:\n" + skill_context)
-            if strategy_advice:
-                context_parts.append(strategy_advice)
-            if plan_context:
-                context_parts.append(plan_context)
-            if context_parts:
-                task_with_context = "\n\n".join(context_parts) + f"\n\n## Current Task:\n{task}"
-            # MCP orchestrator: dynamically select relevant tools and suggest combinations
-            all_tools = TOOLS_REGISTRY.get_tools_dict()
-            # P3: 任务感知子集(常驻核心+关键词加挂), 省每轮schema token
-            try:
-                from .tools import select_tools_for_task
-                available_tools = select_tools_for_task(task, all_tools)
-            except Exception:
-                available_tools = all_tools
-            skill_tools = self._get_skill_tool_hint()
-            if skill_tools:
-                # Boost skill-preferred tools to the front of the available map.
-                ordered: Dict[str, str] = {}
-                for name in skill_tools:
-                    if name in all_tools and name not in ordered:
-                        ordered[name] = all_tools[name]
-                ordered.update(all_tools)
-                available_tools = ordered
-            tool_suggestion_context = ""
-            if self.mcp_orchestrator:
-                try:
-                    available_tools = self.mcp_orchestrator.recommend_tools(task, all_tools)
-                    combo = self.mcp_orchestrator.suggest_combination(task)
-                    if combo:
-                        tool_suggestion_context = f"## Suggested Tool Combination: {' -> '.join(combo)}"
-                    self.logger.info(f"mcp {len(available_tools)} tools")
-                except Exception as e:
-                    self.logger.warning(f"mcp failed {e}")
-
-            # Re-apply skill-preferred tool ordering after MCP orchestrator.
-            if skill_tools:
-                ordered_after_mcp: Dict[str, str] = {}
-                for name in skill_tools:
-                    if name in available_tools and name not in ordered_after_mcp:
-                        ordered_after_mcp[name] = available_tools[name]
-                ordered_after_mcp.update(available_tools)
-                available_tools = ordered_after_mcp
-
-            # Inject tool combination hint into context if not already present
-            if tool_suggestion_context and tool_suggestion_context not in task_with_context:
-                task_with_context = tool_suggestion_context + "\n\n" + task_with_context
-
-            # Engineering tasks need more ReAct steps for read -> edit -> verify -> fix
-            if code_mode:
-                n_loops = max(n_loops, 10)
-                self._status(stream_callback, f"loops {n_loops} code")
-
-            trace = self.reasoning_engine.reason(
-                task=task_with_context,
-                available_tools=available_tools,
-                strategy=reasoning_strategy,
-                custom_loops=n_loops,
-                stream_callback=stream_callback,  # 传递流式回调
-                token_callback=token_callback,    # 传递 token 用量回调
-                code_mode=code_mode,
-                plan=plan,
-            )
-
-            # 外层闭环: 质量不达标时在 max_outer_loops 预算内重试(尝试不同策略), 实现"反馈→重规划→重试"
-            # 不再只重试一次, 而是用完外层循环预算或质量达标为止。
-            # Use LoopController to determine loop count, capped by config max_outer_loops
-            base_loops = self.reasoning_engine.loop_controller.determine_loops(
-                task,
-                getattr(self, "_strategy_override", None)
-                or ReasoningStrategy.REACT,
-            )
-            # Hard cap from config (user-editable)
-            outer_budget = min(max(base_loops, 1), self.config.max_outer_loops)
-            outer_attempt = 0
-            # outer_loop_counter retains its display purpose below
-            quality = getattr(trace, 'quality_score', 1.0)
-            retry_strategies = [ReasoningStrategy.VERIFICATION, ReasoningStrategy.SELF_CONSISTENCY]
-            while quality < 0.45 and outer_attempt < outer_budget and not code_mode and mode != 'reflection':
-                strat = retry_strategies[(outer_attempt - 1) % len(retry_strategies)]
-                self._status(stream_callback, f"retry {outer_attempt}/{outer_budget} with {strat.value}")
-                retry_trace = self.reasoning_engine.reason(
-                    task=task_with_context,
-                    available_tools=available_tools,
-                    strategy=strat,
-                    custom_loops=max(n_loops, 3) + outer_attempt,
-                    stream_callback=stream_callback,
-                    token_callback=token_callback,
-                    code_mode=code_mode,
-                    plan=plan,
-                )
-                outer_attempt += 1
-                self.outer_loop_counter = outer_attempt
-                if getattr(retry_trace, 'quality_score', 0.0) > quality:
-                    trace = retry_trace
-                    quality = getattr(retry_trace, 'quality_score', 0.0)
-                else:
-                    # 质量没提升, 换下一个策略继续; 若两个策略都试过仍不行则停
-                    if outer_attempt > len(retry_strategies):
-                        break
-
-            trajectory = {
-                'task': task,
-                'thoughts': [s.content for s in trace.steps],
-                'actions': [{'tool_name': t} for t in trace.tools_used],
-                'observations': trace.observations if hasattr(trace, 'observations') else [],
-                'thinking_steps': trace.total_loops,
-                'outer_loops': trace.outer_loops,
-                'final_reward': trace.quality_score,
-                'success': trace.success,
-                'final_answer': trace.final_answer,
-                'metadata': {
-                    'mode': mode,
-                    'started_at': datetime.now().isoformat(),
-                    'strategy': trace.strategy.value,
-                    'duration_ms': trace.duration_ms
-                }
-            }
-        else:
-            # Unified fallback: single-shot DirectPolicy loop via ExecutionEngine
-            try:
-                from .tools import select_tools_for_task as _select
-                _fallback_tools = _select(task, TOOLS_REGISTRY.get_tools_dict())
-            except Exception:
-                _fallback_tools = TOOLS_REGISTRY.get_tools_dict()
-            direct_ctx = ExecutionContext(
-                task=task,
-                available_tools=_fallback_tools,
-                config=self.config,
-                max_steps=n_loops,
-                stream_callback=stream_callback,
-                token_callback=token_callback,
-                code_mode=code_mode,
-                # 兜底路径也要有记忆/历史/计划, 否则 DirectPolicy 单轮"失忆"
-                extra_context="\n".join(x for x in [
-                    plan_context or "",
-                    (("## Recent Conversation:\n" + history_context) if history_context else ""),
-                    (("## Relevant Memory:\n" + memory_context) if memory_context else ""),
-                ] if x),
-                history_context=history_context,
-            )
-            engine = ExecutionEngine(
-                model_backend=self.backend,
-                config=self.config,
-                harness_kernel=self._harness_kernel,
-                per_turn_cache=self._tool_result_cache.store,
-            )
-            exec_trace = engine.run(DirectPolicy(), direct_ctx)
-            trajectory = {
-                'task': task,
-                'thoughts': [s.reasoning for s in exec_trace.steps],
-                'actions': [
-                    {'tool_name': c.tool_name, 'arguments': c.arguments}
-                    for s in exec_trace.steps for c in s.tool_calls
-                ],
-                'observations': [{'success': True, 'output': o, 'error': None} for o in exec_trace.observations],
-                'thinking_steps': len(exec_trace.steps),
-                'outer_loops': len(exec_trace.steps),
-                'final_reward': exec_trace.quality_score,
-                'success': exec_trace.success,
-                'final_answer': exec_trace.final_answer or "",
-                'metadata': {
-                    'mode': mode,
-                    'started_at': datetime.now().isoformat(),
-                    'strategy': 'direct',
-                    'duration_ms': exec_trace.duration_ms,
-                    **exec_trace.metadata,
-                },
-            }
-
-        # Append current turn to short-term history
-        final_answer = trajectory.get('final_answer') or ''
-        if not final_answer and trajectory.get('observations'):
-            final_answer = str(trajectory['observations'][-1])[:500]
-        self._append_to_history(task, final_answer)
-
-        if self.context_engine and not self._is_truncated_answer(final_answer):
-            self.context_engine.observe_assistant(final_answer)
-
-        # 5. Self-correction evaluation
-        if self.self_correction and self.config.self_correction.enabled and trajectory:
-            try:
-                metrics, correction = self.self_correction.process_execution(
-                    trace=trace,
-                    task=task,
-                    strategy=trajectory.get('metadata', {}).get('strategy', 'unknown'),
-                    tools_used=[a.get('tool_name', 'unknown') for a in trajectory.get('actions', [])]
-                )
-                trajectory['metadata']['quality_metrics'] = metrics.__dict__
-                if correction:
-                    trajectory['metadata']['correction_applied'] = correction.__dict__
-                    self.total_corrections += 1
-                    # Persist correction so the NEXT task can adapt parameters
-                    self._pending_correction = {
-                        'recommended_loops': correction.recommended_loops,
-                        'strategy_override': correction.strategy_override,
-                        'action_type': correction.action_type,
-                        'description': correction.description,
-                    }
-                else:
-                    self._pending_correction = None
-            except Exception as e:
-                self.logger.warning(f" Self-correction failed: {e}")
-                self._pending_correction = None
-
-        # 6. Consolidate into long-term memory (semantic + profile via ContextEngine, async)
+        快慢两路共用. 此前快车道只做 consolidate, 经验/wiki/memskill 全丢 —
+        agent 学不到日常轮次(_should_reflect 文档亦承认这是反思饥荒根因).
+        合并后快路新增三写(异步/轻量, 不阻塞返回); 纯闲聊(快路且无工具动作)
+        跳过 wiki/memskill, 防图谱灌水. 各后端自带开关与异常隔离.
+        """
+        # 1. 长期记忆 consolidate (内部异步; 画像更新 + importance 闸门过滤闲聊)
         if self.context_engine and self.config.memory.enabled and trajectory:
             try:
                 self.context_engine.consolidate(task, trajectory)
             except Exception as e:
-                self.logger.warning(f" ContextEngine consolidation failed: {e}")
+                self.logger.warning(f"ContextEngine consolidation failed: {e}")
 
-        # 7. Wrap up
-        trajectory['thinking_steps'] = trajectory.get('thinking_steps', 0) or trajectory.get('outer_loops', 0) * n_loops
-        trajectory['final_reward'] = trajectory.get('final_reward', self._compute_reward(trajectory))
-        trajectory['metadata']['completed_at'] = datetime.now().isoformat()
+        # 2. 经验库 + 教训提取(同步轻量; 无 buffer 时内部直接返回)
+        try:
+            self._store_experience(trajectory)
+        except Exception as e:
+            self.logger.warning(f"store experience failed: {e}")
+        try:
+            self.episodes_completed += 1
+        except Exception:
+            pass
 
-        # 8. Store experience and trigger self-improvement
-        self._store_experience(trajectory)
-        self.episodes_completed += 1
-
-        # Update strategy usage statistics if a strategy was matched and applied
-        if self._last_matched_strategy_id and self.strategy_db:
-            try:
-                self.strategy_db.update_usage(
-                    self._last_matched_strategy_id,
-                    success=trajectory.get('success', False)
-                )
-            except Exception as e:
-                self.logger.warning(f"strategy usage update failed {e}")
-
-        if self._should_reflect():
-            self._trigger_self_improvement()
-
-        # 9. Auto-extract entities & build knowledge graph (wiki pages)
-        # Run asynchronously so that LLM-based memory extraction does not block the response.
-        if self.memory_manager and self.config.memory.enabled:
+        # 3. wiki 图谱 + memskill(线程池异步, 不阻塞返回).
+        # 纯闲聊跳过: 无工具证据可抽, 只会污染图谱.
+        _is_chitchat = bool(trajectory.get('metadata', {}).get('fast_path')) and not trajectory.get('actions')
+        if self.memory_manager and self.config.memory.enabled and not _is_chitchat:
             try:
                 content = json.dumps(trajectory, indent=2, ensure_ascii=False)
 
@@ -3741,8 +3745,71 @@ class OpenMythosAgent:
             except Exception as e:
                 self.logger.warning(f"   Memory remember scheduling failed: {e}")
 
+        # 4. skill 结果上报
         if getattr(self, "skill_engine", None):
-            self.skill_engine.report_outcome(bool(trajectory.get('success')))
+            try:
+                self.skill_engine.report_outcome(bool(trajectory.get('success', True)))
+            except Exception as e:
+                self.logger.debug(f"skill report failed: {e}")
+
+    def _finalize_deep_trajectory(self, task: str, trajectory: Dict[str, Any],
+                                    trace: Any, n_loops: int) -> Dict[str, Any]:
+        """深循环落盘段:历史/纠偏/记忆/经验/进化观察. 纯搬移自 _run_deep 尾部."""
+        # Append current turn to short-term history
+        final_answer = trajectory.get('final_answer') or ''
+        if not final_answer and trajectory.get('observations'):
+            final_answer = str(trajectory['observations'][-1])[:500]
+        self._append_to_history(task, final_answer)
+
+        if self.context_engine and not self._is_truncated_answer(final_answer):
+            self.context_engine.observe_assistant(final_answer)
+
+        # 5. Self-correction evaluation
+        if self.self_correction and self.config.self_correction.enabled and trajectory:
+            try:
+                metrics, correction = self.self_correction.process_execution(
+                    trace=trace,
+                    task=task,
+                    strategy=trajectory.get('metadata', {}).get('strategy', 'unknown'),
+                    tools_used=[a.get('tool_name', 'unknown') for a in trajectory.get('actions', [])]
+                )
+                trajectory['metadata']['quality_metrics'] = metrics.__dict__
+                if correction:
+                    trajectory['metadata']['correction_applied'] = correction.__dict__
+                    self.total_corrections += 1
+                    # Persist correction so the NEXT task can adapt parameters
+                    self._pending_correction = {
+                        'recommended_loops': correction.recommended_loops,
+                        'strategy_override': correction.strategy_override,
+                        'action_type': correction.action_type,
+                        'description': correction.description,
+                    }
+                else:
+                    self._pending_correction = None
+            except Exception as e:
+                self.logger.warning(f" Self-correction failed: {e}")
+                self._pending_correction = None
+
+        # 7. Wrap up (先算字段, 再落盘, 保证经验库拿到完整轨迹)
+        trajectory['thinking_steps'] = trajectory.get('thinking_steps', 0) or trajectory.get('outer_loops', 0) * n_loops
+        trajectory['final_reward'] = trajectory.get('final_reward', self._compute_reward(trajectory))
+        trajectory['metadata']['completed_at'] = datetime.now().isoformat()
+
+        # 统一落盘见 _persist_turn():consolidate -> experience -> wiki/memskill -> skill.
+        self._persist_turn(task, trajectory)
+
+        # Update strategy usage statistics if a strategy was matched and applied
+        if self._last_matched_strategy_id and self.strategy_db:
+            try:
+                self.strategy_db.update_usage(
+                    self._last_matched_strategy_id,
+                    success=trajectory.get('success', False)
+                )
+            except Exception as e:
+                self.logger.warning(f"strategy usage update failed {e}")
+
+        if self._should_reflect():
+            self._trigger_self_improvement()
 
         # ── Self-evolution (Line 3): after every turn, observe shadow metrics ──
         if getattr(self, "_evolution_controller", None):
@@ -3760,6 +3827,258 @@ class OpenMythosAgent:
                 self.logger.debug("Self-evolution observe: %s", e)
 
         return trajectory
+
+    def _build_reasoning_context(self, task: str, mode: str, code_mode: bool,
+                                     plan_context: str,
+                                     memory_context: str = "",
+                                     history_context: str = "") -> Tuple[str, Dict[str, str], Any]:
+        """组装 reasoning 输入:策略选择 + 上下文拼接 + 工具子集/MCP 编排.
+
+        纯搬移自 _execute_reasoning_branch 头部. 返回
+        (task_with_context, available_tools, reasoning_strategy).
+        """
+        from .reasoning import ReasoningStrategy  # noqa: F401 (调用方同样按需导入)
+
+        # Use advanced reasoning engine — strategy auto-selected by task type
+        reasoning_strategy = self._select_strategy(task, mode, code_mode)
+        # Retrieve strategy advice from past successes
+        strategy_advice = self.strategy_db.get_advice_for_task(task) if self.strategy_db else ""
+        context_parts = self._collect_context_parts(task, history_context, memory_context)
+        if strategy_advice:
+            context_parts.append(strategy_advice)
+        if plan_context:
+            context_parts.append(plan_context)
+        if context_parts:
+            task_with_context = "\n\n".join(context_parts) + f"\n\n## Current Task:\n{task}"
+        else:
+            # 无任何上下文(全新无记忆无技能环境): 直接用原任务, 避免下游 NameError.
+            task_with_context = task
+        # MCP orchestrator: dynamically select relevant tools and suggest combinations
+        all_tools = TOOLS_REGISTRY.get_tools_dict()
+        # P3: 任务感知子集(常驻核心+关键词加挂), 省每轮schema token
+        try:
+            from .tools import select_tools_for_task
+            available_tools = select_tools_for_task(task, all_tools)
+        except Exception:
+            available_tools = all_tools
+        skill_tools = self._get_skill_tool_hint()
+        if skill_tools:
+            # Boost skill-preferred tools to the front of the available map.
+            ordered: Dict[str, str] = {}
+            for name in skill_tools:
+                if name in all_tools and name not in ordered:
+                    ordered[name] = all_tools[name]
+            ordered.update(all_tools)
+            available_tools = ordered
+        tool_suggestion_context = ""
+        if self.mcp_orchestrator:
+            try:
+                available_tools = self.mcp_orchestrator.recommend_tools(task, all_tools)
+                combo = self.mcp_orchestrator.suggest_combination(task)
+                if combo:
+                    tool_suggestion_context = f"## Suggested Tool Combination: {' -> '.join(combo)}"
+                self.logger.info(f"mcp {len(available_tools)} tools")
+            except Exception as e:
+                self.logger.warning(f"mcp failed {e}")
+
+        # Re-apply skill-preferred tool ordering after MCP orchestrator.
+        if skill_tools:
+            ordered_after_mcp: Dict[str, str] = {}
+            for name in skill_tools:
+                if name in available_tools and name not in ordered_after_mcp:
+                    ordered_after_mcp[name] = available_tools[name]
+            ordered_after_mcp.update(available_tools)
+            available_tools = ordered_after_mcp
+
+        # Inject tool combination hint into context if not already present
+        if tool_suggestion_context and tool_suggestion_context not in task_with_context:
+            task_with_context = tool_suggestion_context + "\n\n" + task_with_context
+        return task_with_context, available_tools, reasoning_strategy
+
+    def _execute_reasoning_branch(self, task: str, mode: str, code_mode: bool,
+                                    plan: Any, plan_context: str, n_loops: int,
+                                    memory_context: str = "", history_context: str = "",
+                                    stream_callback=None,
+                                    token_callback=None) -> Tuple[Dict[str, Any], Any, int]:
+        """深循环 reasoning-engine 分支:上下文组装 -> reason -> 外层重试 -> trajectory.
+
+        纯搬移自 _run_deep §4 首分支. 返回 (trajectory, trace, n_loops)
+        (code_mode 下 n_loops 可能被抬高, 需回传).
+        """
+        from .reasoning import ReasoningStrategy
+
+        # 上下文组装见 _build_reasoning_context():策略/记忆/技能/工具子集.
+        task_with_context, available_tools, reasoning_strategy = self._build_reasoning_context(
+            task, mode, code_mode, plan_context, memory_context, history_context
+        )
+
+        # Engineering tasks need more ReAct steps for read -> edit -> verify -> fix
+        if code_mode:
+            n_loops = max(n_loops, 10)
+            self._status(stream_callback, f"loops {n_loops} code")
+
+        trace = self.reasoning_engine.reason(
+            task=task_with_context,
+            available_tools=available_tools,
+            strategy=reasoning_strategy,
+            custom_loops=n_loops,
+            stream_callback=stream_callback,  # 传递流式回调
+            token_callback=token_callback,    # 传递 token 用量回调
+            code_mode=code_mode,
+            plan=plan,
+        )
+
+        # 外层闭环: 质量不达标时在 max_outer_loops 预算内重试(尝试不同策略), 实现"反馈→重规划→重试"
+        # 不再只重试一次, 而是用完外层循环预算或质量达标为止。
+        # Use LoopController to determine loop count, capped by config max_outer_loops
+        base_loops = self.reasoning_engine.loop_controller.determine_loops(
+            task,
+            getattr(self, "_strategy_override", None)
+            or ReasoningStrategy.REACT,
+        )
+        # Hard cap from config (user-editable)
+        outer_budget = min(max(base_loops, 1), self.config.max_outer_loops)
+        outer_attempt = 0
+        # outer_loop_counter retains its display purpose below
+        quality = getattr(trace, 'quality_score', 1.0)
+        retry_strategies = [ReasoningStrategy.VERIFICATION, ReasoningStrategy.SELF_CONSISTENCY]
+        while quality < 0.45 and outer_attempt < outer_budget and not code_mode and mode != 'reflection':
+            strat = retry_strategies[(outer_attempt - 1) % len(retry_strategies)]
+            self._status(stream_callback, f"retry {outer_attempt}/{outer_budget} with {strat.value}")
+            retry_trace = self.reasoning_engine.reason(
+                task=task_with_context,
+                available_tools=available_tools,
+                strategy=strat,
+                custom_loops=max(n_loops, 3) + outer_attempt,
+                stream_callback=stream_callback,
+                token_callback=token_callback,
+                code_mode=code_mode,
+                plan=plan,
+            )
+            outer_attempt += 1
+            self.outer_loop_counter = outer_attempt
+            if getattr(retry_trace, 'quality_score', 0.0) > quality:
+                trace = retry_trace
+                quality = getattr(retry_trace, 'quality_score', 0.0)
+            else:
+                # 质量没提升, 换下一个策略继续; 若两个策略都试过仍不行则停
+                if outer_attempt > len(retry_strategies):
+                    break
+
+        trajectory = {
+            'task': task,
+            'thoughts': [s.content for s in trace.steps],
+            'actions': [{'tool_name': t} for t in trace.tools_used],
+            'observations': trace.observations if hasattr(trace, 'observations') else [],
+            'thinking_steps': trace.total_loops,
+            'outer_loops': trace.outer_loops,
+            'final_reward': trace.quality_score,
+            'success': trace.success,
+            'final_answer': trace.final_answer,
+            'metadata': {
+                'mode': mode,
+                'started_at': datetime.now().isoformat(),
+                'strategy': trace.strategy.value,
+                'duration_ms': trace.duration_ms
+            }
+        }
+        return trajectory, trace, n_loops
+
+    def _execute_direct_fallback(self, task: str, mode: str, code_mode: bool,
+                                 plan_context: str, n_loops: int,
+                                 memory_context: str = "", history_context: str = "",
+                                 stream_callback=None,
+                                 token_callback=None) -> Dict[str, Any]:
+        """深循环 DirectPolicy 兜底分支:单轮 ExecutionEngine 循环.
+
+        纯搬移自 _run_deep §4 else 分支. trace 保持 None, 由调用方落盘.
+        """
+        # Unified fallback: single-shot DirectPolicy loop via ExecutionEngine
+        try:
+            from .tools import select_tools_for_task as _select
+            _fallback_tools = _select(task, TOOLS_REGISTRY.get_tools_dict())
+        except Exception:
+            _fallback_tools = TOOLS_REGISTRY.get_tools_dict()
+        direct_ctx = ExecutionContext(
+            task=task,
+            available_tools=_fallback_tools,
+            config=self.config,
+            max_steps=n_loops,
+            stream_callback=stream_callback,
+            token_callback=token_callback,
+            code_mode=code_mode,
+            # 兜底路径也要有记忆/历史/计划, 否则 DirectPolicy 单轮"失忆"
+            extra_context="\n".join(x for x in [
+                plan_context or "",
+                (("## Recent Conversation:\n" + history_context) if history_context else ""),
+                (("## Relevant Memory:\n" + memory_context) if memory_context else ""),
+            ] if x),
+            history_context=history_context,
+        )
+        engine = ExecutionEngine(
+            model_backend=self.backend,
+            config=self.config,
+            harness_kernel=self._harness_kernel,
+            per_turn_cache=self._tool_result_cache.store,
+        )
+        exec_trace = engine.run(DirectPolicy(), direct_ctx)
+        return {
+            'task': task,
+            'thoughts': [s.reasoning for s in exec_trace.steps],
+            'actions': [
+                {'tool_name': c.tool_name, 'arguments': c.arguments}
+                for s in exec_trace.steps for c in s.tool_calls
+            ],
+            'observations': [{'success': True, 'output': o, 'error': None} for o in exec_trace.observations],
+            'thinking_steps': len(exec_trace.steps),
+            'outer_loops': len(exec_trace.steps),
+            'final_reward': exec_trace.quality_score,
+            'success': exec_trace.success,
+            'final_answer': exec_trace.final_answer or "",
+            'metadata': {
+                'mode': mode,
+                'started_at': datetime.now().isoformat(),
+                'strategy': 'direct',
+                'duration_ms': exec_trace.duration_ms,
+                **exec_trace.metadata,
+            },
+        }
+
+    def _run_deep(self, task: str, mode: str, code_mode: bool,
+                  memory_context: str = "", history_context: str = "",
+                  stream_callback=None, token_callback=None) -> Dict[str, Any]:
+        """深循环:规划 -> thinking loops -> ExecutionEngine -> 落盘/记忆/进化.
+
+        由 run() 在快路由未命中时委托调用. 纯搬移, 行为不变.
+        """
+        # 规划段见 _plan_deep(): 高级规划 -> loops 预算 -> 纠偏覆盖.
+        # 执行段见 _execute_reasoning_branch() / _execute_direct_fallback().
+        # 落盘段见 _finalize_deep_trajectory(). 本方法只做路由.
+        # Holds the ReasoningTrace when the reasoning engine is used; otherwise None.
+        trace = None
+
+        plan, plan_context, n_loops = self._plan_deep(task, mode, code_mode, stream_callback)
+
+        # 3. Retrieve similar cases for few-shot (if available)
+        similar_cases = self._retrieve_similar_cases(task)
+        if similar_cases:
+            self._status(stream_callback, f"similar {len(similar_cases)}")
+
+        # 4. 推理执行: reasoning-engine 分支 vs DirectPolicy 兜底分支.
+        # 分支实现见 _execute_reasoning_branch() / _execute_direct_fallback().
+        if self.reasoning_engine and self.config.reasoning.enabled:
+            trajectory, trace, n_loops = self._execute_reasoning_branch(
+                task, mode, code_mode, plan, plan_context, n_loops,
+                memory_context, history_context, stream_callback, token_callback,
+            )
+        else:
+            trajectory = self._execute_direct_fallback(
+                task, mode, code_mode, plan_context, n_loops,
+                memory_context, history_context, stream_callback, token_callback,
+            )
+
+        # 落盘段见 _finalize_deep_trajectory():历史/纠偏/记忆/经验/进化观察.
+        return self._finalize_deep_trajectory(task, trajectory, trace, n_loops)
 
     # ============ 辅助方法 ============
 

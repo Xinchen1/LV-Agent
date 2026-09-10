@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
-
-
-
-
-The agent class is a god object; these tests exercise the harness seam
+"""The agent class is a god object; these tests exercise the harness seam
 without booting the full module stack (backend, memory, planners).
 """
 
@@ -46,7 +42,10 @@ def test_build_kernel_safe_policy(tmp_path):
         )
     )
     kernel = agent._build_harness_kernel()
-    assert isinstance(kernel, Kernel)
+    # _build_harness_kernel 现返回 HotSwapKernel(包装 Kernel 以支持热插拔);
+    # 通过 HotSwapKernel 的 __getattr__ 委托访问底层 Kernel 决策能力。
+    from agent_project.harness.hotswap import HotSwapKernel
+    assert isinstance(kernel, HotSwapKernel)
     from agent_project.harness.effects import make_effect
     from agent_project.harness.kernel import Decision
 
@@ -91,3 +90,4 @@ def test_kernel_none_preserves_legacy_path():
         ToolCall(tool_name="calculator", arguments={"expression": "1+1"})
     )
     assert result.success is True
+

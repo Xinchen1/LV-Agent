@@ -59,6 +59,12 @@ class ToolRegistry:
         self._descriptions: List[Dict[str, Any]] = []
 
     def register(self, tool: BaseTool):
+        # Fail-fast: 注册时即校验形状, 避免 Fake/半成品工具污染全局注册表、
+        # 在几十个测试之后才以 AttributeError 爆发(真实教训: FakeGlob 污染事件)。
+        if not isinstance(tool, BaseTool) or not getattr(tool, "name", None):
+            raise TypeError(
+                f"register() 需要 BaseTool 子类且带 name, 实际 {type(tool).__name__}"
+            )
         self._tools[tool.name] = tool
         self._descriptions.append(tool.to_dict())
         return self
@@ -191,6 +197,33 @@ def select_tools_for_task(task: str, all_tools: Dict[str, str]) -> Dict[str, str
     if len(want) >= len(all_tools):
         return all_tools
     return {n: all_tools[n] for n in all_tools if n in want}
+
+
+def render_compact_tool_list(names: Optional[List[str]] = None) -> str:
+    """注册表单行工具表(system prompt 文本协议用, 单一事实源).
+
+    每行 `- name(req1, req2): 首句描述` —— 签名来自 schema required,
+    描述取首句(超长截断). 文本协议下这是模型唯一的工具发现源,
+    必须与注册表一致(手写 7/20 版已删, 防腐烂).
+    参数细节看调用示例与 native schema.
+    """
+    import re as _re
+    schemas = {t["function"]["name"]: t["function"]
+               for t in TOOLS_REGISTRY.get_openai_tools()}
+    if names is None:
+        names = sorted(schemas)
+    lines = []
+    for n in names:
+        s = schemas.get(n)
+        if s is None:
+            continue
+        req = (s.get("parameters") or {}).get("required") or []
+        desc = (s.get("description") or "").strip().split("\n")[0]
+        desc = _re.sub(r"\s+", " ", desc)
+        first = _re.split(r"(?<=[.!?。！？])\s", desc)[0][:120]
+        sig = ", ".join(req) if req else "…"
+        lines.append(f"- {n}({sig}): {first}")
+    return "Available tools (use the exact name):\n" + "\n".join(lines)
 
 # Optional harness kernel reference set by the agent at init time.
 _harness_kernel_ref: Dict[str, Any] = {"kernel": None}

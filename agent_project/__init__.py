@@ -30,6 +30,12 @@ llm_extract_entities,
 create_memory_manager,
 quick_store,
 )
+from .fast_path import (
+    FastPathRouter,
+    LocationFastPath,
+    SimpleQueryClassifier,
+    is_simple_query,
+)
 
 __all__ = [
 "OpenMythosAgent",
@@ -61,6 +67,11 @@ __all__ = [
 "llm_extract_entities",
 "create_memory_manager",
 "quick_store",
+# fast path
+"FastPathRouter",
+"LocationFastPath",
+"SimpleQueryClassifier",
+"is_simple_query",
 ]
 
 __version__ = "0.2.0"

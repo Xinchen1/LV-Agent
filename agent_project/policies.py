@@ -6,9 +6,10 @@ Each policy decides:
   - how to parse model output into reasoning / tool_calls / final_answer
   - how to build the next prompt given observations
 
-This replaces the policy logic that previously lived inside ReasoningEngine
-(_reason_react, _reason_super, _reason_cot, _reason_verify, _reason_zero_shot)
-and inside OpenMythosAgent._run_traditional.
+This hosts the policy logic consolidated from ReasoningEngine
+(_reason_react, _reason_super, _reason_cot, _reason_verify, _reason_zero_shot).
+Legacy OpenMythosAgent._run_traditional was removed; ExecutionEngine is the
+sole loop implementation.
 """
 
 from __future__ import annotations
@@ -1363,7 +1364,7 @@ class VerifyPolicy(ThinkingPolicy):
         return self.inner.next_prompt(ctx, last_output)
 
 # ---------------------------------------------------------------------------
-# Direct policy (single-shot, replaces legacy _run_traditional when no tools)
+# Direct policy (single-shot fast path when no tools are needed)
 # ---------------------------------------------------------------------------
 
 class DirectPolicy(ThinkingPolicy):

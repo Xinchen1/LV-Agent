@@ -33,14 +33,13 @@ try:
 except Exception:
   pass
 
-# 自动补装 Pillow,保证头像渲染依赖可用.
+# Pillow 仅用于头像渲染: 缺失则降级为无头像, 绝不在启动时 pip 安装
+# (运行时安装拖慢启动、有供应链风险; 需要头像请 pip install pillow).
 try:
   importlib.import_module("PIL")
+  _HAS_PIL = True
 except Exception:
-  try:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow", "-q"])
-  except Exception:
-    pass
+  _HAS_PIL = False
 
 sys.path.insert(0, str(Path(__file__).parent / 'agent_project'))
 
