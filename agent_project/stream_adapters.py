@@ -423,18 +423,6 @@ class RichStreamAdapter(StreamAdapter):
             track[pos + i] = "•"
         return "".join(track)
 
-    def _fold_reasoning(self) -> list[str]:
-        text = clean_runtime_text("".join(self._reasoning_buffer))
-        width = max(term_width() - 4, 20)
-        max_chars = width * self.max_reasoning_lines
-        if len(text) > max_chars:
-            text = text[-max_chars:]
-        wrapped = [text[i : i + width] for i in range(0, len(text), width)]
-        wrapped = wrapped[-self.max_reasoning_lines :]
-        while len(wrapped) < self.max_reasoning_lines:
-            wrapped.append("")
-        return wrapped
-
     def _build_thinking_text(self) -> Any:
         # 思考面板只显示单行状态(动作 + 耗时 + token), 不展开 reasoning 文本,
         # 既减少视觉噪音也避免泄露内部推理。

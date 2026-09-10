@@ -21,6 +21,7 @@ import json
 import re
 import time
 import threading
+from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -625,7 +626,47 @@ class ContextCompressor:
 # 4. Context Engine
 # ---------------------------------------------------------------------------
 
-class ContextEngine:
+class ContextProvider(ABC):
+    """上下文供给抽象(对标 Hermes ContextEngine ABC): 可插拔、可替换、可 mock.
+
+    agent 只依赖本接口, 不依赖具体实现. 现有 ContextEngine 为默认实现;
+    后续压缩策略/向量记忆/远端记忆均实现本接口即可热插.
+    """
+
+    @abstractmethod
+    def observe_user(self, task: str) -> None:
+        """记录用户输入."""
+
+    @abstractmethod
+    def observe_assistant(self, text: str) -> None:
+        """记录助手回复."""
+
+    @abstractmethod
+    def observe_tool_call(self, tool_name: str, arguments: Dict[str, Any]) -> None:
+        """记录工具调用."""
+
+    @abstractmethod
+    def observe_tool_result(self, tool_name: str, result: str, success: bool) -> None:
+        """记录工具结果."""
+
+    @abstractmethod
+    def consolidate(self, task: str, trajectory: Dict[str, Any]) -> None:
+        """回合结束落盘长期记忆(内部异步, 不阻塞返回)."""
+
+    @abstractmethod
+    def compress_working_memory(self, target_tokens: Optional[int] = None) -> int:
+        """压缩工作记忆, 返回释放的事件数."""
+
+    @abstractmethod
+    def seed_history(self, turns: List[Dict[str, Any]]) -> None:
+        """从持久化历史预热工作记忆."""
+
+    @abstractmethod
+    def build_system_context(self, task: str, **kwargs: Any) -> str:
+        """组装注入 prompt 的系统上下文(画像/记忆/经验)."""
+
+
+class ContextEngine(ContextProvider):
     """
     Unified facade for agent context & memory.
 

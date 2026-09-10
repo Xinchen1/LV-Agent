@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # P4 回归: 定位快路防劫持(离线, mock GlobTool)
 
 import logging
@@ -11,6 +11,21 @@ sys.path.insert(0, "agent_project")
 
 import agent_project.agent as A
 from agent_project.tools import ToolResult
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_glob_tool():
+    """每次测试后还原 GlobTool(防 FakeGlob 污染全局注册表, 真实教训).
+
+    make_agent 内是直接赋值(非 monkeypatch), 故这里手动快照/还原.
+    模块 import 时注册表必干净, 首个用例快照即真身.
+    """
+    import agent_project.tools as T
+    real = T.GlobTool
+    yield
+    T.GlobTool = real
 
 
 class FakeGlob:
@@ -77,3 +92,38 @@ def test_real_hit_returns_success():
     assert isinstance(r, dict) and r.get("success") is True
     # 提取的是干净目标名, 不是整句
     assert "修改" not in g.seen[0] and "一下" not in g.seen[0]
+
+
+def test_explicit_absolute_path_beats_home_root(tmp_path):
+    """任务含真实绝对路径时以它为根, 不扫 home(防全盘 hang, 真实教训)."""
+    from agent_project.fast_path import LocationFastPath
+    loc = LocationFastPath()
+    target, root = loc.extract_target_and_root(f"列一下 {tmp_path} 里面有什么")
+    assert root == str(tmp_path), f"应命中显式路径, 实际 root={root}"
+
+
+def test_first_hit_root_wins_stops_scan():
+    """首个有命中的根即停, 不继续扫剩余根."""
+    from agent_project.fast_path import LocationFastPath
+    calls = []
+
+    class RecGlob:
+        def execute(self, pattern="", path="", max_results=40):
+            calls.append(path)
+            from agent_project.tools import ToolResult
+            return ToolResult(success=True, output="hit", metadata={"count": 1})
+    loc = LocationFastPath()
+    out = loc.execute(task="找一下桌面的my_project文件夹", glob_tool=RecGlob())
+    assert out is not None and out.get("success") is True
+    assert len(calls) == 1, f"首中即停, 实际扫了 {calls}"
+
+
+def test_glob_execute_timeout_flag(tmp_path):
+    """大目录遍历超时熔断并标记, 不卡死."""
+    import time
+    from agent_project.tools.grep_tool import GlobTool
+    (tmp_path / "a.txt").write_text("x")
+    r = GlobTool().execute(pattern="**/*", path=str(tmp_path), max_results=100, timeout=10.0)
+    assert r.success and r.metadata.get("timed_out") is False
+    r2 = GlobTool().execute(pattern="**/*nomatch*", path=str(tmp_path), timeout=0.5)
+    assert r2.success  # 超时也是成功返回(部分/空结果), 不抛不卡

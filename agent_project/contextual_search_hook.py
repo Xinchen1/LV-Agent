@@ -18,8 +18,8 @@ def local_hits(query: str, limit: int = 5) -> List[Dict]:
                 p = Path(root)/f
                 try:
                     txt = p.read_text(encoding='utf-8', errors='ignore')
-                except:
-                    continue
+                except OSError:
+                    continue  # 读不到的文件跳过(权限/损坏); 原裸 except 收窄
                 if any(k in txt.lower() for k in keywords):
                     hits.append({'path': str(p), 'snippet': txt[:200]})
     return hits[:limit]

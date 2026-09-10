@@ -111,6 +111,29 @@ def clean_fast_answer(text: str) -> str:
     return text.strip()
 
 
+def strip_tool_tags(text: str) -> str:
+    """剥离泄漏到最终回复中的 [TOOL:...] 标签(快速路径不展示工具调用原文).
+
+    纯搬移自 OpenMythosAgent._run_simple_exec 内联清洗: 先剥离含工具调用的
+    markdown 代码块, 再清闭合/未闭合/碎片标签, 最后压缩空白. 无行为变化.
+    """
+    if not text:
+        return text
+    # 0) 先剥离包含工具调用的 markdown 代码块 (```json ... ``` 等)
+    text = re.sub(r'```(?:json)?\s*(?:.*?\[TOOL:\w+].*?)\s*```', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Also remove any empty markdown code blocks left behind
+    text = re.sub(r'```(?:json)?\s*```', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # 1) 闭合的 [TOOL:...]...[/TOOL] 块
+    text = re.sub(r'\[TOOL:\w+\].*?\[/TOOL\]', '', text, flags=re.DOTALL)
+    # 2) 未闭合的 [TOOL:...] + JSON 参数 {…}
+    text = re.sub(r'\[TOOL:\w+\]\s*\{[^}]*\}', '', text)
+    # 3) 残留的 [TOOL:...] 或 [/TOOL] 碎片
+    text = re.sub(r'\[/?TOOL:?\w*\]', '', text)
+    # 保留段落换行, 只压缩行内多余空白
+    text = re.sub(r'[ \t]+', ' ', text)
+    return re.sub(r'\n{3,}', '\n\n', text).strip()
+
+
 class StreamRouter:
     """流式回调路由器,支持 native reasoning 和 <think> 标签.
 

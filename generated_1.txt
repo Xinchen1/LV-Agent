@@ -1,0 +1,6 @@
+agent:
+     backend: openai            ← 决定了用 openai 分支
+     openai:
+       base_url: https://integrate.api.nvidia.com/v1
+       model: poolside/laguna-xs-2.1   ← 实际模型写死在这里
+       api_key: nvapi-...

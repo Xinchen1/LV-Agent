@@ -196,7 +196,9 @@ class HealthConfig(BaseModel):
 
 
 class ExecutionConfig(BaseModel):
-    use_legacy: bool = False  # fallback to old _run_traditional implementation
+    # DEPRECATED no-op: 旧 _run_traditional 已删除, 唯一循环是 ExecutionEngine.
+    # 保留字段仅为兼容老 config.yaml(遇到 true 时启动告警, 不切换行为).
+    use_legacy: bool = False
     default_strategy: str = "react"  # react | cot | super_agent | verify | direct | tot | mcts | self_consistency
 
 

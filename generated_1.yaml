@@ -1,0 +1,5 @@
+# config.yaml 中的 openai 配置
+openai:
+  api_key: ollama  # 或留空
+  base_url: http://localhost:11434/v1  # Ollama 本地地址
+  model: qwen2.5-coder:7b

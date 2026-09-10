@@ -1,0 +1,4 @@
+openai:
+  api_key: sk-xxx  # DeepSeek key
+  base_url: https://api.deepseek.com
+  model: deepseek-chat  # bypass_proxy=True 自动直连

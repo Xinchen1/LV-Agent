@@ -1,0 +1,3 @@
+每轮: think → act → observe → converge (串行)
+- 并行化受限于模型一次性输出的 tool call 数量
+- 复杂任务: 往往需要多轮串行循环

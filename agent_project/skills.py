@@ -613,15 +613,6 @@ class SkillEngine:
 # 4. Helpers
 # =============================================================================
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 def format_skills_for_prompt(skills: List[Skill], max_chars: int = 2000) -> str:
     """Format a list of skills as a compact system-prompt appendix."""
     lines = ["## Available Skills"]

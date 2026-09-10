@@ -31,6 +31,8 @@
       </div>
       <nav class="sidebar-nav">
         <button class="nav-item" id="btnNewSession"><span class="nav-icon">＋</span> New session <span class="nav-short">⌘ N</span></button>
+        <button class="nav-item" id="navComposer"><span class="nav-icon">✎</span> Composer <span class="nav-short">⌘ I</span></button>
+        <button class="nav-item" id="navNebula"><span class="nav-icon">◉</span> 逻辑星云 <span class="nav-short">⌘ M</span></button>
         <button class="nav-item" data-view="capabilities"><span class="nav-icon">◈</span> Capabilities</button>
         <button class="nav-item" data-view="messaging"><span class="nav-icon">✉</span> Messaging</button>
         <button class="nav-item" data-view="artifacts"><span class="nav-icon">▭</span> Artifacts</button>
@@ -42,15 +44,11 @@
       <div class="sidebar-section">
         <div class="section-title">PINNED</div>
         <div class="section-hint">Shift-click a chat to pin</div>
+        <div id="pinnedSessions"></div>
       </div>
       <div class="sidebar-section">
         <div class="section-title">SESSIONS <span class="section-filter">≡</span></div>
-        <div class="session-item active"><span>•</span> 你好 <span class="session-time">1d</span></div>
-      </div>
-      <div class="sidebar-section">
-        <div class="section-title subtle">LAST WEEK</div>
-        <div class="session-item"><span>•</span> 友好问候 <span class="session-time">3d</span></div>
-        <div class="session-item"><span>•</span> Friendly greeting <span class="session-time">9d</span></div>
+        <div id="sessionList"></div>
       </div>
       <div class="sidebar-bottom">
         <button class="sidebar-bottom-btn" title="Home">⌂</button>
@@ -69,6 +67,8 @@
           <span class="topbar-subtitle" id="modelBadge">Harness · ReAct</span>
         </div>
         <div class="topbar-right" style="-webkit-app-region: no-drag;">
+          <button id="btnComposer" class="icon-btn" title="Composer 浮窗 (⌘I)">✎</button>
+          <button id="btnNebula" class="icon-btn" title="逻辑星云 全屏 (⌘M)">◉</button>
           <button id="btnTheme" class="icon-btn" title="切换主题 (深色/浅色)">◐</button>
           <button id="btnSettings" class="icon-btn" title="Settings (⌘,) — 配置模型与密钥">⚙</button>
           <button id="btnNew" class="icon-btn" title="Start / Restart Agent">▶</button>
@@ -197,10 +197,101 @@
           <span class="input-meta">Hy3 Free · Med ▾</span>
           <button id="btnSend" class="send-btn" disabled>↑</button>
         </div>
-        <div class="input-hint">model changed · Press Enter to send, Shift+Enter newline</div>
+        <div class="input-hint">model changed · Press Enter to send, Shift+Enter newline · <span class="hint-action" data-action="open-composer">⌘I Composer</span> · <span class="hint-action" data-action="open-nebula">⌘M 星云</span></div>
       </div>
     </div>
   </div>
+
+  <!-- Composer 浮窗 -->
+  <div id="composerFloat" class="composer-float hidden" role="dialog" aria-label="Composer">
+    <div class="composer-header" id="composerHeader">
+      <div class="composer-title"><span class="composer-icon">✎</span> Composer <span class="composer-sub">浮窗 · ⌘I</span></div>
+      <div class="composer-header-actions">
+        <button class="composer-btn ghost" id="btnComposerToNebula" title="在逻辑星云中展开">◉ 星云</button>
+        <button class="composer-btn ghost" id="btnComposerMin" title="最小化">—</button>
+        <button class="composer-btn ghost" id="btnComposerExpand" title="全屏/还原">⤢</button>
+        <button class="composer-btn ghost" id="btnComposerClose" title="关闭 (Esc)">×</button>
+      </div>
+    </div>
+    <div class="composer-toolbar">
+      <select id="composerMode" class="composer-select" title="Composer 模式">
+        <option value="edit">Edit — 选区改写</option>
+        <option value="agent" selected>Agent — 全局任务</option>
+        <option value="ask">Ask — 只问不改</option>
+      </select>
+      <span class="composer-context-chip" id="composerContextChip" title="点击选择上下文文件">＋ 添加上下文</span>
+      <input id="composerFileInput" type="file" class="hidden" />
+      <span class="composer-token" id="composerToken">~0 tokens</span>
+    </div>
+    <div class="composer-body">
+      <textarea id="composerInput" placeholder="描述你想让 Agent 做的事…&#10;例：重构 auth 模块，增加 Harness 策略门单测；或选中代码后按 ⌘I 快速改写"></textarea>
+      <div id="composerSelectionPreview" class="composer-preview hidden"></div>
+    </div>
+    <div class="composer-footer">
+      <div class="composer-footer-left">
+        <label class="composer-check"><input type="checkbox" id="composerAttachChat" checked /> 附带聊天上下文</label>
+        <label class="composer-check"><input type="checkbox" id="composerAutoNebula" /> 自动展开星云</label>
+      </div>
+      <div class="composer-footer-right">
+        <button id="btnComposerClear" class="composer-btn">清空</button>
+        <button id="btnComposerApply" class="composer-btn primary"><span>▶</span> 发送到 Agent</button>
+      </div>
+    </div>
+    <div class="composer-resize" id="composerResize" title="拖拽缩放"></div>
+  </div>
+
+  <!-- 逻辑星云 全屏 -->
+  <div id="nebulaOverlay" class="nebula-overlay hidden" role="dialog" aria-label="逻辑星云">
+    <div class="nebula-header">
+      <div class="nebula-title">
+        <span class="nebula-logo">◉</span> 逻辑星云
+        <span class="nebula-sub" id="nebulaSub">全屏 · 推理拓扑 · ReAct × MCTS</span>
+        <span class="nebula-badge" id="nebulaBadge">3 节点</span>
+      </div>
+      <div class="nebula-controls">
+        <select id="nebulaLayout" class="nebula-select" title="布局">
+          <option value="force">力导星云</option>
+          <option value="dag">DAG 时序</option>
+          <option value="radial">径向展开</option>
+        </select>
+        <button id="btnNebulaComposer" class="nebula-btn" title="在 Composer 中编辑选中节点">✎ Composer</button>
+        <button id="btnNebulaFit" class="nebula-btn" title="自适应视图">◎ 自适应</button>
+        <button id="btnNebulaExport" class="nebula-btn" title="导出快照">⤓ 导出</button>
+        <button id="btnNebulaClose" class="nebula-btn primary" title="退出全屏 (Esc)">× 退出</button>
+      </div>
+    </div>
+    <div class="nebula-main">
+      <div class="nebula-canvas-wrap">
+        <canvas id="nebulaCanvas" width="1200" height="700"></canvas>
+        <svg id="nebulaSvg" class="nebula-svg"></svg>
+        <div id="nebulaTooltip" class="nebula-tooltip hidden"></div>
+        <div id="nebulaEmpty" class="nebula-empty">
+          <div class="nebula-empty-icon">◉</div>
+          <div class="nebula-empty-title">暂无推理轨迹</div>
+          <div class="nebula-empty-sub">发送一条任务后，星云将实时映射 Think → Act → Observe 的逻辑拓扑</div>
+          <button id="btnNebulaDemo" class="nebula-btn primary">加载演示星云</button>
+        </div>
+      </div>
+      <aside class="nebula-side">
+        <div class="nebula-side-title">节点详情</div>
+        <div id="nebulaDetail" class="nebula-detail">点击任意节点查看 Thought / Tool / Observation</div>
+        <div class="nebula-side-title">图例</div>
+        <div class="nebula-legend">
+          <span class="legend-dot think"></span> Think
+          <span class="legend-dot act"></span> Act
+          <span class="legend-dot obs"></span> Observe
+          <span class="legend-dot plan"></span> Plan
+        </div>
+        <div class="nebula-side-title">时间线</div>
+        <div id="nebulaTimeline" class="nebula-timeline"></div>
+      </aside>
+    </div>
+    <div class="nebula-footer">
+      <span class="nebula-footer-hint">提示：拖拽画布平移 · 滚轮缩放 · 点击节点同步到 Composer · 双击空白自适应 · <span class="hint-action" data-action="open-composer">⌘I</span> 唤起 Composer</span>
+      <span class="nebula-footer-meta" id="nebulaMeta">—</span>
+    </div>
+  </div>
+
   <script src="js/app.js"></script>
 </body>
 </html>

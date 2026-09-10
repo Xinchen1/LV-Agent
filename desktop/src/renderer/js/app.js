@@ -1008,30 +1008,161 @@ document.querySelectorAll('.sidebar-tabs .tab').forEach(tab => {
     tab.classList.add('active');
   });
 });
-// Session items — switch (mock)
-document.querySelectorAll('.session-item').forEach(item => {
-  item.addEventListener('click', () => {
-    document.querySelectorAll('.session-item').forEach(i => i.classList.remove('active'));
-    item.classList.add('active');
-  });
-});
-// Search filter
-document.getElementById('sidebarSearch')?.addEventListener('input', (e) => {
-  const q = e.target.value.toLowerCase();
-  document.querySelectorAll('.session-item').forEach(item => {
-    const txt = item.textContent.toLowerCase();
-    item.style.display = txt.includes(q) ? '' : 'none';
-  });
-});
-// Pin via Shift-click
-document.querySelectorAll('.session-item').forEach(item => {
-  item.addEventListener('click', (e) => {
-    if (e.shiftKey) {
-      const pinned = document.querySelector('.sidebar-section:nth-of-type(3)');
-      item.style.background = 'rgba(124,106,255,0.12)';
-      setTimeout(() => item.style.background = '', 800);
+// ── Session history — real switching ──
+const sessionList = document.getElementById('sessionList');
+const pinnedSessionsEl = document.getElementById('pinnedSessions');
+const sidebarSearch = document.getElementById('sidebarSearch');
+const sessionFilterBtn = document.querySelector('.section-filter');
+let sessionsCache = [];
+let pinnedIds = new Set();
+let activeSessionId = null1;
+let sessionsVisible = true;
+let searchTerm = '';
+
+function relativeTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z');
+  const now = Date.now();
+  const diff = Math.max(0, now - t.getTime());
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'now';
+  if (min < 60) return min + 'm';
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + 'h';
+  const d = Math.floor(hr / 24);
+  if (d < 7) return d + 'd';
+  const w = Math.floor(d / 7);
+  if (w < 5) return w + 'w';
+  return (t.getMonth() + 1) + '/' + t.getDate();
+}
+
+function sessionItemHtml(s) {
+  const time = relativeTime(s.created_at);
+  const title = escapeHtml(s.title || 'Session');
+  const count = (s.message_count || 0) > 91728 ? ` · ${s.message_count}` : '';
+  const active = s.id === activeSessionId ? ' active' : '';
+  return `<div class="session-item${active}" data-session="${s.id}"><span>•</span> <span class="session-title">${title}</span>${count ? `<span class="session-count">${count}</span>` : ''}<span class="session-time">${time}</span></div>`;
+}
+
+function renderSessions() {
+  if (!sessionList) return;
+  sessionList.innerHTML = '';
+  if (pinnedSessionsEl) pinnedSessionsEl.innerHTML = '';
+
+  const visible = sessionsVisible ? sessionsCache : [];
+  let shown = 0;
+
+  // Pinned group first
+  if (pinnedSessionsEl && sessionsCache.length && pinnedIds.size) {
+    const pinned = sessionsCache.filter((s) => pinnedIds.has(s.id));
+    for (const s of pinned) {
+      pinnedSessionsEl.insertAdjacentHTML('beforeend', sessionItemHtml(s));
+      shown++;
     }
+  }
+
+  const filterTerm = searchTerm.toLowerCase();
+  for (const s of visible) {
+    if (pinnedIds.has(s.id)) continue;
+    if (filterTerm && !(s.title || '').toLowerCase().includes(filterTerm)) continue;
+    sessionList.insertAdjacentHTML('beforeend', sessionItemHtml(s));
+    shown++;
+  }
+
+  if (!shown) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent = sessionsCache.length ? 'No sessions match' : 'No saved conversations yet';
+    (pinnedIds.size && pinnedSessionsEl && pinnedSessionsEl.children.length ? sessionList : pinnedSessionsEl || sessionList).appendChild(empty);
+  }
+
+  // Wire events on dynamically created items
+  document.querySelectorAll('.session-item').forEach((item) => {
+    item.addEventListener('click', (e) => {
+      const sid = item.dataset.session;
+      if (!sid) return;
+      if (e.shiftKey) {
+        // Pin / unpin via Shift-click
+        if (pinnedIds.has(sid)) pinnedIds.delete(sid);
+        else pinnedIds.add(sid);
+        renderSessions();
+        return;
+      }
+      openSession(sid);
+    });
   });
+}
+
+async function loadSessions() {
+  try {
+    const res = await window.electronAPI.listSessions();
+    if (res && res.success) {
+      sessionsCache = Array.isArray(res.sessions) ? res.sessions : [];
+    } else {
+      sessionsCache = [];
+    }
+  } catch (e) {
+    sessionsCache = [];
+    console.error('loadSessions', e);
+  }
+  renderSessions();
+}
+
+async function openSession(id) {
+  if (!id) return;
+  let res;
+  try { res = await window.electronAPI.loadSession(id); }
+  catch (e) { res = { success: false, error: e.message }; }
+  if (!res || !res.success) {
+    const el = createAgentMessage();
+    el.innerHTML = `<span style="color:#ff4d4d">Failed to load session: ${escapeHtml((res && res.error) || 'unknown')}</span>`;
+    return;
+  }
+  const messages = Array.isArray(res.messages) ? res.messages : [];
+  if (!messages.length) return;
+
+  activeSessionId = id;
+  renderSessions();
+  clearChat();
+  // Strip the leading system/welcome noise if present
+  for (const m of messages) {
+    if (m.role === 'user') {
+      addUserMessage(m.content);
+    } else {
+      const el = createAgentMessage();
+      el.innerHTML = formatAgentContent(m.content);
+    }
+  }
+  // Mark this session as the active one in the sidebar list
+  document.querySelectorAll('.session-item').forEach((i) => i.classList.toggle('active', i.dataset.session === id));
+  // Reset current streaming refs so the next turn starts fresh
+  currentAgentEl = null;
+  hideThinking();
+  scrollToBottom(true);
+}
+
+// Re-render session list on startup
+loadSessions();
+// Refresh list whenever a message is sent (the DB grows)
+const _origSend = sendMessage;
+sendMessage = async function (text) {
+  const r = await _origSend(text);
+  setTimeout(loadSessions, 1500);
+  return r;
+};
+
+// Session filter (≡) toggles show-all vs today-only — kept minimal
+sessionFilterBtn?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  sessionsVisible = !sessionsVisible;
+  sessionFilterBtn.classList.toggle('collapsed', !sessionsVisible);
+  renderSessions();
+});
+
+// Search filter
+sidebarSearch?.addEventListener('input', (e) => {
+  searchTerm = e.target.value.trim();
+  renderSessions();
 });
 
 // --- Updates (lightweight manifest check) ---
@@ -1126,6 +1257,521 @@ async function loadUpdateSettings() {
     return s;
   } catch { return { url: '', enabled: true }; }
 }
+
+// ── Composer 浮窗 + 逻辑星云 全屏 集成 ──
+const composerFloat = document.getElementById('composerFloat');
+const composerHeader = document.getElementById('composerHeader');
+const composerInput = document.getElementById('composerInput');
+const composerMode = document.getElementById('composerMode');
+const composerContextChip = document.getElementById('composerContextChip');
+const composerFileInput = document.getElementById('composerFileInput');
+const composerToken = document.getElementById('composerToken');
+const composerSelectionPreview = document.getElementById('composerSelectionPreview');
+const composerAttachChat = document.getElementById('composerAttachChat');
+const composerAutoNebula = document.getElementById('composerAutoNebula');
+const btnComposer = document.getElementById('btnComposer');
+const btnComposerClose = document.getElementById('btnComposerClose');
+const btnComposerMin = document.getElementById('btnComposerMin');
+const btnComposerExpand = document.getElementById('btnComposerExpand');
+const btnComposerToNebula = document.getElementById('btnComposerToNebula');
+const btnComposerClear = document.getElementById('btnComposerClear');
+const btnComposerApply = document.getElementById('btnComposerApply');
+const navComposer = document.getElementById('navComposer');
+const navNebula = document.getElementById('navNebula');
+const btnNebula = document.getElementById('btnNebula');
+const nebulaOverlay = document.getElementById('nebulaOverlay');
+const nebulaCanvas = document.getElementById('nebulaCanvas');
+const nebulaSvg = document.getElementById('nebulaSvg');
+const nebulaTooltip = document.getElementById('nebulaTooltip');
+const nebulaEmpty = document.getElementById('nebulaEmpty');
+const nebulaDetail = document.getElementById('nebulaDetail');
+const nebulaTimeline = document.getElementById('nebulaTimeline');
+const nebulaBadge = document.getElementById('nebulaBadge');
+const nebulaSub = document.getElementById('nebulaSub');
+const nebulaMeta = document.getElementById('nebulaMeta');
+const nebulaLayout = document.getElementById('nebulaLayout');
+const btnNebulaClose = document.getElementById('btnNebulaClose');
+const btnNebulaComposer = document.getElementById('btnNebulaComposer');
+const btnNebulaFit = document.getElementById('btnNebulaFit');
+const btnNebulaExport = document.getElementById('btnNebulaExport');
+const btnNebulaDemo = document.getElementById('btnNebulaDemo');
+const composerResize = document.getElementById('composerResize');
+
+// Composer state
+let composerContextText = '';
+let composerContextFile = '';
+let composerSelectedNode = null;
+let composerPos = { x: 0, y: 0, w: 0, h: 0 };
+try { const s = JSON.parse(localStorage.getItem('lv-composer-state') || 'null'); if (s) composerPos = s; } catch {}
+let composerDragging = false, dragOffX=0, dragOffY=0;
+let composerResizing = false, resizeStart={};
+
+function saveComposerState() {
+  try { localStorage.setItem('lv-composer-state', JSON.stringify(composerPos)); } catch {}
+  try { localStorage.setItem('lv-composer-input', composerInput ? composerInput.value : ''); } catch {}
+}
+function restoreComposerPos() {
+  if (!composerFloat) return;
+  if (composerPos.w && composerPos.h) {
+    composerFloat.style.width = composerPos.w + 'px';
+    composerFloat.style.height = composerPos.h + 'px';
+  }
+  // 首次或旧版居中位置强制改到底部，符合当前交互（Composer 在底部对话窗口）
+  const isOldCenter = composerPos.x && composerPos.y && composerPos.y < window.innerHeight * 0.55;
+  if (composerPos.x && composerPos.y && !isOldCenter) {
+    composerFloat.style.left = composerPos.x + 'px';
+    composerFloat.style.top = composerPos.y + 'px';
+    composerFloat.style.bottom = 'auto';
+    composerFloat.style.transform = 'none';
+  } else {
+    if (isOldCenter) { try { localStorage.removeItem('lv-composer-state'); composerPos={x:0,y:0,w:0,h:0}; } catch {} }
+    composerFloat.style.left = '50%';
+    composerFloat.style.bottom = '28px';
+    composerFloat.style.top = 'auto';
+    composerFloat.style.transform = 'translateX(-50%)';
+  }
+  try { const v = localStorage.getItem('lv-composer-input'); if (v && composerInput) composerInput.value = v; } catch {}
+  updateComposerToken();
+  updateComposerPreview();
+}
+function openComposer(prefill) {
+  if (!composerFloat) return;
+  composerFloat.classList.remove('hidden');
+  composerFloat.classList.remove('minimized');
+  restoreComposerPos();
+  if (prefill && composerInput) {
+    // if prefill is node detail, append
+    if (composerInput.value && !composerInput.value.endsWith('\n')) composerInput.value += '\n';
+    composerInput.value = (composerInput.value || '') + prefill;
+    updateComposerToken();
+  }
+  setTimeout(() => composerInput && composerInput.focus(), 50);
+}
+function closeComposer() {
+  if (!composerFloat) return;
+  // capture pos before hide
+  const rect = composerFloat.getBoundingClientRect();
+  composerPos.x = rect.left; composerPos.y = rect.top; composerPos.w = rect.width; composerPos.h = rect.height;
+  saveComposerState();
+  composerFloat.classList.add('hidden');
+}
+function toggleComposer(prefill) {
+  if (!composerFloat) return;
+  if (composerFloat.classList.contains('hidden')) openComposer(prefill);
+  else closeComposer();
+}
+function updateComposerToken() {
+  if (!composerToken || !composerInput) return;
+  const txt = composerInput.value || '';
+  const tokens = Math.ceil(txt.length / 3.5);
+  const ctx = composerContextText ? ` + ctx ${Math.ceil(composerContextText.length/3.5)}` : '';
+  composerToken.textContent = `~${tokens}${ctx} tokens · ${composerMode ? composerMode.value : 'agent'}`;
+}
+function updateComposerPreview() {
+  if (!composerSelectionPreview) return;
+  // show selected node or context file preview
+  let t = '';
+  if (composerSelectedNode) t = `[选中节点] ${composerSelectedNode.title}\n${(composerSelectedNode.detail||'').slice(0,240)}`;
+  else if (composerContextFile) t = `[上下文] ${composerContextFile}\n${composerContextText.slice(0,240)}`;
+  if (t) { composerSelectionPreview.textContent = t; composerSelectionPreview.classList.remove('hidden'); }
+  else composerSelectionPreview.classList.add('hidden');
+}
+// Composer header drag
+if (composerHeader && composerFloat) {
+  composerHeader.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button')) return;
+    composerDragging = true;
+    const rect = composerFloat.getBoundingClientRect();
+    // switch from centered to absolute
+    if (composerFloat.style.transform) { composerFloat.style.transform = 'none'; composerFloat.style.left = rect.left + 'px'; composerFloat.style.top = rect.top + 'px'; }
+    dragOffX = e.clientX - rect.left; dragOffY = e.clientY - rect.top;
+    e.preventDefault();
+  });
+}
+document.addEventListener('mousemove', (e) => {
+  if (composerDragging && composerFloat) {
+    let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
+    nx = Math.max(4, Math.min(window.innerWidth - composerFloat.offsetWidth - 4, nx));
+    ny = Math.max(4, Math.min(window.innerHeight - 50, ny));
+    composerFloat.style.left = nx + 'px'; composerFloat.style.top = ny + 'px';
+  }
+  if (composerResizing && composerFloat) {
+    const dx = e.clientX - resizeStart.x, dy = e.clientY - resizeStart.y;
+    let nw = Math.max(380, Math.min(window.innerWidth - 24, resizeStart.w + dx));
+    let nh = Math.max(220, Math.min(window.innerHeight - 40, resizeStart.h + dy));
+    composerFloat.style.width = nw + 'px'; composerFloat.style.height = nh + 'px';
+  }
+});
+document.addEventListener('mouseup', () => {
+  if (composerDragging || composerResizing) {
+    composerDragging = false; composerResizing = false;
+    if (composerFloat) {
+      const r = composerFloat.getBoundingClientRect();
+      composerPos.x = r.left; composerPos.y = r.top; composerPos.w = r.width; composerPos.h = r.height;
+      saveComposerState();
+    }
+  }
+});
+if (composerResize) {
+  composerResize.addEventListener('mousedown', (e) => {
+    composerResizing = true;
+    const r = composerFloat.getBoundingClientRect();
+    resizeStart = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+    e.preventDefault(); e.stopPropagation();
+  });
+}
+if (composerInput) composerInput.addEventListener('input', () => { updateComposerToken(); saveComposerState(); });
+if (composerMode) composerMode.addEventListener('change', updateComposerToken);
+if (btnComposer) btnComposer.addEventListener('click', () => toggleComposer());
+if (navComposer) navComposer.addEventListener('click', () => toggleComposer());
+if (btnComposerClose) btnComposerClose.addEventListener('click', closeComposer);
+if (btnComposerMin) btnComposerMin.addEventListener('click', () => { composerFloat.classList.toggle('minimized'); });
+if (btnComposerExpand) btnComposerExpand.addEventListener('click', () => { composerFloat.classList.toggle('expanded'); });
+if (btnComposerClear) btnComposerClear.addEventListener('click', () => { if (composerInput) composerInput.value=''; composerContextText=''; composerContextFile=''; composerSelectedNode=null; if (composerContextChip) { composerContextChip.textContent='＋ 添加上下文'; composerContextChip.classList.remove('has-file'); } updateComposerToken(); updateComposerPreview(); saveComposerState(); });
+if (composerContextChip) composerContextChip.addEventListener('click', () => { if (composerFileInput) composerFileInput.click(); });
+if (composerFileInput) composerFileInput.addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  try { const txt = await f.text(); composerContextText = txt.slice(0, 6000); composerContextFile = f.name; composerContextChip.textContent = `◆ ${f.name}`; composerContextChip.classList.add('has-file'); updateComposerPreview(); updateComposerToken(); } catch {}
+});
+if (btnComposerToNebula) btnComposerToNebula.addEventListener('click', () => { closeComposer(); openNebula(); });
+
+// Composer → Agent
+async function sendComposerToAgent() {
+  if (!composerInput) return;
+  const text = composerInput.value.trim();
+  if (!text) return;
+  let payload = '';
+  const mode = composerMode ? composerMode.value : 'agent';
+  if (mode === 'edit') payload = `[Composer/Edit] ${text}`;
+  else if (mode === 'ask') payload = `[Composer/Ask] ${text}`;
+  else payload = text;
+  // attach context
+  if (composerContextText) payload += `\n\n[上下文 ${composerContextFile}]\n${composerContextText.slice(0,4000)}`;
+  if (composerSelectedNode) payload += `\n\n[星云节点 ${composerSelectedNode.title}]\n${(composerSelectedNode.detail||'').slice(0,1000)}`;
+  // attach chat history if checked
+  if (composerAttachChat && !composerAttachChat.checked) payload = `__no_chat_context__\n${payload}`;
+  if (composerAutoNebula && composerAutoNebula.checked) openNebula();
+  closeComposer();
+  // Reuse existing send flow: populate inputBar and send
+  if (!agentRunning) {
+    try { const r = await window.electronAPI.startAgent(); if (r.success) setStatus(true, r.pid); } catch {}
+  }
+  const was = userInput.value;
+  userInput.value = payload;
+  updateSendEnabled();
+  await sendMessage();
+  userInput.value = was;
+}
+if (btnComposerApply) btnComposerApply.addEventListener('click', sendComposerToAgent);
+if (composerInput) composerInput.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendComposerToAgent(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeComposer(); }
+});
+
+// ── Nebula 全屏 ──
+let nebulaNodes = [];
+let nebulaEdges = [];
+let nebulaSelected = null;
+let nebulaScale = 1, nebulaTx=0, nebulaTy=0;
+let nebulaDraggingCanvas=false, nebulaDragStart={x:0,y:0}, nebulaDragOrig={x:0,y:0};
+let nebulaAnim = null;
+
+function buildDemoNebula() {
+  return {
+    nodes: [
+      { id:'n0', title:'用户任务', detail:'分析这个项目的架构并给出 MCTS 规划', kind:'plan', x:0, y:0 },
+      { id:'n1', title:'Think 1 · 结构扫描', detail:'先看项目结构: agent.py / harness / tools', kind:'think', x:0, y:0 },
+      { id:'n2', title:'Act · file_ops/list', detail:'→ ./agent_project  44 个文件 · 23 个工具注册', kind:'act', x:0, y:0 },
+      { id:'n3', title:'Observe · 目录拓扑', detail:'← file_ops 返回: 超智体 God Object + Harness 微内核', kind:'obs', x:0, y:0 },
+      { id:'n4', title:'Think 2 · 策略选择', detail:'选择 ReAct + MCTS, loops=8, budget 4096 tokens', kind:'think', x:0, y:0 },
+      { id:'n5', title:'Act · reasoning · loop', detail:'生成 Think→Act→Observe × 8, 策略门 ALLOW/DENY', kind:'act', x:0, y:0 },
+      { id:'n6', title:'Plan DAG', detail:'任务分解: intent → planner → execution → consolidation', kind:'plan', x:0, y:0 },
+      { id:'n7', title:'Observe · 经验检索', detail:'ExperienceBuffer 命中 2 条相似案例 (ChromaDB)', kind:'obs', x:0, y:0 },
+      { id:'n8', title:'Final · 架构总览', detail:'输出 532 行 lv-agent-architecture.md + 时序图', kind:'think', x:0, y:0 },
+    ],
+    edges: [
+      { from:'n0', to:'n1' }, { from:'n1', to:'n2' }, { from:'n2', to:'n3' }, { from:'n3', to:'n4' }, { from:'n4', to:'n5' }, { from:'n5', to:'n6' }, { from:'n6', to:'n7' }, { from:'n7', to:'n8' }, { from:'n1', to:'n6' },
+    ]
+  };
+}
+function openNebula() {
+  if (!nebulaOverlay) return;
+  nebulaOverlay.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  if (!nebulaNodes.length) {
+    // try build from live ops first, else demo
+    if (!buildNebulaFromOps()) {
+      const d = buildDemoNebula();
+      nebulaNodes = d.nodes; nebulaEdges = d.edges;
+    }
+  }
+  layoutNebula(nebulaLayout ? nebulaLayout.value : 'force');
+  renderNebula();
+  updateNebulaTimeline();
+  if (nebulaEmpty) nebulaEmpty.classList.toggle('hidden', nebulaNodes.length>0);
+}
+function closeNebula() {
+  if (!nebulaOverlay) return;
+  nebulaOverlay.classList.add('hidden');
+  document.body.style.overflow = '';
+  if (nebulaAnim) { cancelAnimationFrame(nebulaAnim); nebulaAnim=null; }
+}
+function layoutNebula(mode) {
+  if (!nebulaNodes.length) return;
+  const W = (nebulaCanvas ? nebulaCanvas.clientWidth : 900) || 900;
+  const H = (nebulaCanvas ? nebulaCanvas.clientHeight : 600) || 600;
+  if (mode === 'dag') {
+    nebulaNodes.forEach((n,i) => { n.x = 80 + (i/(Math.max(1,nebulaNodes.length-1))) * (W-160); n.y = H*0.5 + Math.sin(i*0.9)*80; n.vx=0; n.vy=0; });
+  } else if (mode === 'radial') {
+    const cx=W/2, cy=H/2, R=Math.min(W,H)*0.32;
+    nebulaNodes.forEach((n,i) => { const a = (i/nebulaNodes.length)*Math.PI*2 - Math.PI/2; n.x=cx+Math.cos(a)*R + (Math.random()-0.5)*30; n.y=cy+Math.sin(a)*R + (Math.random()-0.5)*30; n.vx=0; n.vy=0; });
+  } else {
+    // force seeded random then a few iterations
+    nebulaNodes.forEach(n => { if (!n.x) { n.x = W*0.2 + Math.random()*W*0.6; n.y = H*0.2 + Math.random()*H*0.6; } n.vx=0; n.vy=0; });
+    for (let iter=0; iter<80; iter++) {
+      // repulsion + spring
+      for (let i=0;i<nebulaNodes.length;i++) for(let j=i+1;j<nebulaNodes.length;j++){ const a=nebulaNodes[i], b=nebulaNodes[j]; let dx=a.x-b.x, dy=a.y-b.y, d=Math.max(30, Math.hypot(dx,dy)); const f= 900/d; a.vx+=dx/d*f*0.08; a.vy+=dy/d*f*0.08; b.vx-=dx/d*f*0.08; b.vy-=dy/d*f*0.08; }
+      for (const e of nebulaEdges) { const a=nebulaNodes.find(n=>n.id===e.from), b=nebulaNodes.find(n=>n.id===e.to); if(!a||!b)continue; let dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy)||1; const f=(d-120)*0.02; a.vx+=dx/d*f; a.vy+=dy/d*f; b.vx-=dx/d*f; b.vy-=dy/d*f; }
+      for (const n of nebulaNodes){ n.vx*=0.85; n.vy*=0.85; n.x+=n.vx; n.y+=n.vy; n.x=Math.max(40,Math.min(W-40,n.x)); n.y=Math.max(40,Math.min(H-40,n.y)); }
+    }
+  }
+  nebulaScale=1; nebulaTx=0; nebulaTy=0;
+}
+function kindColor(k) {
+  if (k==='think') return '#a78bfa';
+  if (k==='act') return '#60a5fa';
+  if (k==='obs') return '#4ade80';
+  if (k==='plan') return '#facc15';
+  return '#8e8ea0';
+}
+function renderNebula() {
+  if (!nebulaCanvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = nebulaCanvas.getBoundingClientRect();
+  const W = rect.width || 900, H = rect.height || 600;
+  nebulaCanvas.width = W*dpr; nebulaCanvas.height = H*dpr;
+  const ctx = nebulaCanvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  // grid
+  ctx.save();
+  ctx.translate(nebulaTx, nebulaTy);
+  ctx.scale(nebulaScale, nebulaScale);
+  // edges
+  ctx.lineWidth = 1.2;
+  for (const e of nebulaEdges) {
+    const a=nebulaNodes.find(n=>n.id===e.from), b=nebulaNodes.find(n=>n.id===e.to); if(!a||!b)continue;
+    ctx.strokeStyle = 'rgba(140,140,160,0.30)';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); 
+    // bezier for nebula feel
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2 -14;
+    ctx.quadraticCurveTo(mx, my, b.x, b.y);
+    ctx.stroke();
+    // arrow
+    const ang=Math.atan2(b.y-my, b.x-mx);
+    ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(ang); ctx.fillStyle='rgba(140,140,160,0.45)'; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-7,3); ctx.lineTo(-7,-3); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  // 流光传输 — 点缀级极少极慢（桌面演示也低调）
+  if (nebulaEdges.length) {
+    const t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.00006;
+    let fIdx=0;
+    for (const e of nebulaEdges) {
+      const a=nebulaNodes.find(n=>n.id===e.from), b=nebulaNodes.find(n=>n.id===e.to); if(!a||!b)continue;
+      if (fIdx % 12 !== 0) { fIdx++; continue; }
+      const sx=a.x, sy=a.y, tx=b.x, ty=b.y;
+      const cx=(sx+tx)/2, cy=(sy+ty)/2 -14;
+      const seed = (fIdx*47 % 1000)/1000;
+      const p = (t + seed) % 1;
+      const p2 = Math.max(0, p - 0.05);
+      const ip=1-p, ip2=1-p2;
+      const fx = ip*ip*sx + 2*ip*p*cx + p*p*tx;
+      const fy = ip*ip*sy + 2*ip*p*cy + p*p*ty;
+      const fx2 = ip2*ip2*sx + 2*ip2*p2*cx + p2*p2*tx;
+      const fy2 = ip2*ip2*sy + 2*ip2*p2*cy + p2*p2*ty;
+      const dx=fx-fx2, dy=fy-fy2; const L=Math.hypot(dx,dy)||1;
+      ctx.save();
+      // 光核 — 极小低调
+      ctx.globalAlpha=0.42; ctx.shadowColor='#7dd3fc'; ctx.shadowBlur=5; ctx.fillStyle='#cfe9ff';
+      ctx.beginPath(); ctx.arc(fx, fy, 0.9, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur=0;
+      // 拖尾 — 极细短
+      ctx.globalAlpha=0.14; ctx.strokeStyle='rgba(125,211,252,0.45)'; ctx.lineWidth=0.9; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx - dx/L*5, fy - dy/L*5); ctx.stroke();
+      // 外晕 — 若有若无
+      ctx.globalAlpha=0.04; ctx.fillStyle='#7dd3fc'; ctx.beginPath(); ctx.arc(fx, fy, 2.8, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+      fIdx++;
+    }
+  }
+  // nodes
+  for (const n of nebulaNodes) {
+    const isSel = nebulaSelected && nebulaSelected.id===n.id;
+    const r = isSel ? 16 : 11;
+    // glow
+    ctx.shadowColor = kindColor(n.kind); ctx.shadowBlur = isSel ? 18 : 10;
+    ctx.fillStyle = kindColor(n.kind);
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // inner
+    ctx.fillStyle = 'rgba(10,10,15,0.9)';
+    ctx.beginPath(); ctx.arc(n.x, n.y, r-3, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '600 7px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    const label = n.kind==='think'?'T': n.kind==='act'?'A': n.kind==='obs'?'O':'P';
+    ctx.fillText(label, n.x, n.y+0.5);
+    // title
+    ctx.fillStyle = isSel ? '#fff' : 'rgba(230,230,240,0.9)';
+    ctx.font = `${isSel?'600':'400'} 10px sans-serif`;
+    ctx.textAlign='center';
+    const short = n.title.length>18 ? n.title.slice(0,18)+'…' : n.title;
+    ctx.fillText(short, n.x, n.y + r + 12);
+  }
+  ctx.restore();
+  // also sync SVG for hit areas (optional)
+  if (nebulaSvg) { nebulaSvg.setAttribute('width', W); nebulaSvg.setAttribute('height', H); }
+  if (nebulaBadge) nebulaBadge.textContent = `${nebulaNodes.length} 节点 · ${nebulaEdges.length} 连边`;
+  if (nebulaSub) nebulaSub.textContent = nebulaNodes.length? `全屏 · ${nebulaNodes.length} 节点 · ${nebulaScale.toFixed(2)}×` : '全屏 · 推理拓扑 · ReAct × MCTS';
+  if (nebulaMeta) nebulaMeta.textContent = nebulaScale!==1 ? `缩放 ${nebulaScale.toFixed(2)}× · 拖拽平移 · 滚轮缩放` : '就绪';
+  // 持续流光帧循环（仅全屏打开时）
+  if (nebulaOverlay && !nebulaOverlay.classList.contains('hidden')) {
+    if (nebulaAnim) cancelAnimationFrame(nebulaAnim);
+    nebulaAnim = requestAnimationFrame(() => renderNebula());
+  }
+}
+function updateNebulaTimeline() {
+  if (!nebulaTimeline) return;
+  nebulaTimeline.innerHTML = '';
+  nebulaNodes.forEach((n,i) => {
+    const div=document.createElement('div');
+    div.className='nebula-tl-item' + (nebulaSelected && nebulaSelected.id===n.id ? ' active' : '');
+    div.innerHTML=`<span class="nebula-tl-dot" style="background:${kindColor(n.kind)}"></span><div class="nebula-tl-text"><div class="nebula-tl-title">${escapeHtml(n.title)}</div><div class="nebula-tl-sub">${escapeHtml((n.detail||'').slice(0,48))}</div></div>`;
+    div.addEventListener('click', () => { nebulaSelected=n; renderNebula(); updateNebulaTimeline(); showNebulaDetail(n); });
+    nebulaTimeline.appendChild(div);
+  });
+}
+function showNebulaDetail(n) {
+  if (!nebulaDetail) return;
+  if (!n) { nebulaDetail.textContent='点击任意节点查看 Thought / Tool / Observation'; return; }
+  nebulaDetail.textContent = `${n.title}\n[${n.kind}]\n\n${n.detail||''}`;
+}
+function hitNebula(x,y) {
+  // transform screen to world
+  const wx = (x - nebulaTx)/nebulaScale, wy=(y - nebulaTy)/nebulaScale;
+  let best=null, bestD=24;
+  for (const n of nebulaNodes) { const d=Math.hypot(n.x-wx, n.y-wy); if (d<bestD){ bestD=d; best=n; }}
+  return best;
+}
+function buildNebulaFromOps() {
+  try {
+    // parse from fullOutput / operationsLines: build timeline from ops & content
+    const ops = (typeof operationsLines !== 'undefined' ? operationsLines : []);
+    const nodes=[];
+    const edges=[];
+    // planning node from first op that mentions planning
+    let idx=0;
+    const add = (title, detail, kind) => { const id='n'+idx++; nodes.push({id, title, detail, kind, x:0, y:0}); if (nodes.length>1) edges.push({from: nodes[nodes.length-2].id, to: nodes[nodes.length-1].id}); return id; };
+    for (const line of ops.slice(-60)) {
+      const t=line.trim();
+      if (!t) continue;
+      if (/thinking.*step/i.test(t)) add(`Think · ${t.slice(0,36)}`, t, 'think');
+      else if (/\[TOOL_|->/.test(t) && /web_search|file_ops|bash_exec|grep|glob/i.test(t)) add(`Act · ${t.slice(0,36)}`, t, 'act');
+      else if (/\[TOOL_RESULT\]|\[RESULT\]|observation/i.test(t)) add(`Observe · ${t.slice(0,36)}`, t.slice(0,400), 'obs');
+      else if (/plan|strategy|loops/i.test(t)) add(`Plan · ${t.slice(0,36)}`, t, 'plan');
+      if (nodes.length>=12) break;
+    }
+    // also use fullOutput first lines as fallback
+    if (nodes.length<3 && typeof fullOutput==='string' && fullOutput.trim()) {
+      const snippet = fullOutput.slice(0,800).split('\n').filter(Boolean).slice(0,6);
+      for (const s of snippet) if (s.trim().length>8) add(`Think · ${s.slice(0,32)}`, s.slice(0,300), 'think');
+    }
+    if (nodes.length>=2) { nebulaNodes=nodes; nebulaEdges=edges; return true; }
+  } catch {}
+  return false;
+}
+// Nebula interactions
+if (btnNebula) btnNebula.addEventListener('click', openNebula);
+if (navNebula) navNebula.addEventListener('click', openNebula);
+if (btnNebulaClose) btnNebulaClose.addEventListener('click', closeNebula);
+if (btnNebulaComposer) btnNebulaComposer.addEventListener('click', () => {
+  const pre = nebulaSelected ? `[星云节点] ${nebulaSelected.title}\n${nebulaSelected.detail||''}` : '';
+  closeNebula(); openComposer(pre);
+  if (nebulaSelected) { composerSelectedNode = nebulaSelected; updateComposerPreview(); }
+});
+if (btnNebulaDemo) btnNebulaDemo.addEventListener('click', () => {
+  const d=buildDemoNebula(); nebulaNodes=d.nodes; nebulaEdges=d.edges; nebulaSelected=null;
+  layoutNebula('force'); renderNebula(); updateNebulaTimeline(); if(nebulaEmpty) nebulaEmpty.classList.add('hidden');
+});
+if (btnNebulaFit) btnNebulaFit.addEventListener('click', () => { layoutNebula(nebulaLayout?nebulaLayout.value:'force'); renderNebula(); });
+if (nebulaLayout) nebulaLayout.addEventListener('change', () => { layoutNebula(nebulaLayout.value); renderNebula(); });
+if (btnNebulaExport) btnNebulaExport.addEventListener('click', () => {
+  try {
+    const data = JSON.stringify({ nodes: nebulaNodes, edges: nebulaEdges, exportedAt: new Date().toISOString() }, null, 2);
+    const blob = new Blob([data], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=`nebula-${Date.now()}.json`; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  } catch {}
+});
+if (nebulaCanvas) {
+  nebulaCanvas.addEventListener('mousedown', (e) => {
+    const rect=nebulaCanvas.getBoundingClientRect();
+    const x=e.clientX-rect.left, y=e.clientY-rect.top;
+    const hit=hitNebula(x,y);
+    if (hit) { nebulaSelected=hit; renderNebula(); updateNebulaTimeline(); showNebulaDetail(hit); composerSelectedNode=hit; updateComposerPreview();
+      // tooltip
+      if (nebulaTooltip){ nebulaTooltip.textContent=hit.title + '\n' + (hit.detail||'').slice(0,120); nebulaTooltip.style.left=(x+12)+'px'; nebulaTooltip.style.top=(y+12)+'px'; nebulaTooltip.classList.remove('hidden'); setTimeout(()=>nebulaTooltip.classList.add('hidden'), 2400); }
+      return;
+    }
+    nebulaDraggingCanvas=true; nebulaDragStart={x:e.clientX, y:e.clientY}; nebulaDragOrig={x:nebulaTx, y:nebulaTy};
+  });
+  nebulaCanvas.addEventListener('mousemove', (e) => {
+    if (!nebulaDraggingCanvas) return;
+    nebulaTx = nebulaDragOrig.x + (e.clientX - nebulaDragStart.x);
+    nebulaTy = nebulaDragOrig.y + (e.clientY - nebulaDragStart.y);
+    renderNebula();
+  });
+  nebulaCanvas.addEventListener('mouseup', () => { nebulaDraggingCanvas=false; });
+  nebulaCanvas.addEventListener('mouseleave', () => { nebulaDraggingCanvas=false; });
+  nebulaCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY >0 ? 0.92 : 1.08;
+    const rect=nebulaCanvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const wx=(mx-nebulaTx)/nebulaScale, wy=(my-nebulaTy)/nebulaScale;
+    nebulaScale = Math.max(0.35, Math.min(3, nebulaScale*delta));
+    nebulaTx = mx - wx*nebulaScale; nebulaTy = my - wy*nebulaScale;
+    renderNebula();
+  }, { passive:false });
+  nebulaCanvas.addEventListener('dblclick', () => { layoutNebula(nebulaLayout?nebulaLayout.value:'force'); renderNebula(); });
+  window.addEventListener('resize', () => { if (nebulaOverlay && !nebulaOverlay.classList.contains('hidden')) renderNebula(); });
+}
+document.querySelectorAll('.hint-action[data-action="open-composer"]').forEach(el=> el.addEventListener('click', ()=> openComposer()));
+document.querySelectorAll('.hint-action[data-action="open-nebula"]').forEach(el=> el.addEventListener('click', ()=> openNebula()));
+
+// Hook into existing agent output to auto-refresh nebula when open
+const _origOnAgentOutput = window.electronAPI && window.electronAPI.onAgentOutput ? null : null;
+(function hookNebulaLive(){
+  let lastOpsLen=0;
+  setInterval(()=>{
+    if (!nebulaOverlay || nebulaOverlay.classList.contains('hidden')) return;
+    try {
+      const curLen = (typeof operationsLines!=='undefined'? operationsLines.length:0) + (typeof fullOutput==='string'? Math.floor(fullOutput.length/500):0);
+      if (curLen!==lastOpsLen && nebulaNodes.length<20) {
+        lastOpsLen=curLen;
+        if (buildNebulaFromOps()) { layoutNebula(nebulaLayout?nebulaLayout.value:'force'); renderNebula(); updateNebulaTimeline(); if(nebulaEmpty) nebulaEmpty.classList.add('hidden'); }
+      }
+    } catch {}
+  }, 1200);
+})();
+restoreComposerPos();
+document.addEventListener('keydown', (e) => {
+  const isMod = e.metaKey || e.ctrlKey;
+  if (isMod && e.key.toLowerCase() === 'k') { e.preventDefault(); toggleComposer(); return; }
+  if (isMod && e.key.toLowerCase() === 'i') { e.preventDefault(); toggleComposer(); }
+  if (e.key === 'Escape') {
+    if (nebulaOverlay && !nebulaOverlay.classList.contains('hidden')) { e.preventDefault(); closeNebula(); return; }
+    if (composerFloat && !composerFloat.classList.contains('hidden')) { e.preventDefault(); closeComposer(); }
+  }
+});
 
 // --- Init ---
 

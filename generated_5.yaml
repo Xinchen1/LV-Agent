@@ -1,0 +1,4 @@
+openai:
+  api_key: ollama
+  base_url: http://localhost:11434/v1  # 无需 VPN，直接连
+  model: nvidia/nemotron-3.5-lightning-30b-a3b

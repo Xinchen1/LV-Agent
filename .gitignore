@@ -39,6 +39,7 @@ env/
 # Project secrets (NEVER commit API keys)
 config.yaml
 config.local.yaml
+agent_project/config/models.yaml
 
 # User data and secrets
 .env

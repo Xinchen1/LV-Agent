@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
-
-
-
-
-These tests are the architecture's proof: a full agent run -- model calls,
+"""These tests are the architecture's proof: a full agent run -- model calls,
 tool dispatch, policy denials, budgets, pause/resume -- driven entirely
 through the journal, with no real LLM and no real tools.
 """
@@ -209,3 +205,4 @@ def test_rebuild_messages_from_events():
     assert msgs[2]["role"] == "assistant"
     assert any("obs:grep" in m["content"] for m in msgs)
     assert any("DENIED nope" in m["content"] for m in msgs)
+

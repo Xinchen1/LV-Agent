@@ -1,0 +1,5 @@
+# config.yaml
+openai:
+  api_key: sk-xxxxxx  # 你的 OpenAI/DeepSeek/Anthropic Key
+  base_url: https://api.openai.com/v1  # 或 DeepSeek/OpenRouter
+  model: gpt-4o-mini

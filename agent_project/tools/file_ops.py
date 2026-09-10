@@ -273,19 +273,6 @@ class FastReadCache:
             chunks.append("\n\n".join(current))
         return chunks
 
-    def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
-        return None
-
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        if len(a) != len(b) or not a:
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(x * x for x in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
     def _keyword_score(self, query: str, chunk: str) -> float:
         q_words = re.findall(r"\w+", query.lower())
         c_words = re.findall(r"\w+", chunk.lower())
