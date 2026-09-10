@@ -1,5 +1,5 @@
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
 

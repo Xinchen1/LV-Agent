@@ -510,6 +510,82 @@ ipcMain.handle('artifacts:reveal', (_e, filePath) => {
   return { success: true };
 });
 
+// ── Sessions: read history from the agent's SQLite store ──
+// We spawn a short-lived Python one-liner (stdlib sqlite3) so the Electron
+// app needs no extra native dependency. The agent itself runs from PROJECT_ROOT.
+const SESSIONS_DB = () => path.join(PROJECT_ROOT, 'data', 'sessions.db');
+
+function querySessionsDb(mode, sessionId) {
+  const db = SESSIONS_DB();
+  if (!fs.existsSync(db)) return Promise.resolve([]);
+  const python = findPython();
+  // mode: "list" -> [{id,title,created_at,message_count}]
+  //       "load" -> [{role,content}]
+  const script = `
+import json, sqlite3, sys
+try:
+    conn = sqlite3.connect(${JSON.stringify(db)})
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT session_id, role, content, created_at FROM turns ORDER BY id ASC").fetchall()
+    conn.close()
+except Exception as e:
+    print(json.dumps({"error": str(e)}, ensure_ascii=False)); sys.exit(0)
+if ${JSON.stringify(mode)} == "list":
+    s = {}
+    for r in rows:
+        sid = r["session_id"]
+        s.setdefault(sid, {"id": sid, "title": "", "created_at": r["created_at"], "count": 0, "first_user": ""})
+        e = s[sid]
+        if r["role"] == "user" and not e["first_user"]:
+            e["first_user"] = (r["content"] or "").strip().split("\\n")[0][:60]
+        e["count"] += 1
+    out = []
+    for e in s.values():
+        if not e["count"]: continue
+        e["title"] = e["first_user"] or "Session"
+        e.pop("first_user", None)
+        out.append({"id": e["id"], "title": e["title"], "created_at": e["created_at"], "message_count": e["count"]})
+    out.sort(key=lambda x: (x["created_at"] or ""), reverse=True)
+    print(json.dumps(out, ensure_ascii=False))
+else:
+    out = []
+    for r in rows:
+        if r["session_id"] != ${JSON.stringify(sessionId || "")}: continue
+        out.append({"role": r["role"], "content": r["content"]})
+        if len(out) >= 200: break
+    print(json.dumps(out, ensure_ascii=False))
+`;
+  return new Promise((resolve) => {
+    const child = require('child_process').spawn(python, ['-c', script]);
+    let data = '';
+    let err = '';
+    child.stdout.on('data', (d) => { data += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => { log('sessions: spawn error: ' + e.message); resolve([]); });
+    child.on('close', () => {
+      if (err) log('sessions: python stderr: ' + err.slice(0, 200));
+      try { resolve(JSON.parse(data)); }
+      catch { resolve([]); }
+    });
+  });
+}
+
+ipcMain.handle('sessions:list', async () => {
+  try {
+    const sessions = await querySessionsDb('list');
+    if (!Array.isArray(sessions)) return { success: false, error: (sessions && sessions.error) || 'read failed', sessions: [] };
+    return { success: true, sessions };
+  } catch (e) { log('sessions:list error: ' + e.message); return { success: false, error: e.message, sessions: [] }; }
+});
+
+ipcMain.handle('sessions:load', async (_e, sessionId) => {
+  try {
+    const messages = await querySessionsDb('load', sessionId);
+    if (!Array.isArray(messages)) return { success: false, error: (messages && messages.error) || 'read failed', messages: [] };
+    return { success: true, messages };
+  } catch (e) { log('sessions:load error: ' + e.message); return { success: false, error: e.message, messages: [] }; }
+});
+
 // ── Messaging: Telegram bot management ──
 let telegramProcess = null;
 

@@ -1,10 +1,3 @@
-# Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
-# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
-
-
-
-
 model_registry_path: agent_project/config/models.yaml
 openai:
   api_key: ollama
@@ -169,43 +162,16 @@ logging:
   console: false
   rich_markup: true
   output_mode: auto
-  # Unified thinking/loop configuration (priority over scattered individual keys)
-  #  此配置区域优先于各散落键; 旧键仍为向后兼容
   min_loops: 2
   max_loops: 16
   default_loops: 4
-  
-  # Hard upper limit for outer loops (user-editable; also bounds LoopController output)
   max_outer_loops: 12
-  
-  # The following keys are kept for backward compatibility;
-  # if missing, Thinking section values are used.
-  # loop_controller_min_loops:
-  # loop_controller_max_loops:
-  # loop_controller_default_loops:
-
 thinking:
-  # Unified thinking/loop configuration (priority over scattered individual keys)
-  # 此配置区域优先于各散落键; 旧键仍为向后兼容
   min_loops: 2
   max_loops: 16
   default_loops: 4
-
-  # Hard upper limit for outer loops (user-editable; also bounds LoopController output)
   max_outer_loops: 12
-
-  # The following keys are kept for backward compatibility;
-  # if missing, Thinking section values are used.
-  # loop_controller_min_loops: 2
-  # loop_controller_max_loops: 16
-  # loop_controller_default_loops: 4
-
-  # Reflection model thinking loops (how many loops for reflection per episode)
   thinking_loops_for_reflection: 16
-
-  # Legacy top-level keys (deprecated but still supported for backward compatibility:)
-  # default_thinking_loops: 2
-  # max_thinking_loops: 3
 planning:
   enabled: true
   default_strategy: adaptive
@@ -256,7 +222,6 @@ health:
   print_status_on_startup: true
   show_install_hints: true
 execution:
-  use_legacy: false
   default_strategy: react
 research:
   enabled: true
@@ -297,10 +262,10 @@ display: {}
 agent:
   backend: openai
   openai:
-    api_key: null
-    base_url: https://developer.amd.com.cn/radeon/api/v1
-    model: DeepSeek-V4-Flash
+    api_key: ollama
+    base_url: http://localhost:11434/v1
+    model: qwen2.5-coder:7b
     temperature: 0.7
-    top_p: 0.95
-    max_tokens: 16384
+    top_p: 0.9
+    max_tokens: 4096
     timeout: 120

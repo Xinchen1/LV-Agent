@@ -89,6 +89,9 @@ class AnthropicBackend:
 
         self._client = None
         self.last_total_tokens = 0
+        # 静态 system prompt 按 n_loops 记忆化(对标 Hermes prompt_caching 前半):
+        # 组装只跑一次; 服务端 token 缓存靠 cache_control breakpoint(见 generate).
+        self._system_prompt_cache: Dict[int, str] = {}
 
         print(_style("  Anthropic backend", "2"))
         print(f"    {_style('model', '2')} {model}")
@@ -112,6 +115,25 @@ class AnthropicBackend:
                 )
         return self._client
 
+    def get_system_prompt(self, n_loops: int = 1) -> str:
+        """记忆化 system prompt(静态, 按 n_loops 缓存)."""
+        if n_loops not in self._system_prompt_cache:
+            self._system_prompt_cache[n_loops] = self._build_system_prompt(n_loops)
+        return self._system_prompt_cache[n_loops]
+
+    @staticmethod
+    def cached_system_blocks(system_prompt: str) -> List[Dict[str, Any]]:
+        """把 system 文本包成带 cache_control breakpoint 的 blocks.
+
+        纯函数, 无网络, 可单测. 发给 Anthropic 后, 相同前缀命中服务端
+        prompt cache(省重复 system 的 input 计费与首 token 延迟).
+        """
+        return [{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
     def generate(
         self,
         prompt: str,
@@ -122,11 +144,31 @@ class AnthropicBackend:
         stream: bool = False,
         stream_callback: Optional[Callable] = None,
         token_callback: Optional[Callable[[int], None]] = None,
+        cache_system: bool = False,
+        system_override: Optional[str] = None,
         **kwargs
     ) -> str:
-        """Generate text via Anthropic Messages API."""
+        """Generate text via Anthropic Messages API.
+
+        cache_system=True 时 system 走 cache_control breakpoint(服务端 prompt
+        cache); 默认 False, 行为与原来完全一致.
+        system_override: 显式 system(快路 prompt 自带 system 时传 "" 跳过
+        后端默认 system, 省重复计费). None=默认行为; ""=不发 system 字段.
+        """
         # Anthropic uses a top-level system parameter; we split it from the user prompt.
-        system_prompt = self._build_system_prompt(n_loops)
+        if system_override is None:
+            system_prompt = self.get_system_prompt(n_loops)
+            # 服务端缓存开时 system 必须是 blocks 形式; 关时保持原字符串, 零行为变化.
+            system_param: Any = (
+                self.cached_system_blocks(system_prompt) if cache_system else system_prompt
+            )
+            system_kw: Dict[str, Any] = {"system": system_param}
+        elif system_override == "":
+            system_prompt = ""
+            system_kw = {}
+        else:
+            system_prompt = system_override
+            system_kw = {"system": system_override}
         messages = [{"role": "user", "content": prompt}]
 
         # Drop OpenAI-specific args that Anthropic does not accept.
@@ -150,8 +192,8 @@ class AnthropicBackend:
                         model=self.model,
                         max_tokens=max_tokens or self.max_tokens,
                         temperature=temperature or self.temperature,
-                        system=system_prompt,
                         messages=messages,
+                        **system_kw,
                         **kwargs
                     ) as stream_resp:
                         content_parts = []
@@ -173,8 +215,8 @@ class AnthropicBackend:
                     model=self.model,
                     max_tokens=max_tokens or self.max_tokens,
                     temperature=temperature or self.temperature,
-                    system=system_prompt,
                     messages=messages,
+                    **system_kw,
                     **kwargs
                 )
 
@@ -226,19 +268,7 @@ Your core capability: **Deep Reasoning**
 - Plan before executing.
 
 Available tools (use the exact name):
-- web_search: Search the web for the latest/real-time information. (query: string)
-  e.g. web_search(query="今天的AAPL收盘价")
-- calculator: Perform pure arithmetic. (expression: string)
-  e.g. calculator(expression="(12+7)*3")
-- python_exec: Execute Python code for computation/processing. (code: string)
-  e.g. python_exec(code="print(2**10)")
-- file_ops: Read/write/list/search files. (action: "read"|"write"|"list"|"grep", path: string, content?: string)
-  e.g. file_ops(action="read", path="config.yaml") ; 新建文章: file_ops(action="write", path="分析.md", content="...")
-- bash_exec: Run shell commands (install, git clone, build, etc.). (command: string)
-  e.g. bash_exec(command="git clone https://github.com/x/y.git 目标目录")
-- glob: Find files by name pattern. (pattern: string, path?: string)
-  e.g. glob(pattern="**/*.md", path="~/Desktop")
-- api_call: Make HTTP requests to allowed hosts. (url: string, method: string, headers?: dict, data?: dict)
+{TOOL_LIST}
 
 Guidelines:
 1. THINK deeply before acting.
@@ -258,6 +288,9 @@ CONTEXT COMPREHENSION:
             depth = "HIGH: thorough but concise, evaluate 2-3 approaches."
         else:
             depth = "MODERATE: quick but careful reasoning, 1-2 approaches."
+        # 工具表由注册表单一事实源生成(文本协议下模型唯一的工具发现源).
+        from .tools import render_compact_tool_list
+        base = base.replace("{TOOL_LIST}", render_compact_tool_list())
         return base + f"\nTHINKING DEPTH: {depth}\n"
 
 
@@ -540,13 +573,7 @@ Examples:
 [/TOOL]
 
 Available tools (use the exact name):
-- web_search: Search the web for the latest/real-time information. (query: string)
-- calculator: Perform pure arithmetic. (expression: string)
-- python_exec: Execute Python code for computation/processing. (code: string)
-- file_ops: Read/write/list/search files. (action: "read"|"write"|"list"|"grep", path: string, content?: string)
-- bash_exec: Run shell commands (install, git clone, build, etc.). (command: string)
-- glob: Find files by name pattern. (pattern: string, path?: string)
-- api_call: Make HTTP requests to allowed hosts. (url: string, method: string, headers?: dict, data?: dict)
+{TOOL_LIST}
 
 Guidelines:
 1. THINK deeply before acting. Use your full reasoning capacity.
@@ -599,6 +626,9 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
 - 不展开多轮循环, 保持效率。
 """
 
+        # 工具表由注册表单一事实源生成(文本协议下模型唯一的工具发现源).
+        from .tools import render_compact_tool_list
+        base = base.replace("{TOOL_LIST}", render_compact_tool_list())
         return base + depth_guide
 
     def _ensure_connection(self) -> None:
@@ -616,20 +646,6 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             # Connection likely stale (idle timeout, proxy down, Ollama unloaded model)
             # Force recreate on next property access
             self._client = None
-
-    def _handle_error(self, e: Exception) -> bool:
-        """Handle errors with retry logic. Returns True if should retry."""
-        self._consecutive_errors += 1
-        status = _extract_http_status(e)
-        is_rate_limit = status == 429
-        is_transient = status in (408, 429, 500, 502, 503, 504) or status is None
-        if is_transient:
-            wait = min(2 ** self._consecutive_errors, 30)
-            print(_style(f"  Connection issue, retrying in {wait}s...", "2"))
-            time.sleep(wait)
-            self._client = None  # Force reconnect
-            return True
-        return False
 
     def _should_retry(self, e: Exception) -> bool:
         """Determine if an error is retryable.
@@ -660,10 +676,6 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         jitter = random.uniform(0, 0.5)
         return min(base + jitter, 30)
 
-    def _reset_errors(self):
-        """Reset consecutive error counter on success."""
-        self._consecutive_errors = 0
-
     def _is_ollama(self) -> bool:
         """Heuristic: is this backend pointing at a local Ollama server?"""
         bu = (self.base_url or "").lower()
@@ -679,6 +691,7 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         stream_callback: Optional[Callable] = None,
         token_callback: Optional[Callable[[int], None]] = None,
         quick: bool = False,
+        system_override: Optional[str] = None,
         **kwargs
     ) -> str:
         """
@@ -686,6 +699,9 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
 
         This backend always uses text mode with custom tool format to match
         the OpenMythos agent architecture.
+
+        system_override: 显式 system(快路 prompt 自带 system 时传 "" 跳过
+        后端默认 system, 省重复计费). None=默认行为; ""=不发 system 消息.
 
         Args:
             prompt: User prompt
@@ -787,11 +803,18 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
             finish_reason = getattr(completion.choices[0], 'finish_reason', None)
             return result.strip(), finish_reason
 
-        system_prompt = self._build_system_prompt(n_loops)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
+        if system_override is None:
+            system_prompt = self._build_system_prompt(n_loops)
+        else:
+            system_prompt = system_override
+        messages = (
+            [{"role": "user", "content": prompt}]
+            if not system_prompt
+            else [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+        )
 
         use_stream = bool(stream_callback) or bool(token_callback)
 
@@ -1076,33 +1099,32 @@ def get_backend():
             pref_data = json.loads(pref_path.read_text(encoding='utf-8'))
     except Exception:
         pref_data = {}
-    # 2) config
+    # 2) config —— 读 AgentConfig 顶层字段(与主 agent 的 _load_model_backend 同一份配置),
+    #    不再误读 cfg.agent(AgentConfig 无此属性, 之前恒为 None 导致双路径模型不一致)。
+    #    按当前 backend 选择对应 section, 使搜索/报告工具与主 agent 用同一个模型。
     try:
         from .config import load_config
         cfg = load_config()
-        agent_cfg = getattr(cfg, "agent", None)
-        cfg_base_url = getattr(agent_cfg.openai, "base_url", None) if agent_cfg else None
-        cfg_model = getattr(agent_cfg.openai, "model", None) if agent_cfg else None
-        cfg_api_key = getattr(agent_cfg.openai, "api_key", None) if agent_cfg else None
-    except Exception:
+        backend_name = getattr(cfg, "backend", "openai")
+        section = getattr(cfg, backend_name, None) or {}
+        cfg_base_url = section.get('base_url') if isinstance(section, dict) else None
+        cfg_model = section.get('model') if isinstance(section, dict) else None
+        cfg_api_key = section.get('api_key') if isinstance(section, dict) else None
+    except Exception as e:
         cfg_base_url = cfg_model = cfg_api_key = None
-    # 3) 优先级合并
+        import traceback; traceback.print_exc()
+    # 3) 优先级合并: 偏好文件 > config > 环境变量
     base_url = pref_data.get('base_url') or cfg_base_url or os.getenv('OPENAI_BASE_URL', '')
     model = pref_data.get('model') or cfg_model or os.getenv('OPENAI_MODEL', '')
     api_key = pref_data.get('api_key') or cfg_api_key or os.getenv('OPENAI_API_KEY', '')
     if not base_url or not model:
         raise RuntimeError('模型后端未配置: 请先执行 /model 选择模型，或设置 OPENAI_BASE_URL / OPENAI_MODEL 环境变量。当前不会回退到本地 Ollama。')
     from .model_backends import OpenAIBackend
+    # 后端构建失败必须显式抛出并打印错误, 绝不静默返回空响应后端(DummyBackend)——
+    # 否则用户只见"空回答"而无法排查 API 挂了/key 失效等真实问题。
+    backend = OpenAIBackend(api_key=api_key or '', base_url=base_url, model=model)
     try:
-        backend = OpenAIBackend(api_key=api_key or '', base_url=base_url, model=model)
-        # 打印当前使用模型
-        try:
-            print(f" backend OpenAIBackend · model {model} · base_url {base_url}")
-        except Exception:
-            pass
-        return backend
+        print(f" backend OpenAIBackend · model {model} · base_url {base_url}")
     except Exception:
-        class DummyBackend:
-            def generate(self, prompt, max_tokens=256, temperature=0.3):
-                return ""
-        return DummyBackend()
+        pass
+    return backend

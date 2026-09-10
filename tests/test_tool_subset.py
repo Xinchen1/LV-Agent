@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # P4 回归: P3 任务感知工具子集(离线)
 
 import json

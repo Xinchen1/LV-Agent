@@ -330,8 +330,9 @@ class GlobTool(BaseTool):
         pattern: str = "**",
         path: str = ".",
         max_results: int = 100,
+        timeout: float = 10.0,
     ) -> ToolResult:
-        """Find files matching pattern."""
+        """Find files matching pattern (bounded: 最多 max_results 条或 timeout 秒, 防大目录卡死)."""
         # LLM 可能生成空 pattern/缺省参数 → 兜底为列当前目录所有文件
         if not pattern or not str(pattern).strip():
             pattern = "**"
@@ -347,14 +348,20 @@ class GlobTool(BaseTool):
 
         try:
             files = []
+            import time as _time
+            _deadline = _time.monotonic() + max(float(timeout), 0.5)
+            timed_out = False
             for f in search_path.rglob(pattern):
+                if _time.monotonic() > _deadline:
+                    timed_out = True
+                    break
                 if any(part in SKIP_DIRS or part.startswith(".") for part in f.relative_to(search_path).parts):
                     continue
                 files.append(f)
                 if len(files) >= max_results + 1:
                     break
 
-            truncated = len(files) > max_results
+            truncated = len(files) > max_results or timed_out
             files = files[:max_results]
             results = []
             for f in files:
@@ -366,6 +373,8 @@ class GlobTool(BaseTool):
 
             output = f"Found {len(files)} file(s) matching '{pattern}' in {search_path}:\n"
             output += "\n".join(results) if results else "  (none)"
+            if timed_out:
+                output += "\n(partial: 遍历超时, 仅为部分结果)"
 
             return ToolResult(
                 success=True,
@@ -375,6 +384,7 @@ class GlobTool(BaseTool):
                     "path": str(search_path),
                     "count": len(files),
                     "truncated": truncated,
+                    "timed_out": timed_out,
                 },
             )
         except re.error as e:

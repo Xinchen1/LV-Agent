@@ -1,8 +1,8 @@
 """
-Unified Execution Engine for OpenMythos Agent.
+Unified Execution Engine for OpenMythos Agent (sole loop implementation).
 
-Consolidates the previously duplicated loop logic from:
-  - OpenMythosAgent._run_traditional
+Consolidated from the former duplicated loop logic:
+  - (removed) OpenMythosAgent._run_traditional
   - ReasoningEngine.reason / _reason_react / _reason_super
 
 The engine is strategy-agnostic: a `ThinkingPolicy` decides what prompt to send
@@ -889,12 +889,20 @@ class ExecutionEngine:
                         "给出结构化 Markdown 分析, 不要只说一句话。"
                     )
                 trace.final_answer = self._force_final_answer(ctx, extra=hint, max_obs=12)
+                # 再生成失败("No result produced"/空)时保留原答案: 短答案也比无结果好.
+                # (direct 兜底无观察无 reasoning 时重生成必然失败, 不能反杀原答案)
+                if (not trace.final_answer or trace.final_answer == "No result produced.") and _answer:
+                    trace.final_answer = _answer
                 # 二次审核: 分析报告若仍过短/敷衍, 基于全部有效观察再强制一次
                 if _analysis_needed:
                     _again = (trace.final_answer or "").strip()
                     if not _again or self._is_truncated_fragment(_again) or len(_again) < 120:
                         self.logger.info("analysis report still too short; forcing with full observations")
-                        trace.final_answer = self._force_final_answer(ctx, extra=hint, max_obs=16)
+                        _forced = self._force_final_answer(ctx, extra=hint, max_obs=16)
+                        if _forced and _forced != "No result produced.":
+                            trace.final_answer = _forced
+                        elif _answer:
+                            trace.final_answer = _answer
                 trace.success = bool(trace.final_answer)
 
         except Exception as e:

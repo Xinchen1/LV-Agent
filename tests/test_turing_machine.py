@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
-
-
-
-Tests for Turing Machine integration.
+"""Tests for Turing Machine integration.
 """
 
 import pytest
@@ -158,3 +155,4 @@ def test_turing_machine_step_by_step():
     result = tool.execute("run", machine_id="test_tm", input_tape="01")
     assert result.success
     assert "Turing Machine Execution Complete" in result.output
+

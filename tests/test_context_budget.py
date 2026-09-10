@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # P4 回归: P2 上下文预算(离线)
 
 import sys

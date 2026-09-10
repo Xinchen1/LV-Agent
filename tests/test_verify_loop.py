@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 cleveris research
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
 
 
@@ -291,23 +291,28 @@ def test_dynamic_loop_extension():
 
     cfg = AgentConfig()
 
-    # 持续进展: 9 次工具调用, 预算 6 → 应扩展到 10
-    class FB_Progress:
-        def __init__(self): self.c = 0
-        def generate(self, prompt, **kw):
-            self.c += 1
-            if self.c <= 9:
-                return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
-            return '{"final_answer": "done"}'
+    # 装假 web_search(按 query 返回动态结果), 避免依赖真实网络/限流造成的非确定性失败
+    _fake, _restore = _install_fake_web_search("ok")
+    try:
+        # 持续进展: 9 次工具调用, 预算 6 → 应扩展到 10
+        class FB_Progress:
+            def __init__(self): self.c = 0
+            def generate(self, prompt, **kw):
+                self.c += 1
+                if self.c <= 9:
+                    return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
+                return '{"final_answer": "done"}'
 
-    eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
-    eng.logger = logging.getLogger("test")
-    ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
-                           config=cfg, max_steps=6)
-    ctx.monitor_enabled = False  # 聚焦测试动态扩展, 不触发监控 LLM
-    tr = eng.run(ReActPolicy(), ctx)
-    assert len(tr.tools_used) == 9, f"应执行全部 9 次工具调用, 实际 {len(tr.tools_used)}"
-    assert ctx.max_steps > 6, f"max_steps 应动态扩展, 实际 {ctx.max_steps}"
+        eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
+        eng.logger = logging.getLogger("test")
+        ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                               config=cfg, max_steps=6)
+        ctx.monitor_enabled = False  # 聚焦测试动态扩展, 不触发监控 LLM
+        tr = eng.run(ReActPolicy(), ctx)
+        assert len(tr.tools_used) == 9, f"应执行全部 9 次工具调用, 实际 {len(tr.tools_used)}"
+        assert ctx.max_steps > 6, f"max_steps 应动态扩展, 实际 {ctx.max_steps}"
+    finally:
+        _restore()
 
     # 快速完成: 1 次调用后给答案 → 不扩展
     class FB_Fast:
@@ -528,6 +533,10 @@ def test_fast_path_does_not_emit_reasoning():
     from agent_project.agent import OpenMythosAgent
 
     src = inspect.getsource(OpenMythosAgent._run_simple)
+    # _run_simple 已拆分为路由 + 执行体 + 流装配: 约束覆盖全部快车道方法
+    for _m in ("_run_simple_exec", "_setup_fast_stream", "_call_fast_llm"):
+        if hasattr(OpenMythosAgent, _m):
+            src += inspect.getsource(getattr(OpenMythosAgent, _m))
     # _buffer_user_cb 只透出工具/状态事件 + 轻量 thinking 提示, 不透出 reasoning 正文
     assert "reasoning 到达时给一个轻量\"思考中\"状态" in src or "'reasoning' 与 'content' 的正文都不实时透出" in src, "应注释明确不透出 reasoning 正文"
     # 不应再直接透出 reasoning 原文(旧的 simulate_stream_tokens reasoning 透出)
@@ -751,11 +760,15 @@ def _install_fake_web_search(behavior):
     """把 registry 里的 web_search 临时替换成假工具, 避免测试联网/依赖真实结果.
 
     behavior: "ok" -> 每次都成功(有结果); "fail" -> 每次都失败.
+
+    返回 (fake, restore) — 用 restore() 恢复真实 web_search, 避免污染后续测试.
     """
     import sys
     sys.path.insert(0, ".")
     sys.path.insert(0, "agent_project")
     from agent_project.tools import TOOLS_REGISTRY, BaseTool, ToolResult
+
+    original = TOOLS_REGISTRY._tools.get("web_search")
 
     class FakeWebSearch(BaseTool):
         name = "web_search"
@@ -769,12 +782,23 @@ def _install_fake_web_search(behavior):
         def execute(self, **kwargs):
             self.calls += 1
             if self._behavior == "ok":
-                return ToolResult(success=True, output='[{"title": "result", "url": "http://x"}]')
+                q = kwargs.get("query", "result")
+                return ToolResult(
+                    success=True,
+                    output='[{"title": "result for %s", "url": "http://x/%s"}]' % (q, q),
+                )
             return ToolResult(success=False, output="", error="Tool error: fake search failed")
 
     fake = FakeWebSearch(behavior)
+
+    def restore():
+        if original is None:
+            TOOLS_REGISTRY._tools.pop("web_search", None)
+        else:
+            TOOLS_REGISTRY._tools["web_search"] = original
+
     TOOLS_REGISTRY._tools["web_search"] = fake
-    return fake
+    return fake, restore
 
 
 def test_loop_extension_shows_status_and_no_hard_cap():
@@ -788,30 +812,32 @@ def test_loop_extension_shows_status_and_no_hard_cap():
 
     cfg = AgentConfig()
     cfg.max_thinking_loops = 6  # 故意设很小的初始硬上限
-    fake = _install_fake_web_search("ok")
+    fake, restore_web = _install_fake_web_search("ok")
+    try:
+        # 模型持续产出新工具调用(10 次)且都有真实进展 → 预算应突破 max_thinking_loops=6
+        class FB_Progress:
+            def __init__(self): self.c = 0
+            def generate(self, prompt, **kw):
+                self.c += 1
+                if self.c <= 10:
+                    return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
+                return '{"final_answer": "done"}'
 
-    # 模型持续产出新工具调用(10 次)且都有真实进展 → 预算应突破 max_thinking_loops=6
-    class FB_Progress:
-        def __init__(self): self.c = 0
-        def generate(self, prompt, **kw):
-            self.c += 1
-            if self.c <= 10:
-                return '{"action": "web_search", "args": {"query": "AI %d"}}' % self.c
-            return '{"final_answer": "done"}'
-
-    status_msgs = []
-    eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
-    eng.logger = logging.getLogger("test")
-    ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
-                           config=cfg, max_steps=4)
-    ctx.monitor_enabled = False
-    ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
-    tr = eng.run(ReActPolicy(), ctx)
-    assert len(tr.tools_used) == 10, f"应执行全部 10 次工具调用, 实际 {len(tr.tools_used)}"
-    # 预算应突破 6(原硬上限), 证明不再被 max_thinking_loops 截断
-    assert ctx.max_steps > 6, f"预算应突破硬上限 6, 实际 {ctx.max_steps}"
-    # 应显示"增加 loop"状态提示
-    assert any(k == "status" and "loop" in str(t) for k, t in status_msgs), f"应有增加 loop 状态: {status_msgs}"
+        status_msgs = []
+        eng = ExecutionEngine(model_backend=FB_Progress(), config=cfg)
+        eng.logger = logging.getLogger("test")
+        ctx = ExecutionContext(task="搜新闻", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                               config=cfg, max_steps=4)
+        ctx.monitor_enabled = False
+        ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
+        tr = eng.run(ReActPolicy(), ctx)
+        assert len(tr.tools_used) == 10, f"应执行全部 10 次工具调用, 实际 {len(tr.tools_used)}"
+        # 预算应突破 6(原硬上限), 证明不再被 max_thinking_loops 截断
+        assert ctx.max_steps > 6, f"预算应突破硬上限 6, 实际 {ctx.max_steps}"
+        # 应显示"增加 loop"状态提示
+        assert any(k == "status" and "loop" in str(t) for k, t in status_msgs), f"应有增加 loop 状态: {status_msgs}"
+    finally:
+        restore_web()
 
 
 def test_loop_stops_after_consecutive_no_progress():
@@ -824,27 +850,29 @@ def test_loop_stops_after_consecutive_no_progress():
 
     cfg = AgentConfig()
     cfg.max_thinking_loops = 32  # 硬上限很大, 但连续无进展应先行停止
-    fake = _install_fake_web_search("fail")
+    fake, restore_web = _install_fake_web_search("fail")
+    try:
+        class FB_Fail:
+            def __init__(self): self.c = 0
+            def generate(self, prompt, **kw):
+                self.c += 1
+                if self.c <= 12:
+                    return '{"action": "web_search", "args": {"query": "fail"}}'
+                return '{"final_answer": "done"}'
 
-    class FB_Fail:
-        def __init__(self): self.c = 0
-        def generate(self, prompt, **kw):
-            self.c += 1
-            if self.c <= 12:
-                return '{"action": "web_search", "args": {"query": "fail"}}'
-            return '{"final_answer": "done"}'
-
-    status_msgs = []
-    eng = ExecutionEngine(model_backend=FB_Fail(), config=cfg)
-    eng.logger = logging.getLogger("test")
-    ctx = ExecutionContext(task="搜", available_tools=TOOLS_REGISTRY.get_tools_dict(),
-                           config=cfg, max_steps=30)
-    ctx.monitor_enabled = False
-    ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
-    tr = eng.run(ReActPolicy(), ctx)
-    # 连续无进展约束应生效: 工具调用远少于 12 次(在无进展3次后停止)
-    assert len(tr.tools_used) < 12, f"连续无进展应提前停止, 实际执行了 {len(tr.tools_used)} 次"
-    assert any(k == "status" and "无进展" in str(t) for k, t in status_msgs), f"应有停止提示: {status_msgs}"
+        status_msgs = []
+        eng = ExecutionEngine(model_backend=FB_Fail(), config=cfg)
+        eng.logger = logging.getLogger("test")
+        ctx = ExecutionContext(task="搜", available_tools=TOOLS_REGISTRY.get_tools_dict(),
+                               config=cfg, max_steps=30)
+        ctx.monitor_enabled = False
+        ctx.stream_callback = lambda kind, text: status_msgs.append((kind, text))
+        tr = eng.run(ReActPolicy(), ctx)
+        # 连续无进展约束应生效: 工具调用远少于 12 次(在无进展3次后停止)
+        assert len(tr.tools_used) < 12, f"连续无进展应提前停止, 实际执行了 {len(tr.tools_used)} 次"
+        assert any(k == "status" and "无进展" in str(t) for k, t in status_msgs), f"应有停止提示: {status_msgs}"
+    finally:
+        restore_web()
 
 
 

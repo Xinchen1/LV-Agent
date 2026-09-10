@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LV Agent — Terminal-native intelligence. Deep thinking, real tools.</title>
+  <meta name="description" content="LV Agent — a terminal-native agent framework. Multi-round reasoning, native tool use, long-horizon memory. A Cleveris Research work." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- SVG pencil-sketch filter definitions (hidden) -->
+  <svg class="filter-defs" aria-hidden="true" width="0" height="0">
+    <defs>
+      <filter id="pencil" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="sRGB">
+        <feColorMatrix type="saturate" values="0" result="gray"/>
+        <feComponentTransfer in="gray" result="contrast">
+          <feFuncR type="linear" slope="1.55" intercept="-0.28"/>
+          <feFuncG type="linear" slope="1.55" intercept="-0.28"/>
+          <feFuncB type="linear" slope="1.55" intercept="-0.28"/>
+        </feComponentTransfer>
+        <feConvolveMatrix in="gray" order="3" preserveAlpha="true"
+          kernelMatrix="-1 -1 -1 -1 8 -1 -1 -1 -1" result="edges"/>
+        <feComponentTransfer in="edges" result="edgesInv">
+          <feFuncR type="table" tableValues="1.0 0.0"/>
+          <feFuncG type="table" tableValues="1.0 0.0"/>
+          <feFuncB type="table" tableValues="1.0 0.0"/>
+        </feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.012 0.9" numOctaves="2" seed="7" result="noise"/>
+        <feColorMatrix in="noise" type="matrix"
+          values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.10 0" result="grain"/>
+        <feBlend in="edgesInv" in2="contrast" mode="multiply" result="sketch"/>
+        <feComposite in="grain" in2="sketch" operator="over" result="grained"/>
+        <feComponentTransfer in="grained" result="final">
+          <feFuncR type="linear" slope="1.08" intercept="-0.04"/>
+          <feFuncG type="linear" slope="1.08" intercept="-0.04"/>
+          <feFuncB type="linear" slope="1.08" intercept="-0.04"/>
+        </feComponentTransfer>
+      </filter>
+      <filter id="pencil-soft" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="sRGB">
+        <feColorMatrix type="saturate" values="0" result="gray"/>
+        <feComponentTransfer in="gray" result="contrast">
+          <feFuncR type="linear" slope="1.3" intercept="-0.15"/>
+          <feFuncG type="linear" slope="1.3" intercept="-0.15"/>
+          <feFuncB type="linear" slope="1.3" intercept="-0.15"/>
+        </feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.014 0.8" numOctaves="2" seed="3" result="noise"/>
+        <feColorMatrix in="noise" type="matrix"
+          values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.07 0" result="grain"/>
+        <feComposite in="grain" in2="contrast" operator="over"/>
+      </filter>
+    </defs>
+  </svg>
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <a class="wordmark" href="#top">
+      <span class="wm-mark">LV</span>
+      <span class="wm-text">LV&nbsp;Agent</span>
+    </a>
+    <nav class="topnav">
+      <a href="#features">Features</a>
+      <a href="#tools">Tools</a>
+      <a href="#commands">Commands</a>
+      <a href="#web">Web</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="#faq">FAQ</a>
+      <a href="#download">Download</a>
+      <a href="#colophon">Colophon</a>
+    </nav>
+    <span class="topbar-meta">v1.0.0 · macOS · Cleveris Research</span>
+    <a class="lang-btn" href="index.html">中文</a>
+  </header>
+
+  <!-- Art plate: Divine Contact -->
+  <section class="plate reveal" id="plate">
+    <img class="plate-bg" src="assets/banner-divine.png" alt="Divine Contact — Where Mortal Meets Eternal. Raphael's sketch of the divine touch" />
+    <div class="plate-veil"></div>
+  </section>
+
+  <!-- Banner -->
+  <section class="banner" id="top">
+    <div class="banner-inner">
+    <div class="banner-overlay">
+      <div class="banner-label">
+        <span class="label-rule"></span>
+        <span>LV Agent &nbsp;—&nbsp; Terminal-native intelligence</span>
+      </div>
+      <h1 class="banner-title">
+        Deep thinking,<br/>
+        real tools,<br/>
+        in your <em>terminal</em>.
+      </h1>
+      <p class="banner-sub">LV Agent — a terminal-native agent framework with multi-round reasoning, 19+ tools, and long-horizon memory. A work of Cleveris Research.</p>
+      <div class="banner-cta">
+        <a class="btn btn-primary" href="#download">Download for macOS</a>
+        <a class="btn btn-ghost" href="https://lv-agent-web.onrender.com/" rel="noopener">Try Web Edition ↗</a>
+      </div>
+    </div>
+    <div class="banner-terminal">
+      <div class="term-titlebar">
+        <span class="term-dot red"></span>
+        <span class="term-dot yellow"></span>
+        <span class="term-dot green"></span>
+        <span class="term-title">lv — 120×40 — LV Agent</span>
+      </div>
+      <div class="term-body">
+        <div class="term-line"><span class="term-prompt">~/lv-agent</span> <span class="term-sym">$</span> lv</div>
+        <div class="term-line term-dim">LV Agent v1.0.0 · Harness kernel · 19 tools loaded</div>
+        <div class="term-line term-dim">DeepSeek-V4-Flash · workspace: ~/projects</div>
+        <div class="term-line"><span class="term-bracket">›</span> Search Python 3.13 new features and generate a PDF report</div>
+        <div class="term-line term-agent"><span class="term-tag">thinking</span> I'll search for Python 3.13 features, then use pdf_tool to generate a report.</div>
+        <div class="term-line term-agent"><span class="term-tag">tool</span> web_search(query="Python 3.13 release notes")</div>
+        <div class="term-line term-out">→ 8 results · top: python.org/downloads/release/python-3130</div>
+        <div class="term-line term-agent"><span class="term-tag">tool</span> pdf_tool(content="# Python 3.13 新特性...", path="report.pdf")</div>
+        <div class="term-line term-out">→ PDF 已生成: report.pdf · 2908 bytes</div>
+        <div class="term-line term-agent"><span class="term-tag">done</span> ✅ Report saved to ~/projects/report.pdf</div>
+        <div class="term-line"><span class="term-prompt">~/lv-agent</span> <span class="term-sym">$</span> <span class="term-cursor">▋</span></div>
+      </div>
+    </div>
+    </div>
+  </section>
+
+  <!-- Manifesto -->
+  <section class="manifesto reveal">
+    <div class="section-head">
+      <span class="section-num">§ 01</span>
+      <span class="section-label">Manifesto</span>
+    </div>
+    <div class="manifesto-body">
+      <div class="manifesto-text">
+        <p class="lede">
+          We treat the <em>line</em> as a hypothesis and the <em>tool call</em> as a measurement.
+          Reasoning is not decoration for action — it <em>is</em> action, made visible at the speed of thought.
+        </p>
+        <p class="body">
+          LV Agent is built around a Harness microkernel inspired by the Turing machine. It runs
+          multi-round LLM calls inside a tool loop with self-correction: simple questions take few
+          rounds, hard questions take many. The sketchbook is a research instrument — and so is the
+          terminal. A sketch that can be read is worth more than a render that can only be admired.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="features" id="features">
+    <div class="section-head reveal">
+      <span class="section-num">§ 02</span>
+      <span class="section-label">Features</span>
+      <span class="section-tail">Four plates of the same instrument</span>
+    </div>
+    <div class="feature-grid">
+      <article class="feature reveal">
+        <div class="feat-img-wrap"><img class="study-img" src="assets/hand-1.png" alt="" /></div>
+        <div class="feat-body">
+          <span class="fig-tag">FIG. II</span>
+          <h3>Reasoning &amp; planning</h3>
+          <p>Multi-strategy reasoning — CoT / ReAct / Verification, with MCTS planning. Adaptive loop control: few rounds for easy asks, many for hard ones.</p>
+          <ul class="feat-points">
+            <li>SEQUENTIAL · PARALLEL · HIERARCHICAL · ADAPTIVE</li>
+            <li>Self-correction with quality evaluation</li>
+            <li>Parameter auto-tuning per task</li>
+          </ul>
+        </div>
+      </article>
+      <article class="feature reveal">
+        <div class="feat-img-wrap"><img class="study-img" src="assets/hand-2.png" alt="" /></div>
+        <div class="feat-body">
+          <span class="fig-tag">FIG. III</span>
+          <h3>Native tool chain</h3>
+          <p>Web search with multi-query fusion, full file system access, Python &amp; Bash execution with timeout isolation, plus GitHub, PDF, weather, fetch.</p>
+          <ul class="feat-points">
+            <li>Read / write / grep / glob, cross-folder</li>
+            <li>Pipes, redirect, &amp;&amp; / ||, env passthrough</li>
+            <li>Telegram bot integration (standalone)</li>
+          </ul>
+        </div>
+      </article>
+      <article class="feature reveal">
+        <div class="feat-img-wrap"><img class="study-img" src="assets/hand-3.png" alt="" /></div>
+        <div class="feat-body">
+          <span class="fig-tag">FIG. IV</span>
+          <h3>Memory &amp; context</h3>
+          <p>Holographic memory: a knowledge graph for durable facts, vector experience memory across sessions, and learned skills extracted from conversation.</p>
+          <ul class="feat-points">
+            <li>Entity-relation long-term store</li>
+            <li>Cross-session similarity retrieval</li>
+            <li>Auto context compression, 512-token budget</li>
+          </ul>
+        </div>
+      </article>
+      <article class="feature reveal">
+        <div class="feat-img-wrap"><img class="study-img" src="assets/hand-4.png" alt="" /></div>
+        <div class="feat-body">
+          <span class="fig-tag">FIG. V</span>
+          <h3>Harness runtime</h3>
+          <p>Event-sourced execution that is traceable and replayable. SQLite session persistence, dual token/time budgets, checkpoint resume, and hot-swappable modules.</p>
+          <ul class="feat-points">
+            <li>Tool confirmation on dangerous ops</li>
+            <li>Checkpoint &amp; resume on interrupt</li>
+            <li>Hot-plug with rollback</li>
+          </ul>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Tools -->
+  <section class="practice" id="tools">
+    <div class="section-head reveal">
+      <span class="section-num">§ 03</span>
+      <span class="section-label">Tools</span>
+    </div>
+    <ol class="practice-list">
+      <li class="practice-item reveal">
+        <span class="pr-num">01</span>
+        <div class="pr-body">
+          <h3>Web search</h3>
+          <p>Multi-query fusion across sources, body extraction, scoring, and source evaluation for deep research.</p>
+        </div>
+        <span class="pr-tag">SEARCH</span>
+      </li>
+      <li class="practice-item reveal">
+        <span class="pr-num">02</span>
+        <div class="pr-body">
+          <h3>File operations</h3>
+          <p>Read / write / grep / glob with cross-directory browsing — “the XXX on my desktop” just works.</p>
+        </div>
+        <span class="pr-tag">FS</span>
+      </li>
+      <li class="practice-item reveal">
+        <span class="pr-num">03</span>
+        <div class="pr-body">
+          <h3>Code execution</h3>
+          <p>Python &amp; Bash with full terminal access — pipes, redirect, &amp;&amp; / ||, env — under timeout isolation.</p>
+        </div>
+        <span class="pr-tag">EXEC</span>
+      </li>
+      <li class="practice-item reveal">
+        <span class="pr-num">04</span>
+        <div class="pr-body">
+          <h3>Integrations</h3>
+          <p>GitHub search, PDF reading, weather query, web fetching, and a standalone Telegram bot.</p>
+        </div>
+        <span class="pr-tag">NET</span>
+      </li>
+    </ol>
+  </section>
+
+  <!-- Commands -->
+  <section class="commands" id="commands">
+    <div class="section-head reveal">
+      <span class="section-num">§ 04</span>
+      <span class="section-label">Commands</span>
+      <span class="section-tail">Out of the box</span>
+    </div>
+    <div class="cmd-table reveal">
+      <div class="cmd-row cmd-head">
+        <span>Command</span><span>Action</span>
+      </div>
+      <div class="cmd-row"><code>/deep_research</code><span>Multi-angle search → HTML report</span></div>
+      <div class="cmd-row"><code>!cmd</code><span>Execute shell directly</span></div>
+      <div class="cmd-row"><code>@file</code><span>Inject file contents into input</span></div>
+      <div class="cmd-row"><code>/model</code><span>Switch model at runtime</span></div>
+      <div class="cmd-row"><code>/strategy</code><span>Switch reasoning strategy</span></div>
+      <div class="cmd-row"><code>/compress</code><span>Manually compress context</span></div>
+      <div class="cmd-row"><code>/learn</code><span>Learn a memory skill from chat</span></div>
+      <div class="cmd-row"><code>/memskill</code><span>Manage skills: list / evolve / snapshot</span></div>
+      <div class="cmd-row"><code>/sessions</code><span>Browse historical sessions</span></div>
+      <div class="cmd-row"><code>/dashboard</code><span>Open the agent state panel</span></div>
+      <div class="cmd-row"><code>/drafts</code><span>View stashed input drafts</span></div>
+    </div>
+    <div class="cmd-keys reveal">
+      <span class="key-label">Keys</span>
+      <kbd>Ctrl+S</kbd><span>stash draft</span>
+      <kbd>Ctrl+\</kbd><span>dashboard</span>
+      <kbd>ESC</kbd><span>interrupt long task</span>
+      <kbd>↑↓</kbd><span>input history</span>
+    </div>
+  </section>
+
+  <!-- Download -->
+  <section class="download" id="download">
+    <div class="download-veil"></div>
+    <div class="section-head reveal">
+      <span class="section-num">§ 05</span>
+      <span class="section-label">Download</span>
+      <span class="section-tail">macOS · v1.0.0</span>
+    </div>
+    <div class="dl-grid">
+      <a class="dl-card reveal" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0-arm64.dmg" rel="noopener">
+        <div class="dl-head">
+          <span class="dl-tag">RECOMMENDED</span>
+          <span class="dl-arch">Apple Silicon</span>
+        </div>
+        <h3>LV Agent · arm64</h3>
+        <p class="dl-meta">.dmg · 101 MB · macOS 11+</p>
+        <span class="dl-cta">Download .dmg ↓</span>
+      </a>
+      <a class="dl-card reveal" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0.dmg" rel="noopener">
+        <div class="dl-head">
+          <span class="dl-tag ghost">INTEL</span>
+          <span class="dl-arch">x86_64</span>
+        </div>
+        <h3>LV Agent · x64</h3>
+        <p class="dl-meta">.dmg · 105 MB · macOS 11+</p>
+        <span class="dl-cta">Download .dmg ↓</span>
+      </a>
+      <a class="dl-card reveal alt" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0-arm64-mac.zip" rel="noopener">
+        <div class="dl-head">
+          <span class="dl-tag ghost">ZIP</span>
+          <span class="dl-arch">Apple Silicon</span>
+        </div>
+        <h3>LV Agent · arm64</h3>
+        <p class="dl-meta">.zip · 96 MB · portable</p>
+        <span class="dl-cta">Download .zip ↓</span>
+      </a>
+      <a class="dl-card reveal alt" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0-mac.zip" rel="noopener">
+        <div class="dl-head">
+          <span class="dl-tag ghost">ZIP</span>
+          <span class="dl-arch">x86_64</span>
+        </div>
+        <h3>LV Agent · x64</h3>
+        <p class="dl-meta">.zip · 97 MB · portable</p>
+        <span class="dl-cta">Download .zip ↓</span>
+      </a>
+    </div>
+    <p class="dl-note reveal">
+      Prefer the terminal? <code>git clone https://github.com/Xinchen1/LV-Agent.git</code> then <code>./install.sh</code> for the global <code>lv</code> command.
+      Backends: DeepSeek · OpenAI · Anthropic · OpenRouter · Ollama (offline).
+    </p>
+  </section>
+
+  <!-- Web Edition -->
+  <section class="web-edition" id="web">
+    <div class="section-head reveal">
+      <span class="section-num">§ 06</span>
+      <span class="section-label">Web Edition</span>
+      <span class="section-tail">The same mind, in your browser</span>
+    </div>
+    <div class="web-intro reveal">
+      <p class="lede">
+        LV Agent runs in the browser — no install required.
+        Bind a local folder, generate <em>PDFs</em>, write code, search the web.
+        Your files stay on <em>your</em> disk.
+      </p>
+    </div>
+    <div class="web-grid">
+      <article class="web-card reveal">
+        <span class="web-icon">📁</span>
+        <h3>Local workspace</h3>
+        <p>Select any folder on your computer. The agent reads, writes, and creates files directly on your disk via the File System Access API.</p>
+        <ul class="feat-points">
+          <li>Chrome / Edge 86+ required</li>
+          <li>Read · write · mkdir · list · delete</li>
+          <li>No upload — files never leave your machine</li>
+        </ul>
+      </article>
+      <article class="web-card reveal">
+        <span class="web-icon">📄</span>
+        <h3>PDF generation</h3>
+        <p>Ask the agent to create a report, and it renders a formatted PDF with Chinese font support — saved straight to your chosen folder.</p>
+        <ul class="feat-points">
+          <li>Markdown → PDF (titles, lists, tables)</li>
+          <li>Noto CJK / Songti font embedding</li>
+          <li>Auto-saved to workspace · downloadable</li>
+        </ul>
+      </article>
+      <article class="web-card reveal">
+        <span class="web-icon">🔌</span>
+        <h3>Full tool chain</h3>
+        <p>Web search, code execution, API calls, browser automation — the same 19+ tools as the terminal version, running in a container.</p>
+        <ul class="feat-points">
+          <li>web_search · bash_exec · python_exec</li>
+          <li>api_call · playwright · git</li>
+          <li>DeepSeek · OpenAI · Anthropic backends</li>
+        </ul>
+      </article>
+      <article class="web-card reveal">
+        <span class="web-icon">⚡</span>
+        <h3>Streaming + artifacts</h3>
+        <p>Watch the agent think in real-time. Generated files appear in the Artifacts panel — click to open or download.</p>
+        <ul class="feat-points">
+          <li>Live reasoning stream</li>
+          <li>Artifacts panel with file list</li>
+          <li>Toast notifications on save</li>
+        </ul>
+      </article>
+    </div>
+    <div class="web-cta reveal">
+      <a class="btn btn-primary" href="https://lv-agent-web.onrender.com/" rel="noopener">Launch Web Edition ↗</a>
+      <a class="btn btn-ghost" href="https://github.com/Xinchen1/LV-Agent" rel="noopener">View source ↗</a>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section class="quickstart" id="quickstart">
+    <div class="section-head reveal">
+      <span class="section-num">§ 07</span>
+      <span class="section-label">Quick Start</span>
+      <span class="section-tail">From zero to agent in 60 seconds</span>
+    </div>
+    <div class="qs-grid">
+      <article class="qs-step reveal">
+        <span class="qs-num">01</span>
+        <h3>Install</h3>
+        <div class="qs-code">
+          <span class="qs-comment"># macOS — Apple Silicon</span>
+          <code>brew install --cask https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0-arm64.dmg</code>
+          <span class="qs-comment"># or clone &amp; install</span>
+          <code>git clone https://github.com/Xinchen1/LV-Agent.git</code>
+          <code>cd LV-Agent &amp;&amp; ./install.sh</code>
+        </div>
+        <p class="qs-note">Gives you the global <code>lv</code> command.</p>
+      </article>
+      <article class="qs-step reveal">
+        <span class="qs-num">02</span>
+        <h3>Configure</h3>
+        <div class="qs-code">
+          <span class="qs-comment"># Set your API key</span>
+          <code>export LV_API_KEY="your-key-here"</code>
+          <span class="qs-comment"># Or edit config.yaml</span>
+          <code>vim config.yaml</code>
+        </div>
+        <p class="qs-note">Backends: DeepSeek · OpenAI · Anthropic · OpenRouter · Ollama.</p>
+      </article>
+      <article class="qs-step reveal">
+        <span class="qs-num">03</span>
+        <h3>Run</h3>
+        <div class="qs-code">
+          <code>lv</code>
+          <span class="qs-comment"># Start chatting</span>
+          <code>&gt; 搜索 Python 3.13 的新特性并生成 PDF 报告</code>
+          <span class="qs-comment"># Or use the web edition</span>
+          <code>open https://lv-agent-web.onrender.com/</code>
+        </div>
+        <p class="qs-note">The agent picks tools automatically based on your task.</p>
+      </article>
+    </div>
+    <div class="qs-tips reveal">
+      <div class="qs-tip">
+        <span class="qs-tip-label">PRO TIP</span>
+        <p>Use <code>/deep_research</code> for multi-angle research with a synthesized HTML report. Use <code>!cmd</code> to run shell commands directly.</p>
+      </div>
+      <div class="qs-tip">
+        <span class="qs-tip-label">WEB EDITION</span>
+        <p>No install needed — just open the <a href="https://lv-agent-web.onrender.com/" rel="noopener">web edition</a>, click 📁 to bind a folder, and start working.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq" id="faq">
+    <div class="section-head reveal">
+      <span class="section-num">§ 08</span>
+      <span class="section-label">FAQ</span>
+      <span class="section-tail">Questions from the studio</span>
+    </div>
+    <div class="faq-list">
+      <details class="faq-item reveal">
+        <summary>What models does LV Agent support?</summary>
+        <p>DeepSeek (V3/V4/R1), OpenAI (GPT-4o/o1), Anthropic (Claude 3.5 Sonnet), OpenRouter (300+ models), and Ollama for fully offline inference. Switch at runtime with <code>/model</code>.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>How does the web edition protect my files?</summary>
+        <p>The web edition uses the <em>File System Access API</em>. Files are read and written directly on your disk — they are never uploaded to a server. The agent runs in a container on Render; only text commands and results travel over WebSocket. Binary file contents (PDFs, images) are base64-encoded and pushed to your browser, which writes them locally.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>Can I use it without an API key?</summary>
+        <p>Yes. The web edition comes pre-configured with a free model (DeepSeek-V4-Flash via AMD Radeon). Just open the page and start chatting. For the terminal version, set <code>LV_API_KEY</code> or use Ollama for offline.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>What browsers are supported for the web edition?</summary>
+        <p>Chrome or Edge 86+ (File System Access API required). Firefox and Safari are not supported for local file binding — but you can still chat and download artifacts without binding a folder.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>How is this different from ChatGPT or Claude?</summary>
+        <p>LV Agent is a <em>terminal-native agent framework</em>, not a chatbot. It runs a multi-round reasoning loop with real tool execution — file I/O, shell commands, web search, code execution — with self-correction and memory across sessions. You can add custom tools, swap models, and inspect every step.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>Is it open source?</summary>
+        <p>Yes — AGPL-3.0 with a commercial license option. See <a href="https://github.com/Xinchen1/LV-Agent" rel="noopener">GitHub</a> for details.</p>
+      </details>
+    </div>
+  </section>
+
+  <!-- Edition comparison -->
+  <section class="compare" id="compare">
+    <div class="section-head reveal">
+      <span class="section-num">§ 09</span>
+      <span class="section-label">Editions</span>
+      <span class="section-tail">Terminal vs. Web</span>
+    </div>
+    <div class="cmp-table reveal">
+      <div class="cmp-row cmp-head">
+        <span>Feature</span><span>Terminal</span><span>Web</span>
+      </div>
+      <div class="cmp-row"><span class="cmp-feat">Multi-round reasoning</span><span class="yes">✓</span><span class="yes">✓</span></div>
+      <div class="cmp-row"><span class="cmp-feat">19+ tools (search, code, file ops)</span><span class="yes">✓</span><span class="yes">✓</span></div>
+      <div class="cmp-row"><span class="cmp-feat">PDF generation</span><span class="yes">✓</span><span class="yes">✓</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Local file access</span><span class="yes">✓ full</span><span class="yes">✓ via FS Access API</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Shell commands (bash)</span><span class="yes">✓ native</span><span class="lim">✓ container</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Browser automation (Playwright)</span><span class="yes">✓</span><span class="yes">✓</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Cross-session memory</span><span class="yes">✓</span><span class="lim">per-session</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Offline mode (Ollama)</span><span class="yes">✓</span><span class="no">—</span></div>
+      <div class="cmp-row"><span class="cmp-feat">No install required</span><span class="no">—</span><span class="yes">✓</span></div>
+      <div class="cmp-row"><span class="cmp-feat">Artifacts panel + download</span><span class="no">—</span><span class="yes">✓</span></div>
+    </div>
+  </section>
+
+  <!-- Pull quote / note -->
+  <section class="note" id="note">
+    <div class="note-veil"></div>
+    <blockquote class="reveal">
+      <span class="quote-mark">“</span>
+      The hand that draws and the mind that reasons are the same instrument —
+      sharpened from different ends.
+      <cite>— studio note, plate VII</cite>
+    </blockquote>
+  </section>
+
+  <!-- Colophon / footer -->
+  <footer class="colophon" id="colophon">
+    <div class="colo-top">
+      <div class="colo-mark">
+        <span class="wm-mark big">LV</span>
+        <div>
+          <div class="colo-name">LV Agent</div>
+          <div class="colo-sub">A Cleveris Research work · Terminal-native intelligence</div>
+        </div>
+      </div>
+      <div class="colo-cols">
+        <div class="colo-col">
+          <span class="colo-h">Product</span>
+          <a href="#features">Features</a>
+          <a href="#tools">Tools</a>
+          <a href="#commands">Commands</a>
+          <a href="#download">Download</a>
+        </div>
+        <div class="colo-col">
+          <span class="colo-h">Source</span>
+          <a href="https://github.com/Xinchen1/LV-Agent" rel="noopener">github / Xinchen1/LV-Agent</a>
+          <a href="https://github.com/Xinchen1/LV-Agent#readme" rel="noopener">README</a>
+        </div>
+        <div class="colo-col">
+          <span class="colo-h">Studio</span>
+          <a href="mailto:studio@cleveris.research">studio@cleveris.research</a>
+          <span>Cleveris Research</span>
+        </div>
+      </div>
+    </div>
+    <div class="colo-rule"></div>
+    <div class="colo-bottom">
+      <span>© MMXXVI Cleveris Research · LV Agent v1.0.0</span>
+      <span class="signature">Cleveris&nbsp;Research ✎</span>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

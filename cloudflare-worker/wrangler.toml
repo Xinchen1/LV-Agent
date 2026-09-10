@@ -1,0 +1,4 @@
+name = "hermes-agent"
+main = "src/index.py"
+compatibility_flags = ["python_workers"]
+compatibility_date = "2026-08-15"
