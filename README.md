@@ -197,6 +197,15 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-09-10
+
+- **全面重构** — 115 文件大规模重构，核心增强：agent.py 添加辅助客户端(AuxiliaryClient)属性，API 密钥兜底机制(NVAPI/OPENAI/LV 三源兜底)，快车道重写(_rewrite_nudge_task/_build_fast_prompt)实现催促/同意词重新注入，_collect_context_parts 方法快慢两路共享上下文(历史+记忆+技能指令)，_build_fast_static_prefix/_build_fast_prompt 通过缓存提升 prompt 构建效率，工具列表重组为“单一事实源”协议；config.yaml 真实 NVIDIA API 密钥安全移除，改用本地 ollama 开发配置；License 标准化为 AGPL-3.0-only across test and source files；test 增加 fast path router、tool subset 等防劫持与工具子集测试用例；desktop UI/交互增强；build_mac_app.sh 扩展至 595 行 macOS .app 构建脚本；云flare-site/worker 新建项目。
+- **API 安全** — 真实 NVAPI 密钥从 config.yaml 中移除，避免泄露至仓库；所有敏感配置改用环境变量或本地开发占位，确保版本控制安全。
+- **许可证框架** — 核心源文件和测试文件统一改为 AGPL-3.0-only 许可证；新增 COMMERCIAL-LICENSE.md 商用授权声明；CONTRIBRIBUTORS.md 更新贡献者授权记录，符合开源合规要求。
+- **核心代码优化** — agent.py 1800+ 行变更：辅助客户端属性用于侧边 LLM 任务（摘要/抽取），API 密钥 fallback 支持 NVAPI_KEY/OPENAI_API_KEY/LV_API_KEY 三源兜底，快车道任务重写处理催促/同意词，上下文收集系统整合历史、记忆和技能指令，静态前缀缓存加速 prompt 构建，工具列表改为单一事实源协议，模型调用路径优化。
+- **测试增强** — 多个测试文件从 MIT 改为 AGPL-3.0-only；test_locate_fastpath.py 新增三个防劫持测试（显式绝对路径优先、首命中即停、超时熔断）；test_tool_subset.py 任务感知工具子集测试；test_*.py 文件改进 mock 隔离机制，防止 GlobTool 全局注册表污染。
+- **配置与构建** — config.yaml 后端从 Ollama 切换配置规范化；build_mac_app.sh 显著扩展用于 macOS .app 包构建；gitignore 更新排除新生成的构建产物。
+
 ### 2026-09-07
 
 - **速度优化** — 限流熔断：连续限流/连接失败达阈值后 60s 内直接 fast-fail，不再每轮烧 35s+ 退避；交互快路 `quick` 模式（2 次尝试、退避减半）。
