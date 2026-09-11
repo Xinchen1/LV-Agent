@@ -189,11 +189,15 @@ def select_tools_for_task(task: str, all_tools: Dict[str, str]) -> Dict[str, str
     """按任务选工具子集: 常驻核心 + 关键词命中加挂; 无命中回退全量(安全)。"""
     if not task:
         return all_tools
+    # 禁止浏览器工具，防止 Playwright 未安装导致失败，强制使用 web_search
+    all_tools = {k: v for k, v in all_tools.items() if k != "browser" and k != "playwright_browser"}
     tl = task.lower()
     want = set(CORE_TOOLS) & set(all_tools)
     for keywords, names in TASK_TOOL_HINTS:
         if any(k in tl for k in keywords):
-            want |= (set(names) & set(all_tools))
+            # 关键词命中时去掉 browser，确保只保留 web_search 等检索工具
+            filtered = {n for n in names if n not in ("browser", "playwright_browser")}
+            want |= (filtered & set(all_tools))
     # 去重: 若 file_ops 已入选，隐藏易幻觉的 mcp_filesystem_*（解析层已映射到 file_ops）
     if "file_ops" in want:
         want = {n for n in want if not n.startswith("mcp_filesystem")}
