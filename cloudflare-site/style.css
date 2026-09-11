@@ -405,6 +405,19 @@ figcaption {
 
 /* ── Features grid ── */
 .features { padding: 110px 0 120px; border-bottom: 1px solid var(--rule); }
+
+/* ── Smarter grid (intelligence polish, v1.1.0) ── */
+.smarter { padding: 110px 0 120px; border-bottom: 1px solid var(--rule); }
+.smarter-grid {
+  max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut);
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 56px 48px;
+}
+.smarter-grid .feature { margin-bottom: 0; }
+.smarter-grid .fig-tag { color: var(--ink-red); font-family: var(--mono); font-size: 11px; letter-spacing: 0.4px; }
+@media (max-width: 820px) {
+  .smarter { padding-top: 80px; padding-bottom: 80px; }
+  .smarter-grid { grid-template-columns: 1fr; gap: 44px; padding: 0 20px; }
+}
 .feature-grid {
   max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut);
   display: grid; grid-template-columns: repeat(2, 1fr); gap: 56px 48px;

@@ -186,6 +186,14 @@ class WorkingMemory:
                 tool_block = f"\n\n## Recent Tool History:\n{tool_history}"
                 if _estimate_tokens(out + tool_block) <= max_tokens:
                     out += tool_block
+        # 衔接增强: 把最近一条工具结果紧跟到当前会话尾部, 确保"搜索→结果"上下文不断裂。
+        tool_results = self.get_events(event_types=["tool_result"], limit=1)
+        if tool_results:
+            last_result = tool_results[-1].content.strip()
+            if last_result and "[工具结果]" not in out:
+                tail = f"\n\n## 最近一次工具结果:\n{last_result[:500]}"
+                if _estimate_tokens(out + tail) <= max_tokens:
+                    out += tail
         return out
 
     def snapshot(self) -> Dict[str, Any]:
@@ -793,6 +801,16 @@ class ContextEngine(ContextProvider):
                     summary = self.compressor.summarize_narrative(old, target_tokens=min(256, budget // 4))
             except Exception:
                 pass
+            # 连接增强: 若被压缩的事件里含工具结果, 把最后一条工具输出也锚进摘要,
+            # 避免长会话恢复后丢失"上一步工具拿到了什么"的关键衔接。
+            tool_results = [e for e in old if e.event_type == "tool_result"]
+            if tool_results:
+                last_tool = tool_results[-1].content[:240].replace("\n", " ")
+                anchor = f"\n[最近工具结果] {last_tool}"
+                if summary:
+                    summary = summary + anchor
+                else:
+                    summary = anchor
             with self.working_memory._lock:
                 new_events = ([first] if first is not None else []) + recent[:]
                 if summary:
