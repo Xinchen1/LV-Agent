@@ -826,6 +826,18 @@ class ExecutionEngine:
                     trace.tools_used.append(call.tool_name)
                     self._emit(ctx, "tool_result", obs)
 
+                # 若本轮未产生最终答案, 立即把工具观察结果作为临时答案透出, 避免用户只看到工具调用 JSON
+                if not parsed.final_answer and exec_results:
+                    # 取最近一次成功工具输出的前 800 字符作为兜底摘要
+                    last_obs = ctx.observations[-1] if ctx.observations else ""
+                    # 简单清理: 去掉过长的 JSON 代码块, 保留可读文本
+                    provisional = last_obs.strip()[:800]
+                    if provisional and not trace.final_answer:
+                        # 直接向 UI 透出内容, 保证搜索结果可见
+                        self._emit(ctx, "content", f"工具执行结果摘要:\n\n{provisional}")
+                        # 同时写入 trace, 便于后续 force_final_answer 使用
+                        trace.observations.append(f"[工具摘要] {provisional}")
+
                 # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
                 DynamicReplanController(self).maybe_replan(ctx, step_number)
 
