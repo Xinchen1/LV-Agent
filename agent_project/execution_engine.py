@@ -830,13 +830,17 @@ class ExecutionEngine:
                 if not parsed.final_answer and exec_results:
                     # 取最近一次成功工具输出的前 800 字符作为兜底摘要
                     last_obs = ctx.observations[-1] if ctx.observations else ""
-                    # 简单清理: 去掉过长的 JSON 代码块, 保留可读文本
                     provisional = last_obs.strip()[:800]
                     if provisional and not trace.final_answer:
+                        summary = f"工具执行结果摘要:\n\n{provisional}"
                         # 直接向 UI 透出内容, 保证搜索结果可见
-                        self._emit(ctx, "content", f"工具执行结果摘要:\n\n{provisional}")
-                        # 同时写入 trace, 便于后续 force_final_answer 使用
+                        self._emit(ctx, "content", summary)
+                        # 同时写入 trace, 避免下一轮继续空转
                         trace.observations.append(f"[工具摘要] {provisional}")
+                        # 若仍未有最终答案, 直接用摘要作为本轮最终答案, 结束循环
+                        record.final_answer = summary
+                        trace.final_answer = summary
+                        trace.success = True
 
                 # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
                 DynamicReplanController(self).maybe_replan(ctx, step_number)
