@@ -63,6 +63,7 @@
     </a>
     <nav class="topnav">
       <a href="#features">Features</a>
+      <a href="#smarter">Smarter</a>
       <a href="#tools">Tools</a>
       <a href="#commands">Commands</a>
       <a href="#web">Web</a>
@@ -71,7 +72,7 @@
       <a href="#download">Download</a>
       <a href="#colophon">Colophon</a>
     </nav>
-    <span class="topbar-meta">v1.0.0 · macOS · Cleveris Research</span>
+    <span class="topbar-meta">V1.1.0 · macOS · Cleveris Research</span>
     <a class="lang-btn" href="index.html">中文</a>
   </header>
 
@@ -109,7 +110,7 @@
       </div>
       <div class="term-body">
         <div class="term-line"><span class="term-prompt">~/lv-agent</span> <span class="term-sym">$</span> lv</div>
-        <div class="term-line term-dim">LV Agent v1.0.0 · Harness kernel · 19 tools loaded</div>
+        <div class="term-line term-dim">LV Agent v1.1.0 · Harness kernel · 19 tools loaded</div>
         <div class="term-line term-dim">DeepSeek-V4-Flash · workspace: ~/projects</div>
         <div class="term-line"><span class="term-bracket">›</span> Search Python 3.13 new features and generate a PDF report</div>
         <div class="term-line term-agent"><span class="term-tag">thinking</span> I'll search for Python 3.13 features, then use pdf_tool to generate a report.</div>
@@ -209,10 +210,57 @@
     </div>
   </section>
 
+  <!-- Smarter -->
+  <section class="smarter reveal" id="smarter">
+    <div class="section-head reveal">
+      <span class="section-num">§ 03</span>
+      <span class="section-label">Smarter</span>
+      <span class="section-tail">v1.1.0 · Intelligence polish</span>
+    </div>
+    <div class="smarter-grid">
+      <article class="feature reveal">
+        <div class="feat-body">
+          <span class="fig-tag">NEW</span>
+          <h3>Auto tool routing</h3>
+          <p>Repetitive tool hallucinations are corrected at parse time: MCP filesystem calls are transparently mapped to native file ops, and browser attempts route to web search. Fewer dead loops, faster answers.</p>
+          <ul class="feat-points">
+            <li>mcp_filesystem_* → file_ops / search_files</li>
+            <li>Browser → web_search fallback</li>
+            <li>Generic queries auto-anchored to the entity domain</li>
+          </ul>
+        </div>
+      </article>
+      <article class="feature reveal">
+        <div class="feat-body">
+          <span class="fig-tag">NEW</span>
+          <h3>Coherent context anchors</h3>
+          <p>Long sessions keep the last tool result anchored to the conversation tail, and compressed history preserves the most recent tool outcome — so "search → result → conclusion" never breaks mid-thought.</p>
+          <ul class="feat-points">
+            <li>Tool result anchored to recent turn</li>
+            <li>Compression keeps last observation</li>
+            <li>Provisional answer emitted after tool use</li>
+          </ul>
+        </div>
+      </article>
+      <article class="feature reveal">
+        <div class="feat-body">
+          <span class="fig-tag">NEW</span>
+          <h3>Self-summarizing loops</h3>
+          <p>If the model calls a tool but forgets to conclude, the engine synthesizes a summary from the tool output and stops — no more empty tool-call JSON with no result.</p>
+          <ul class="feat-points">
+            <li>Auto finalize from observations</li>
+            <li>Repeat-call convergence guard</li>
+            <li>Failure hints injected inline</li>
+          </ul>
+        </div>
+      </article>
+    </div>
+  </section>
+
   <!-- Tools -->
   <section class="practice" id="tools">
     <div class="section-head reveal">
-      <span class="section-num">§ 03</span>
+      <span class="section-num">§ 04</span>
       <span class="section-label">Tools</span>
     </div>
     <ol class="practice-list">
@@ -254,7 +302,7 @@
   <!-- Commands -->
   <section class="commands" id="commands">
     <div class="section-head reveal">
-      <span class="section-num">§ 04</span>
+      <span class="section-num">§ 05</span>
       <span class="section-label">Commands</span>
       <span class="section-tail">Out of the box</span>
     </div>
@@ -287,9 +335,9 @@
   <section class="download" id="download">
     <div class="download-veil"></div>
     <div class="section-head reveal">
-      <span class="section-num">§ 05</span>
+      <span class="section-num">§ 06</span>
       <span class="section-label">Download</span>
-      <span class="section-tail">macOS · v1.0.0</span>
+      <span class="section-tail">macOS · v1.1.0</span>
     </div>
     <div class="dl-grid">
       <a class="dl-card reveal" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.0.0/LV.Agent-1.0.0-arm64.dmg" rel="noopener">
@@ -338,7 +386,7 @@
   <!-- Web Edition -->
   <section class="web-edition" id="web">
     <div class="section-head reveal">
-      <span class="section-num">§ 06</span>
+      <span class="section-num">§ 07</span>
       <span class="section-label">Web Edition</span>
       <span class="section-tail">The same mind, in your browser</span>
     </div>
@@ -400,7 +448,7 @@
   <!-- Quick Start -->
   <section class="quickstart" id="quickstart">
     <div class="section-head reveal">
-      <span class="section-num">§ 07</span>
+      <span class="section-num">§ 08</span>
       <span class="section-label">Quick Start</span>
       <span class="section-tail">From zero to agent in 60 seconds</span>
     </div>
@@ -456,7 +504,7 @@
   <!-- FAQ -->
   <section class="faq" id="faq">
     <div class="section-head reveal">
-      <span class="section-num">§ 08</span>
+      <span class="section-num">§ 09</span>
       <span class="section-label">FAQ</span>
       <span class="section-tail">Questions from the studio</span>
     </div>
@@ -491,7 +539,7 @@
   <!-- Edition comparison -->
   <section class="compare" id="compare">
     <div class="section-head reveal">
-      <span class="section-num">§ 09</span>
+      <span class="section-num">§ 10</span>
       <span class="section-label">Editions</span>
       <span class="section-tail">Terminal vs. Web</span>
     </div>
@@ -555,7 +603,7 @@
     </div>
     <div class="colo-rule"></div>
     <div class="colo-bottom">
-      <span>© MMXXVI Cleveris Research · LV Agent v1.0.0</span>
+      <span>© MMXXVI Cleveris Research · LV Agent v1.1.0</span>
       <span class="signature">Cleveris&nbsp;Research ✎</span>
     </div>
   </footer>
