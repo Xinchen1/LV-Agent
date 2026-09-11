@@ -546,4 +546,7 @@ class ReasoningEngine:
         complexity += min(cn_matches * 0.1, 0.4)
         if any(word in task_lower for word in ["search", "find", "lookup", "file", "api", "web", "项目", "文件夹", "代码", "数据库", "文件"]):
             complexity += 0.2
+        # 计数类任务需验证，必须给足预算
+        if any(word in task for word in ["几个", "多少", "统计", "总数", "计数"]):
+            complexity += 0.3
         return min(complexity, 1.0)

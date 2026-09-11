@@ -87,17 +87,45 @@ class ToolCallParser:
             if tool is None:
                 tool = registry.get(tool_name.strip().lower())
             if tool is None:
-                # 别名纠错: LLM 常用 run_code/search/file 等别名, 映射到合法工具
-                _alias_map = {
-                    "run_code": "python_exec", "code": "python_exec",
-                    "search": "web_search", "calc": "calculator", "file": "file_ops",
-                    "shell": "bash_exec", "terminal": "bash_exec", "grep": "search_files",
+                # MCP filesystem 幻觉纠偏: 模型高频输出 mcp_filesystem_* 但原生 file_ops 更稳定
+                # 统一重定向到 file_ops/search_files，避免 allowed_dirs 隔离导致的循环失败
+                _mcp_fs_map = {
+                    "mcp_filesystem_read_file": ("file_ops", {"action": "read"}),
+                    "mcp_filesystem_read_text_file": ("file_ops", {"action": "read"}),
+                    "mcp_filesystem_get_file_info": ("file_ops", {"action": "exists"}),
+                    "mcp_filesystem_list_directory": ("file_ops", {"action": "list"}),
+                    "mcp_filesystem_list_allowed_directories": ("file_ops", {"action": "list"}),
+                    "mcp_filesystem_write_file": ("file_ops", {"action": "write"}),
+                    "mcp_filesystem_search_files": ("search_files", {}),
+                    "mcp_filesystem_create_directory": ("file_ops", {"action": "list"}),
                 }
-                _canon = _alias_map.get(tool_name.strip().lower())
-                if _canon:
-                    tool = registry.get(_canon)
+                _lower = tool_name.strip().lower()
+                if _lower in _mcp_fs_map:
+                    _canon_name, _extra = _mcp_fs_map[_lower]
+                    tool = registry.get(_canon_name)
+                    if tool is not None:
+                        # 合并额外参数（如 action），不覆盖用户已提供的同名键
+                        for _k, _v in _extra.items():
+                            if _k not in args:
+                                args[_k] = _v
+                        tool_name = _canon_name
+                        # 路径参数兼容: MCP 用 path，file_ops 亦用 path，直接透传
+                        # 若 MCP 的 list_allowed_directories 无 path，补为 Desktop
+                        if tool_name == "file_ops" and not args.get("path"):
+                            if _lower == "mcp_filesystem_list_allowed_directories":
+                                args["path"] = "~/Desktop"
                 if tool is None:
-                    return
+                    # 别名纠错: LLM 常用 run_code/search/file 等别名, 映射到合法工具
+                    _alias_map = {
+                        "run_code": "python_exec", "code": "python_exec",
+                        "search": "web_search", "calc": "calculator", "file": "file_ops",
+                        "shell": "bash_exec", "terminal": "bash_exec", "grep": "search_files",
+                    }
+                    _canon = _alias_map.get(_lower)
+                    if _canon:
+                        tool = registry.get(_canon)
+                    if tool is None:
+                        return
             # 统一使用注册名, 后续 file_ops/python_exec 特判也用注册名
             tool_name = tool.name if hasattr(tool, "name") else tool_name
             if tool_name == "file_ops":
@@ -1011,6 +1039,7 @@ Rules:
 - VERIFY WITH THE RIGHT TOOL: Use file_ops verify for syntax checks, not python_exec.
 - IF A TOOL FAILS, pivot immediately; do NOT retry the exact same failed call more than once.
 - If you see 'SYSTEM SKIP: You already executed...', do NOT repeat that tool call.
+- COUNTING: When counting files/folders/items, NEVER guess. MUST verify with bash_exec `ls -1 path | wc -l` or python_exec `len(list(...))` and report the tool's numeric result.
 """
         if extra_context:
             base += f"\n\n{extra_context}\n"
