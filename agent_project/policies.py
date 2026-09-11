@@ -86,35 +86,33 @@ class ToolCallParser:
                 tool = registry.get(tool_name.lower())
             if tool is None:
                 tool = registry.get(tool_name.strip().lower())
+            # MCP filesystem 幻觉纠偏: 模型高频输出 mcp_filesystem_* 但原生 file_ops 更稳定
+            # 统一重定向到 file_ops/search_files，避免 allowed_dirs 隔离导致的循环失败
+            _mcp_fs_map = {
+                "mcp_filesystem_read_file": ("file_ops", {"action": "read"}),
+                "mcp_filesystem_read_text_file": ("file_ops", {"action": "read"}),
+                "mcp_filesystem_get_file_info": ("file_ops", {"action": "exists"}),
+                "mcp_filesystem_list_directory": ("file_ops", {"action": "list"}),
+                "mcp_filesystem_list_allowed_directories": ("file_ops", {"action": "list"}),
+                "mcp_filesystem_write_file": ("file_ops", {"action": "write"}),
+                "mcp_filesystem_search_files": ("search_files", {}),
+                "mcp_filesystem_create_directory": ("file_ops", {"action": "list"}),
+            }
+            _lower = tool_name.strip().lower()
+            if _lower in _mcp_fs_map:
+                _canon_name, _extra = _mcp_fs_map[_lower]
+                # 强制重定向，即使 registry 中存在 mcp_* 工具也使用 file_ops
+                for _k, _v in _extra.items():
+                    if _k not in args:
+                        args[_k] = _v
+                tool_name = _canon_name
+                tool = registry.get(_canon_name)
+                # 路径参数兼容: MCP 用 path，file_ops 亦用 path，直接透传
+                # 若 MCP 的 list_allowed_directories 无 path，补为 Desktop
+                if tool_name == "file_ops" and not args.get("path"):
+                    if _lower == "mcp_filesystem_list_allowed_directories":
+                        args["path"] = "~/Desktop"
             if tool is None:
-                # MCP filesystem 幻觉纠偏: 模型高频输出 mcp_filesystem_* 但原生 file_ops 更稳定
-                # 统一重定向到 file_ops/search_files，避免 allowed_dirs 隔离导致的循环失败
-                _mcp_fs_map = {
-                    "mcp_filesystem_read_file": ("file_ops", {"action": "read"}),
-                    "mcp_filesystem_read_text_file": ("file_ops", {"action": "read"}),
-                    "mcp_filesystem_get_file_info": ("file_ops", {"action": "exists"}),
-                    "mcp_filesystem_list_directory": ("file_ops", {"action": "list"}),
-                    "mcp_filesystem_list_allowed_directories": ("file_ops", {"action": "list"}),
-                    "mcp_filesystem_write_file": ("file_ops", {"action": "write"}),
-                    "mcp_filesystem_search_files": ("search_files", {}),
-                    "mcp_filesystem_create_directory": ("file_ops", {"action": "list"}),
-                }
-                _lower = tool_name.strip().lower()
-                if _lower in _mcp_fs_map:
-                    _canon_name, _extra = _mcp_fs_map[_lower]
-                    tool = registry.get(_canon_name)
-                    if tool is not None:
-                        # 合并额外参数（如 action），不覆盖用户已提供的同名键
-                        for _k, _v in _extra.items():
-                            if _k not in args:
-                                args[_k] = _v
-                        tool_name = _canon_name
-                        # 路径参数兼容: MCP 用 path，file_ops 亦用 path，直接透传
-                        # 若 MCP 的 list_allowed_directories 无 path，补为 Desktop
-                        if tool_name == "file_ops" and not args.get("path"):
-                            if _lower == "mcp_filesystem_list_allowed_directories":
-                                args["path"] = "~/Desktop"
-                if tool is None:
                     # 别名纠错: LLM 常用 run_code/search/file 等别名, 映射到合法工具
                     _alias_map = {
                         "run_code": "python_exec", "code": "python_exec",
