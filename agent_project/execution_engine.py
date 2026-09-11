@@ -385,6 +385,11 @@ class ConvergenceChecker:
             return True
         if step_number >= ctx.max_steps:
             return True
+        # 重复调用检测不受 min_steps 限制，避免 budget=1 时无限重试
+        for call in policy_output.tool_calls:
+            key = f"{call.tool_name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
+            if ctx.call_counts.get(key, 0) >= 2:
+                return True
         if step_number < self.min_steps:
             return False
 
@@ -1084,7 +1089,24 @@ class ExecutionEngine:
         results = self.tool_executor.execute_calls(pending, ctx)
         for call, obs, ok in results:
             key = json.dumps({"name": call.tool_name, "args": call.arguments}, sort_keys=True, ensure_ascii=False)
-            ctx.executed_calls[key] = obs
+            # 仅缓存成功结果，失败不入缓存以免后续去重误判为“已有结果”而空转
+            if ok and "Tool not found" not in obs and "Tool error" not in obs[:30]:
+                ctx.executed_calls[key] = obs
+            else:
+                # 失败时注入纠偏提示，避免模型原地重试同一错误调用
+                if "Tool not found" in obs:
+                    obs = obs + " → 提示: 请改用 file_ops/search_files/bash_exec 等原生工具。"
+                elif "No such file" in obs or "not found" in obs.lower():
+                    obs = obs + " → 提示: 路径不存在，试 file_ops list 父目录或用 bash_exec find 定位。"
+                elif obs.strip().lower() == "false" and call.tool_name == "file_ops" and call.arguments.get("action") == "exists":
+                    obs = obs + " → 提示: 文件不存在，试 file_ops list ~/Desktop 或 glob **/*agim* 定位。"
+                elif "browser" in call.tool_name.lower() and "Playwright not installed" in obs:
+                    obs = obs + " → 提示: 浏览器工具不可用，改用 read_web 或 web_search 替代。"
+                # 更新 results 中的 obs
+                for idx, (c, o, s) in enumerate(results):
+                    if c == call:
+                        results[idx] = (c, obs, ok)
+                        break
         return results + duplicate_results
 
     def _force_final_answer(self, ctx: ExecutionContext, extra: str = "", max_obs: int = 3) -> str:

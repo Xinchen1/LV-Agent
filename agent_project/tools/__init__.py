@@ -194,6 +194,11 @@ def select_tools_for_task(task: str, all_tools: Dict[str, str]) -> Dict[str, str
     for keywords, names in TASK_TOOL_HINTS:
         if any(k in tl for k in keywords):
             want |= (set(names) & set(all_tools))
+    # 去重: 若 file_ops 已入选，隐藏易幻觉的 mcp_filesystem_*（解析层已映射到 file_ops）
+    if "file_ops" in want:
+        want = {n for n in want if not n.startswith("mcp_filesystem")}
+        # 同时从候选池移除，避免后续全量回退时再次暴露
+        all_tools = {k: v for k, v in all_tools.items() if not k.startswith("mcp_filesystem") or k in want}
     if len(want) >= len(all_tools):
         return all_tools
     return {n: all_tools[n] for n in all_tools if n in want}
