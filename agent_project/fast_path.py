@@ -84,6 +84,9 @@ _SIMPLE_GREETING_PATTERNS = [
     re.compile(r'^(谢|对)[!!??,,.!\s]*$', re.IGNORECASE),
 ]
 
+# 自我能力查询：无需工具，直接回答
+_SELF_CAPABILITY_PATTERN = re.compile(r'(你都有?什么功能|你能(做|干)什么|你会(什么|哪些)|介绍.*功能|有哪些功能)', re.IGNORECASE)
+
 _READ_FOLDER_PATTERN = re.compile(r"(看下|看一下|看看|查看|浏览|打开|读一下|读取)\s*[^，。！？!?]{1,40}?(文件夹|目录|folder|dir)")
 _ANALYZE_FOLDER_PATTERN = re.compile(r"(分析|剖析|解析)\s*[^，。！？!?]{1,30}")
 _ANALYZE_NAME_FIRST_PATTERN = re.compile(r"[^，。！？!?]{1,30}?(分析下|分析一下|分析|剖析|解析)$")
@@ -341,6 +344,10 @@ class SimpleQueryClassifier:
         for pattern in _SIMPLE_GREETING_PATTERNS:
             if pattern.match(task_lower):
                 return True
+
+        # 2.1) 自我能力查询 → fast（直接回答，无需工具）
+        if _SELF_CAPABILITY_PATTERN.search(task):
+            return True
 
         # 2.5) 明确"看/读 X 文件夹/目录" → fast
         if _READ_FOLDER_PATTERN.search(task):
