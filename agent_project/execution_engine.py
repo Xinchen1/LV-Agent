@@ -841,6 +841,10 @@ class ExecutionEngine:
                         record.final_answer = summary
                         trace.final_answer = summary
                         trace.success = True
+                        # 立即结束本次任务循环, 避免继续空转
+                        ctx.steps.append(record)
+                        trace.steps.append(record)
+                        break
 
                 # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
                 DynamicReplanController(self).maybe_replan(ctx, step_number)
