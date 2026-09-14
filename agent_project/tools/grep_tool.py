@@ -411,8 +411,13 @@ class GlobTool(BaseTool):
         max_results: int,
         deadline: float,
     ) -> tuple:
-        """Shell out to ``find`` with prune-skip + -name matching; stream & cap results."""
-        # pattern 的末段作为 basename 匹配; src/**, … 的多级结构交给 find 自身递归
+        """Shell out to ``find`` with prune-skip + -name matching; stream & cap results.
+
+        Bash glob semantics: `**` → recursive search; any other pattern (e.g. `*`,
+        `*.py`) matches CURRENT level only, exactly like `ls path/*.py`.
+        """
+        # pattern 含 `**` 才递归; 否则仅当前层(与 bash glob 一致, 避免 * 全盘倾倒)
+        recursive = "**" in pattern
         name_part = pattern.rsplit("/", 1)[-1]
         if name_part in ("", "*", "**"):
             name_part = "*"
@@ -420,7 +425,11 @@ class GlobTool(BaseTool):
 
         # find 默认自带 nestable 剪枝; hidden + 巨型目录不递归
         prune_names = list(SKIP_DIRS) + [".*"]
-        args = ["find", str(search_path), "("]
+        args = ["find", str(search_path)]
+        if not recursive:
+            args.append("-maxdepth")
+            args.append("1")
+        args += ["("]
         for i, dn in enumerate(prune_names):
             if i:
                 args.append("-o")
@@ -476,6 +485,7 @@ class GlobTool(BaseTool):
         """Pure-Python os.walk fallback with the same prune semantics when find is missing."""
         import fnmatch
 
+        recursive = "**" in pattern
         name_part = pattern.rsplit("/", 1)[-1]
         if name_part in ("", "*", "**"):
             name_part = "*"
@@ -483,6 +493,30 @@ class GlobTool(BaseTool):
 
         rels: List[str] = []
         timed_out = False
+        if not recursive:
+            dirnames: List[str] = []
+            filenames: List[str] = []
+            try:
+                for e in os.scandir(search_path):
+                    if e.is_dir(follow_symlinks=True):
+                        dirnames.append(e.name)
+                    else:
+                        filenames.append(e.name)
+            except OSError:
+                dirnames = filenames = []
+            for name in sorted(dirnames + filenames):
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                if name in SKIP_DIRS or name.startswith("."):
+                    continue
+                if not any(fnmatch.fnmatch(name, p) for p in name_patterns):
+                    continue
+                rels.append(name)
+                if len(rels) >= max_results + 1:
+                    break
+            return rels[:max_results], len(rels) > max_results, timed_out
+
         for root, dirnames, filenames in os.walk(search_path):
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
             if time.monotonic() > deadline:
