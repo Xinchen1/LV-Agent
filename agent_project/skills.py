@@ -172,7 +172,7 @@ BUILTIN_SKILLS: List[Dict[str, Any]] = [
         "description": "Read, write, list, and organize local files and folders.",
         "tags": ["files", "filesystem"],
         "trigger_keywords": ["文件", "folder", "打开文件", "read file", "list files", "整理文件"],
-        "preferred_tools": ["file_ops", "bash_exec", "grep_tool", "glob_tool"],
+        "preferred_tools": ["file_ops", "bash_exec", "search_files", "glob"],
         "prompt_template": (
             "You are a file-system assistant. Task: {{task}}\n\n"
             "Protocol:\n"
