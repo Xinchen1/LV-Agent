@@ -116,6 +116,7 @@ class OpenMythosAgent:
         self._strategy_override: Optional[str] = None
         self._last_matched_strategy_id: Optional[str] = None
         self._code_mode_override: bool = False
+        self._last_training_episode: int = 0
 
         # 动态 token 统计（连接真实 LLM 调用）
         self.session_token_usage = {"total": 0, "stream": [], "last_call_tokens": 0}
@@ -2959,23 +2960,53 @@ class OpenMythosAgent:
                                       stream_callback, _already_streamed)
 
     def _extract_confidence(self, raw_output: str) -> float:
-        """从模型原始输出(含 <think>)中提取置信度, 供内部自校正使用.
+        """从模型原始输出(含 <thinking>)中提取置信度, 供内部自校正使用.
 
-        默认 0.5; 仅在 think 中发现"置信度: X.XX"格式时返回实际值。
+        默认 0.5; 仅在 think 中发现置信度自评时返回实际值。
+        支持的格式(依次尝试, 首个命中即返回):
+          - 小数:   "置信度: 0.85" / "confidence: 0.853" / "置信度: .8"
+          - 百分比: "置信度: 85%" (85/100)
+          - 括号:   "置信度不高(0.62)" / "confidence (0.88)"
+          - 整数:   "confidence: 90" → 0.90 (仅接受 0~100)
         置信度仅供内部评估, 不会展示给用户。
         """
         if not raw_output:
             return 0.5
-        # 置信度通常写在 think 内; 直接全局搜索一次即可(think 内也属于 raw_output)。
-        cm = re.search(r'(?:置信度|confidence)\s*[:：]\s*(0?\.\d{1,2})', raw_output, re.IGNORECASE)
-        if cm:
-            try:
-                val = float(cm.group(1))
-                return max(0.0, min(1.0, val))
-            except ValueError:
-                pass
-        return 0.5
 
+        # 1) 小数(≥1位小数, 可带前导0或省略): 0.85 / .8 / 0.853
+        m = re.search(
+            r'(?:置信度|confidence)\s*[:：]?\s*\(?\s*((?:0?\.\d{1,3}))',
+            raw_output, re.IGNORECASE,
+        )
+        if m:
+            return max(0.0, min(1.0, float(m.group(1))))  # 捕获组保证为纯小数
+
+        # 2) 百分比: "置信度: 85%" → 0.85
+        m = re.search(
+            r'(?:置信度|confidence)\s*[:：]?\s*(\d{1,3})\s*%', raw_output, re.IGNORECASE,
+        )
+        if m:
+            return max(0.0, min(1.0, int(m.group(1)) / 100.0))
+
+        # 3) 括号内小数, 如 "置信度不高(0.62)"
+        m = re.search(
+            r'(?:置信度|confidence)[^0-9]{0,20}\(?\s*(0?\.\d{1,3})\)?',
+            raw_output, re.IGNORECASE,
+        )
+        if m:
+            return max(0.0, min(1.0, float(m.group(1))))  # 捕获组保证为纯小数
+
+        # 4) 整数置信度(0~100): "confidence: 90" → 0.90
+        m = re.search(
+            r'(?:置信度|confidence)\s*[:：]?\s*(\d{1,3})\s*(?!%)\b',
+            raw_output, re.IGNORECASE,
+        )
+        if m:
+            v = int(m.group(1))  # 捕获组保证为 1~3 位整数
+            if 0 <= v <= 100:
+                return v / 100.0
+
+        return 0.5
     def _clean_fast_answer(self, text: str) -> str:
         """清理 fast path 回复中的多余内容: think 标签残留与尾部回声.
 
@@ -5112,22 +5143,28 @@ class OpenMythosAgent:
         return True
 
     def _trigger_self_improvement(self):
-        """触发自我改进循环(反思失败案例 + 提取策略 + 可选微调)."""
+        """触发自我改进循环: 反思失败 + 提取策略 + (按需)微调训练.
+
+        三个环节相互解耦, 各自失败不影响其余:
+          1. 反思失败案例 → lessons 回灌
+          2. 从成功案例提取策略 → strategy_db
+          3. 训练: 满足 auto_training 配置 或 self_correction 判定可再训练时
+             生成 SFT 数据集(经验→JSONL) 并可选提交上传 fine-tune。
+        """
         self.logger.info("self-improvement...")
         try:
-            # 1. 反思失败案例
+            # 1. 反思失败案例(注意: 无失败也要继续策略提取/训练, 不能提前 return)
             if not self.experience_buffer or not self.reflection_module:
                 self.logger.info("self-improvement skipped (modules unavailable)")
                 return
             recent_failures = self.experience_buffer.get_failures(n=10)
-            if not recent_failures:
-                self.logger.info("no failures")
-                return
-
-            reflections = self.reflection_module.batch_reflect(recent_failures)
-            self.logger.info(f"reflections {len(reflections)}")
-            # 反思洞察回灌为 lessons, 让后续任务真正受益
-            self._store_reflection_lessons(recent_failures, reflections)
+            if recent_failures:
+                reflections = self.reflection_module.batch_reflect(recent_failures)
+                self.logger.info(f"reflections {len(reflections)}")
+                # 反思洞察回灌为 lessons, 让后续任务真正受益
+                self._store_reflection_lessons(recent_failures, reflections)
+            else:
+                self.logger.info("no failures to reflect on")
 
             # 2. 从所有成功案例中提取策略(包括反思带来的新洞察)
             if self.strategy_db:
@@ -5141,8 +5178,17 @@ class OpenMythosAgent:
                     for strat in new_strategies:
                         self.logger.info(f"strategy: {strat.task_type} {strat.pattern[:40]}{'...' if len(strat.pattern) > 40 else ''}")
 
-            # 3. (可选)生成训练数据并微调
-            if self.config.self_improvement.auto_training:
+            # 3. 训练触发: 显式配置 + self_correction 的劣化信号都能触发
+            want_train = bool(getattr(self.config.self_improvement, 'auto_training', False))
+            if not want_train and self.self_correction:
+                try:
+                    should, reason = self.self_correction.should_trigger_retraining()
+                    if should:
+                        self.logger.info(f"retraining signal from SelfCorrection: {reason}")
+                        want_train = True
+                except Exception as e:
+                    self.logger.debug(f"retraining signal check failed: {e}")
+            if want_train:
                 self._generate_and_train()
 
             self.logger.info("self-improvement done")
@@ -5185,10 +5231,83 @@ class OpenMythosAgent:
             self.logger.info(f"lessons {stored} (from reflection)")
 
     def _generate_and_train(self):
-        """生成训练数据并微调模型(placeholder)"""
-        self.logger.info("training data")
-        # TODO: 实现TrainingDataGenerator逻辑
-        # TODO: 调用训练脚本
-        pass
+        """生成训练数据并微调模型.
+
+        闭环: experience_buffer → SFT 数据集(JSONL) → (可选) 云端 fine-tune。
+        训练成本高, 必须同时满足:
+          - self_improvement.auto_training = true
+          - 数据集 ≥ training.min_episodes 条
+          - 距上次训练 ≥ retraining_frequency 个 episode(冷却)
+        失败/未满足条件时仅记录, 不影响主流程。
+        """
+        try:
+            from .training_data import run_training_pipeline
+        except Exception as e:
+            self.logger.warning(f"training module unavailable: {e}")
+            return
+
+        if not self.experience_buffer:
+            self.logger.info("training skipped: no experience buffer")
+            return
+
+        train_cfg = self.config.self_improvement.training or {}
+        min_eps = int(train_cfg.get("min_episodes", 20) or 20)
+        freq = int(train_cfg.get("retraining_frequency", 10) or 10)
+        dataset_dir = str(train_cfg.get("dataset_dir", "./data/train") or "./data/train")
+        train_mode = str(train_cfg.get("train_mode", "export") or "export")
+
+        episodes = list(self.experience_buffer.get_recent(n=5000, success_only=True)[:2000])
+
+        # 冷却检查: 距上次训练至少 retraining_frequency 个 episode
+        last_train = getattr(self, "_last_training_episode", -freq)
+        cooled = (self.episodes_completed - last_train) >= freq
+        if not cooled:
+            self.logger.info(f"training skipped: cooldown active (last {self.episodes_completed-last_train}/{freq})")
+            return
+
+        if len(episodes) < min_eps:
+            self.logger.info(f"training skipped: only {len(episodes)} episodes (< {min_eps})")
+            return
+
+        # 从配置/后端取 api 凭据 (绝不在代码里写死)
+        api_key = None
+        base_url = None
+        model = train_cfg.get("model", "")
+        if train_mode == "api":
+            backend = getattr(self, "backend", None)
+            base_url = getattr(backend, "base_url", None) or ""
+            api_key = getattr(backend, "api_key", None) or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                self.logger.warning("training: train_mode=api but no api_key available; falling back to export")
+                train_mode = "export"
+
+        report = run_training_pipeline(
+            episodes,
+            output_dir=dataset_dir,
+            train_mode=train_mode,
+            api_key=api_key,
+            base_url=base_url,
+            model=model or getattr(getattr(self, "backend", None), "model", None),
+            min_episodes=min_eps,
+            include_failures=False,
+        )
+        self._last_training_episode = self.episodes_completed
+        self.logger.info(
+            f"training: status={report.get('status')} "
+            f"train={report.get('train_count', 0)} valid={report.get('valid_count', 0)} "
+            f"dir={report.get('output_dir', '')} "
+            f"finetune={report.get('finetune', {}).get('status')}"
+        )
+        try:
+            self._log_to_file(f"self-training report: {json.dumps(report, ensure_ascii=False)[:500]}")
+        except Exception as e:
+            self.logger.debug(f"self-training report log failed: {e}")
+
+        # 训练完成 → 通知 UI/其它模块(不阻塞)
+        if getattr(self, "_status", None):
+            try:
+                self._status(None, f"training: {report.get('train_count', 0)} samples exported")
+            except Exception as e:
+                self.logger.debug(f"training status emit failed: {e}")
 
     # ============ 推理接口 ============

@@ -116,10 +116,16 @@ class ReflectionConfig(BaseModel):
 
 class SelfImprovementConfig(BaseModel):
     enabled: bool = True
-    auto_training: bool = False
+    auto_training: bool = True
     training: Dict[str, Any] = Field(default_factory=lambda: {
         "sft_epochs": 1, "learning_rate": 1e-5,
-        "batch_size": 2, "gradient_accumulation_steps": 4
+        "batch_size": 2, "gradient_accumulation_steps": 4,
+        # 经验→SFT 数据集相关(自进化闭环):
+        "dataset_dir": "./data/train",   # 导出路径
+        "min_episodes": 20,              # 至少累积多少条经验才训练
+        "retraining_frequency": 10,      # 距上次训练至少隔多少 episode
+        "train_mode": "export",          # "export"(本地导出) | "api"(云端fine-tune)
+        "model": "",                     # fine-tune 目标模型(空=用当前后端模型)
     })
 
 

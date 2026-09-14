@@ -77,12 +77,17 @@ reflection:
   reflections_path: ./data/reflections
 self_improvement:
   enabled: true
-  auto_training: false
+  auto_training: true
   training:
     sft_epochs: 1
     learning_rate: 1.0e-05
     batch_size: 2
     gradient_accumulation_steps: 4
+    dataset_dir: ./data/train
+    min_episodes: 20
+    retraining_frequency: 10
+    train_mode: export
+    model: ''
 tools:
   enabled: []
   web_search:
@@ -107,11 +112,15 @@ tools:
       36kr.com: 0.75
       techcrunch.com: 0.75
   file_ops:
-    enabled: false
+    enabled: true
     allowed_dirs:
     - ./data
     - ./workspace
-    max_file_size: 1048576
+    - .
+    - ${HOME}
+    - ${HOME}/Desktop
+    - /tmp
+    max_file_size: 10485760
   code_exec:
     enabled: false
     timeout: 10
@@ -138,6 +147,8 @@ tools:
     enabled: false
   database:
     enabled: false
+  calculator:
+    enabled: true
   telegram:
     enabled: false
     bot_token: null
@@ -263,9 +274,9 @@ agent:
   backend: openai
   openai:
     api_key: ollama
-    base_url: http://localhost:11434/v1
-    model: qwen2.5-coder:7b
-    temperature: 0.7
-    top_p: 0.9
-    max_tokens: 4096
+    base_url: https://integrate.api.nvidia.com/v1
+    model: poolside/laguna-xs-2.1
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
     timeout: 120
