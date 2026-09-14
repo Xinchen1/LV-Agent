@@ -1049,8 +1049,9 @@ Rules:
 - DO NOT repeat the same tool call with the same arguments.
 - DO NOT invent tools not in the Available tools list.
 - Final Answer must be plain text, not a tool call.
-- LOCAL FILES: If the task asks about files/articles/documents in the current directory, FIRST use file_ops to list, then read. Do NOT search the web before checking local files.
-- LOCATE FIRST: For finding projects/folders/files by name, use bash_exec `find` or search_files directly.
+- LOCAL FILES: If the task asks about files/articles/documents in the current directory, FIRST use file_ops to list (backed by bash `ls -aF`), then read. Do NOT search the web before checking local files.
+- LOCATE FIRST: For finding projects/folders/files by name, use glob/bash_exec `find` or search_files directly.
+- BASH STYLE: Viewing/searches behave like the terminal — prefer bash-style patterns (ls/find/rg) for exploring folders; use glob for "files of a type anywhere", search_files for "does any file contain X".
 - OPEN FILES: When the user says 'open' / '打开' a file, folder, or report, immediately use file_ops with action='open' and the exact path. This launches it with the default system application (Preview, Finder, browser, etc.). Do NOT just say it is saved; open it.
 - PARTIAL READS: Use file_ops with offset and limit when only a range is needed.
 - PROJECT ANALYSIS: For analyzing a project, FIRST use project_context, then read key files.

@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import time
+import contextlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
@@ -152,11 +153,15 @@ class GrepTool(BaseTool):
             args += ["-g", f"!{glob_excl}"]
         args += ["--max-columns", "500"]
         args.append(query)
+        if os.path.isdir(path):
+            args.append(".")
+        else:
+            args.append(os.path.basename(path))
 
         try:
             proc = subprocess.run(
                 args,
-                cwd=path,
+                cwd=os.path.dirname(path) if not os.path.isdir(path) else path,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -291,14 +296,14 @@ class GrepTool(BaseTool):
 
 
 class GlobTool(BaseTool):
-    """Find files matching glob patterns with respect for .gitignore."""
+    """Find files matching glob patterns via the bash ``find`` command (fast, pruned)."""
 
     name = "glob"
     description = (
         "Find files matching glob patterns like **/*.py, **/*.{ts,js}, or src/**/*.json. "
-        "Recursively searches from the given path. "
-        "Use when you know the FILE TYPE but not the exact filename. "
-        "More powerful than ls for discovering project structure."
+        "Uses the system 'find' command, prunes huge/generated directories (node_modules, .git, "
+        "target, ...) and hidden entries, and is timeout-bounded so it never hangs on big folders. "
+        "Use when you know the FILE TYPE but not the exact filename."
     )
 
     parameters = {
@@ -323,7 +328,17 @@ class GlobTool(BaseTool):
     }
 
     def __init__(self):
-        self._rg_available = shutil.which("rg") is not None
+        self._find = shutil.which("find")
+
+    @staticmethod
+    def _expand_braces(pattern: str) -> List[str]:
+        """Expand a single '{a,b,c}' group into plain globs (bash-style)."""
+        m = re.compile(r'\{([^{}]+)\}').search(pattern)
+        if not m:
+            return [pattern]
+        opts = m.group(1).split(",")
+        prefix, suffix = pattern[:m.start()], pattern[m.end():]
+        return [prefix + o + suffix for o in opts]
 
     def execute(
         self,
@@ -332,8 +347,8 @@ class GlobTool(BaseTool):
         max_results: int = 100,
         timeout: float = 10.0,
     ) -> ToolResult:
-        """Find files matching pattern (bounded: 最多 max_results 条或 timeout 秒, 防大目录卡死)."""
-        # LLM 可能生成空 pattern/缺省参数 → 兜底为列当前目录所有文件
+        """Find files matching pattern via ``find`` (bounded: 最多 max_results 条或 timeout 秒)."""
+        # LLM 可能生成空 pattern/缺省参数 → 兜底为列当前路径下所有文件
         if not pattern or not str(pattern).strip():
             pattern = "**"
         if not path or not str(path).strip():
@@ -346,32 +361,31 @@ class GlobTool(BaseTool):
                 error=f"Path not found: {search_path}",
             )
 
+        deadline = time.monotonic() + max(float(timeout), 0.5)
         try:
-            files = []
-            import time as _time
-            _deadline = _time.monotonic() + max(float(timeout), 0.5)
-            timed_out = False
-            for f in search_path.rglob(pattern):
-                if _time.monotonic() > _deadline:
-                    timed_out = True
-                    break
-                if any(part in SKIP_DIRS or part.startswith(".") for part in f.relative_to(search_path).parts):
-                    continue
-                files.append(f)
-                if len(files) >= max_results + 1:
-                    break
+            if search_path.is_file():
+                name_part = pattern.rsplit("/", 1)[-1]
+                name_patterns = self._expand_braces(name_part)
+                import fnmatch
+                matched = any(fnmatch.fnmatch(search_path.name, p) for p in name_patterns)
+                rels = [search_path.name] if matched else []
+                truncated = False
+                timed_out = False
+            elif self._find:
+                rels, truncated, timed_out = self._run_find(search_path, pattern, max_results, deadline)
+            else:
+                rels, truncated, timed_out = self._walk_fallback(search_path, pattern, max_results, deadline)
 
-            truncated = len(files) > max_results or timed_out
-            files = files[:max_results]
             results = []
-            for f in files:
-                rel = f.relative_to(search_path)
-                size = f.stat().st_size if f.is_file() else 0
-                kind = "/" if f.is_dir() else ""
-                size_str = f" ({size:,} bytes)" if f.is_file() else ""
+            for rel in rels:
+                fp = search_path / rel
+                is_dir = fp.is_dir()
+                size = fp.stat().st_size if fp.is_file() else 0
+                kind = "/" if is_dir else ""
+                size_str = f" ({size:,} bytes)" if fp.is_file() else ""
                 results.append(f"{rel}{kind}{size_str}")
 
-            output = f"Found {len(files)} file(s) matching '{pattern}' in {search_path}:\n"
+            output = f"Found {len(results)} file(s) matching '{pattern}' in {search_path}:\n"
             output += "\n".join(results) if results else "  (none)"
             if timed_out:
                 output += "\n(partial: 遍历超时, 仅为部分结果)"
@@ -382,15 +396,116 @@ class GlobTool(BaseTool):
                 metadata={
                     "pattern": pattern,
                     "path": str(search_path),
-                    "count": len(files),
+                    "count": len(results),
                     "truncated": truncated,
                     "timed_out": timed_out,
                 },
             )
-        except re.error as e:
-            return ToolResult(success=False, output="", error=f"Invalid glob pattern: {e}")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Glob search failed: {e}")
+
+    def _run_find(
+        self,
+        search_path: Path,
+        pattern: str,
+        max_results: int,
+        deadline: float,
+    ) -> tuple:
+        """Shell out to ``find`` with prune-skip + -name matching; stream & cap results."""
+        # pattern 的末段作为 basename 匹配; src/**, … 的多级结构交给 find 自身递归
+        name_part = pattern.rsplit("/", 1)[-1]
+        if name_part in ("", "*", "**"):
+            name_part = "*"
+        name_patterns = [p for p in self._expand_braces(name_part) if p] or ["*"]
+
+        # find 默认自带 nestable 剪枝; hidden + 巨型目录不递归
+        prune_names = list(SKIP_DIRS) + [".*"]
+        args = ["find", str(search_path), "("]
+        for i, dn in enumerate(prune_names):
+            if i:
+                args.append("-o")
+            args += ["-name", dn]
+        args += [")", "-prune", "-o", "("]
+        for i, np_ in enumerate(name_patterns):
+            if i:
+                args.append("-o")
+            args += ["-name", np_]
+        args += [")", "-print"]
+
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+        )
+        rels: List[str] = []
+        truncated = False
+        timed_out = False
+        try:
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    truncated = True
+                    break
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    rel = os.path.relpath(line, str(search_path))
+                except ValueError:
+                    rel = line.rsplit("/", 1)[-1]
+                if rel in (".", os.sep) or rel.startswith(".."):
+                    continue
+                rels.append(rel)
+                if len(rels) >= max_results + 1:
+                    truncated = True
+                    break
+        finally:
+            with contextlib.suppress(Exception):
+                proc.kill()
+        return rels[:max_results], truncated, timed_out
+
+    def _walk_fallback(
+        self,
+        search_path: Path,
+        pattern: str,
+        max_results: int,
+        deadline: float,
+    ) -> tuple:
+        """Pure-Python os.walk fallback with the same prune semantics when find is missing."""
+        import fnmatch
+
+        name_part = pattern.rsplit("/", 1)[-1]
+        if name_part in ("", "*", "**"):
+            name_part = "*"
+        name_patterns = [p for p in self._expand_braces(name_part) if p] or ["*"]
+
+        rels: List[str] = []
+        timed_out = False
+        for root, dirnames, filenames in os.walk(search_path):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
+            for names, is_dir in ((dirnames, True), (filenames, False)):
+                for name in names:
+                    if time.monotonic() > deadline:
+                        timed_out = True
+                        break
+                    if is_dir and (name in SKIP_DIRS or name.startswith(".")):
+                        continue
+                    if not any(fnmatch.fnmatch(name, p) for p in name_patterns):
+                        continue
+                    rel = os.path.relpath(str(Path(root) / name), str(search_path))
+                    rels.append(rel)
+                    if len(rels) >= max_results + 1:
+                        break
+                if len(rels) >= max_results + 1 or timed_out:
+                    break
+            if len(rels) >= max_results + 1 or timed_out:
+                break
+        return rels[:max_results], len(rels) > max_results, timed_out
 
 
 # Register tools

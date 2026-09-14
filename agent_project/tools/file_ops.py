@@ -675,6 +675,54 @@ class FileOpsTool(BaseTool):
                 return fb
         return result
 
+    def _bash_list(self, path: str) -> ToolResult:
+        """列目录走 bash ``ls -aF``(命令行风格), 输出保持 `d name  size` 可解析格式.
+
+        替代 Rust/Python 的 iterdir 实现: 注入 bash 语义, 目录带 / 标记,
+        大小取真实字节数, 与 _read_folder_markdown 的 (\\S+\\.\\w+)\\s 正则兼容.
+        """
+        try:
+            proc = subprocess.run(
+                ["ls", "-aF", path],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            return ToolResult(success=False, output="", error="ls not found")
+        except subprocess.TimeoutExpired:
+            return ToolResult(success=False, output="", error="Directory listing timed out")
+        if proc.returncode != 0:
+            return ToolResult(
+                success=False, output="",
+                error=(proc.stderr or "ls failed").strip()[:300],
+            )
+
+        entries: List[tuple] = []
+        for line in proc.stdout.splitlines():
+            raw = line.rstrip()
+            base = raw.rstrip("/@")
+            if base in (".", ".."):
+                continue
+            is_dir = raw.endswith("/") or raw.endswith("/@")
+            entries.append((base, is_dir))
+        entries.sort(key=lambda e: (not e[1], e[0].lower()))
+
+        lines = []
+        for name, is_dir in entries:
+            prefix = "d " if is_dir else "  "
+            size = 0
+            if not is_dir:
+                try:
+                    size = os.stat(os.path.join(path, name)).st_size
+                except Exception:
+                    size = -1
+            size_str = f"{size:>10d}" if size >= 0 else f"{'?':>10s}"
+            lines.append(f"{prefix}{name:<40s} {size_str}")
+        return ToolResult(
+            success=True,
+            output="\n".join(lines) or "(empty)",
+            metadata={"count": len(entries), "engine": "bash_ls"},
+        )
+
     def _python_fallback(self, payload: Dict[str, Any]) -> ToolResult:
         """Pure-Python fallback for basic file ops when the Rust binary is
         unavailable (wrong architecture / missing). Supports the most common
@@ -1050,6 +1098,9 @@ class FileOpsTool(BaseTool):
                 containment = self._assert_contained(Path(resolved))
                 if containment:
                     return ToolResult(success=False, output="", error=containment)
+
+            if action == "list":
+                return self._bash_list(resolved)
 
             if action == "fast_read":
                 try:
