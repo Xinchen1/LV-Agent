@@ -181,7 +181,10 @@ class CLIApp:
         while True:
             try:
                 prompt = self._build_prompt()
-                user_input = input(prompt).strip()
+                # 手动写 prompt 以避免首次输入时光标位置异常
+                sys.stdout.write(prompt)
+                sys.stdout.flush()
+                user_input = sys.stdin.readline().rstrip('\n').strip()
             except KeyboardInterrupt:
                 r.print("\n" + r.dim("  Interrupted by user"))
                 break

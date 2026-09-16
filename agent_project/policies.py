@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .execution_engine import ExecutionContext, PolicyOutput, ToolCallRequest
 from .tools import TOOLS_REGISTRY
+from .response_filter import clean_fast_answer
+from .utils.agent_utils import _TOOL_ALIASES
 
 
 def _cwd() -> str:
@@ -113,13 +115,8 @@ class ToolCallParser:
                     if _lower == "mcp_filesystem_list_allowed_directories":
                         args["path"] = "~/Desktop"
             if tool is None:
-                    # 别名纠错: LLM 常用 run_code/search/file 等别名, 映射到合法工具
-                    _alias_map = {
-                        "run_code": "python_exec", "code": "python_exec",
-                        "search": "web_search", "calc": "calculator", "file": "file_ops",
-                        "shell": "bash_exec", "terminal": "bash_exec", "grep": "search_files",
-                    }
-                    _canon = _alias_map.get(_lower)
+                    # 别名纠错: 复用 utils 中的统一工具别名表
+                    _canon = _TOOL_ALIASES.get(_lower)
                     if _canon:
                         tool = registry.get(_canon)
                     if tool is None:
@@ -208,6 +205,9 @@ class ToolCallParser:
             tool_name = match.group(1).strip()
             args_str = strip_tool_markers(match.group(2))
             if tool_name.lower() not in valid_lower:
+                continue
+            if not args_str.strip():
+                # 无参数的行, 由 Format 1c 处理跨行 JSON, 这里跳过避免空调用
                 continue
             if tool_name.lower() == "python_exec":
                 add_call(tool_name, cls._extract_python_exec_code(args_str))
@@ -1164,6 +1164,7 @@ Rules:
         if final_pos is not None and final_marker:
             final_text = output.split(final_marker, 1)[1].strip()
             final_text = self._strip_think_tags(final_text)
+            final_text = clean_fast_answer(final_text)
             return PolicyOutput(reasoning=thought, final_answer=final_text, done=True)
 
         # JSON 里带 final_answer/answer 字段: 提取它, 而不是把整个 JSON 当答案
@@ -1184,6 +1185,7 @@ Rules:
 
         # Fallback: plain answer
         stripped = self._strip_think_tags(output.strip())
+        stripped = clean_fast_answer(stripped)
         if stripped:
             return PolicyOutput(reasoning=thought, final_answer=stripped, done=True)
         return PolicyOutput(reasoning=thought)
@@ -1192,7 +1194,7 @@ Rules:
     def _strip_think_tags(text: str) -> str:
         if not text:
             return text
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL | re.IGNORECASE)
         lines = []
         for line in text.splitlines():
             stripped = line.strip()

@@ -837,14 +837,7 @@ class ExecutionEngine:
                         self._emit(ctx, "content", summary)
                         # 同时写入 trace, 避免下一轮继续空转
                         trace.observations.append(f"[工具摘要] {provisional}")
-                        # 若仍未有最终答案, 直接用摘要作为本轮最终答案, 结束循环
-                        record.final_answer = summary
-                        trace.final_answer = summary
-                        trace.success = True
-                        # 立即结束本次任务循环, 避免继续空转
-                        ctx.steps.append(record)
-                        trace.steps.append(record)
-                        break
+                        # 不把摘要写入 final_answer，也不提前结束循环，保持后续推理继续
 
                 # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
                 DynamicReplanController(self).maybe_replan(ctx, step_number)
