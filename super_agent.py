@@ -821,6 +821,13 @@ class SuperAgentCLI:
     def _maybe_refresh():
       if live is None:
         return
+      # ── 新增：时间节流，避免每个 token 都触发 full re-render ──
+      now = time.time()
+      last = live_state.get("_last_refresh_ts", 0)
+      if now - last < 0.3:           # 至少 300ms 一次刷新
+        return
+      live_state["_last_refresh_ts"] = now
+      # -----------------------------------------------------
       try:
         current_hash = hash((
           live_state["stage"], live_state["round"], live_state["round_total"],
