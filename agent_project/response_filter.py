@@ -97,6 +97,9 @@ def clean_fast_answer(text: str) -> str:
     """
     if not text:
         return text
+    # 限制处理长度，避免大文本导致 TUI 卡顿
+    if len(text) > 64000:
+        text = text[:64000]
     # 0. 剥离可能残留在正文的置信度行(置信度只在思考内部, 不给用户看)
     text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?\s*$', '', text).strip()
     text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?', '', text).strip()
@@ -108,6 +111,15 @@ def clean_fast_answer(text: str) -> str:
     text = re.sub(r'\s*<t[a-z]*\s*$', '', text).strip()
     # 3. 去掉尾部回声: 结尾若重复了紧邻其前的短词/短句, 只保留一段
     text = re.sub(r'(\S.{0,14}?)\s*\n?\s*\1\s*$', r'\1', text, flags=re.DOTALL)
+    # 4. 去重连续重复的段落：模型有时把同一段回答多次输出
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    deduped = []
+    for p in paragraphs:
+        if not deduped or deduped[-1] != p:
+            deduped.append(p)
+    text = '\n\n'.join(deduped)
+    # 5. 去掉开头的 Final Answer: 前缀
+    text = re.sub(r'^\s*final answer\s*:\s*', '', text, flags=re.IGNORECASE).strip()
     return text.strip()
 
 
