@@ -101,8 +101,19 @@ class FileOp:
         new_lines = list(lines)
         # parse unified diff format
         for line in diff.splitlines(keepends=True):
-            pass  # simplified
-        return {"success": True}
+            if line.startswith('---') or line.startswith('+++') or line.startswith('@@'):
+                continue  # skip diff headers
+            if line.startswith('-'):
+                # removal line
+                idx = new_lines.index(line) if line in new_lines else -1
+                if idx >= 0:
+                    new_lines.pop(idx)
+            elif line.startswith('+'):
+                # addition line (excluding +++ prefix)
+                if not line.startswith('+++'):
+                    new_lines.insert(idx if idx >= 0 else len(new_lines), line[1:])
+            # other lines (context, empty, etc.) are kept as-is
+        return {"success": True, "action": "diff_applied", "new_content": "".join(new_lines)}
     
     def list(self, path: str = ".", pattern: str = "*") -> List[str]:
         p = self._resolve(path)

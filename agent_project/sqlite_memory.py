@@ -44,9 +44,9 @@ class SQLiteSessionStore:
     def _check_fts5(self) -> bool:
         try:
             with self._connection() as conn:
-                conn.execute("SELECT * FROM sqlite_master WHERE type='table' AND name='sqlite_fts5_test'").fetchall()
-                conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sqlite_fts5_test USING fts5(text)")
-                conn.execute("DROP TABLE IF EXISTS sqlite_fts5_test")
+                # Use a different test name to avoid reserved name conflicts
+                conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_test USING fts5(text)")
+                conn.execute("DROP TABLE IF EXISTS _fts_test")
                 return True
         except Exception:
             return False
