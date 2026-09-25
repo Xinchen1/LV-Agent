@@ -5309,5 +5309,3 @@ class OpenMythosAgent:
                 self._status(None, f"training: {report.get('train_count', 0)} samples exported")
             except Exception as e:
                 self.logger.debug(f"training status emit failed: {e}")
-
-    # ============ 推理接口 ============
