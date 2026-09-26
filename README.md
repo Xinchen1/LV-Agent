@@ -197,6 +197,12 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-09-26
+
+- **安全与代码质量** — 从 config.yaml 移除硬编码 API key，改用环境变量占位符，确保版本控制安全；修复 sqlite_memory FTS5 检测避免保留字命名冲突；tools/core.py 的 edit() 方法补全统一 diff 解析；清理 agent.py 中误导性注释。
+- **工作流优化** — execution_engine.py 保留完整推理循环、移除提前退出；policies.py 增加 clean_fast_answer 导入与工具别名映射；ui/app.py 改为手动 prompt I/O 避免光标定位问题；response_filter.py 增加长度守卫、段落去重、Final Answer 剥离。
+- **站点品牌更新** — cloudflare-site/ 语言从中文切换为英文，移除 splash/art plates，引入 Google Fonts。
+
 ### 2026-09-10
 
 - **全面重构** — 115 文件大规模重构，核心增强：agent.py 添加辅助客户端(AuxiliaryClient)属性，API 密钥兜底机制(NVAPI/OPENAI/LV 三源兜底)，快车道重写(_rewrite_nudge_task/_build_fast_prompt)实现催促/同意词重新注入，_collect_context_parts 方法快慢两路共享上下文(历史+记忆+技能指令)，_build_fast_static_prefix/_build_fast_prompt 通过缓存提升 prompt 构建效率，工具列表重组为“单一事实源”协议；config.yaml 真实 NVIDIA API 密钥安全移除，改用本地 ollama 开发配置；License 标准化为 AGPL-3.0-only across test and source files；test 增加 fast path router、tool subset 等防劫持与工具子集测试用例；desktop UI/交互增强；build_mac_app.sh 扩展至 595 行 macOS .app 构建脚本；云flare-site/worker 新建项目。
