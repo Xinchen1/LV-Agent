@@ -322,6 +322,18 @@ class OpenMythosAgent:
             self._evolution_controller = SelfEvolutionController(
                 kernel=self._harness_kernel,
             )
+            # B 方案: 把当前模型后端注册为 hotswap 能力槽, 让进化控制器
+            # 通过记录 active 的调用 metrics 来监控其健康状况, 并在退化时回滚。
+            if self.backend is not None and getattr(self.backend, "generate", None):
+                try:
+                    self._harness_kernel.register_capability(
+                        "model_backend",
+                        self.backend,
+                        version=self._backend_version_label(self.backend),
+                    )
+                    self.logger.debug("evolution: model_backend capability registered")
+                except Exception as e:
+                    self.logger.debug("evolution: backend register failed: %s", e)
             _ready("evolution")
         else:
             self._evolution_controller = None
@@ -621,11 +633,58 @@ class OpenMythosAgent:
                     setattr(new_backend, attr, None if attr == "_client" else 0.0)
                 except Exception:
                     pass
+        # B 方案: 优先通过 hotswap 切换, 让进化控制器可回滚到上一个可用后端。
+        old_backend = self.backend
         self.backend = new_backend
-        print(_style(
-            f" 模型后端已切换: {getattr(new_backend, 'model', '?')} @ {getattr(new_backend, 'base_url', '?')}",
-            "2",
-        ))
+        if self._try_hotswap_backend(old_backend, new_backend):
+            print(_style(
+                f" 模型后端已切换(可回滚): {getattr(new_backend, 'model', '?')} @ {getattr(new_backend, 'base_url', '?')}",
+                "2",
+            ))
+        else:
+            print(_style(
+                f" 模型后端已切换: {getattr(new_backend, 'model', '?')} @ {getattr(new_backend, 'base_url', '?')}",
+                "2",
+            ))
+
+    def _backend_version_label(self, backend) -> str:
+        """为模型后端生成一个版本标签, 用于 hotswap 版本图。"""
+        try:
+            return f"{type(backend).__name__}@{getattr(backend, 'model', '?')}"
+        except Exception:
+            return type(backend).__name__  # fallback: 至少保留类型名, 不中断版本标签生成
+
+    def _try_hotswap_backend(self, old_backend, new_backend) -> bool:
+        """B 方案: 通过 hotswap 记录后端切换, 使新模型退化时可自动回滚。
+
+        把新后端 swap 成 active、旧后端保留在版本图并记为回滚目标。
+        任何失败都返回 False, 调用方回退到普通切换, 不中断会话。
+        """
+        try:
+            ctrl = getattr(self, "_evolution_controller", None)
+            kernel = getattr(self, "_harness_kernel", None)
+            if ctrl is None or kernel is None or not hasattr(kernel, "reg"):
+                return False
+            old_label = self._backend_version_label(old_backend)
+            new_label = self._backend_version_label(new_backend)
+            slot = kernel.reg.get_slot("model_backend")
+            # 旧后端保留在版本图, 供退化时回滚。
+            try:
+                kernel.reg.register_version("model_backend", old_backend,
+                                            version=old_label, parent=slot.version or None)
+            except Exception as e:
+                self.logger.debug("evolution: record old backend version failed: %s", e)
+            # 新后端替换为 active。
+            kernel.reg.swap("model_backend", new_backend, version=new_label)
+            # 记录回滚目标, 供 SelfEvolutionController._evaluate_rollback 使用。
+            try:
+                ctrl._rollback_version_map["model_backend"] = old_label
+            except Exception as e:
+                self.logger.debug("evolution: record rollback target failed: %s", e)
+            return True
+        except Exception as e:
+            self.logger.debug("hotswap backend switch failed, using direct switch: %s", e)
+            return False
 
     def _create_simple_tokenizer(self):
         """Create a fallback tokenizer for testing only."""
