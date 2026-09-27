@@ -197,6 +197,11 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-09-27
+
+- **自进化 B 方案接入** — hotswap 真正接管 LLM 后端：初始化时把 `self.backend` 注册为 `model_backend` 能力槽；`reload_backend`（/model 切换模型）改为通过 hotswap 切换，新后端替换为 active、旧后端保留进版本图并记为回滚目标；每回合 `force_observe()` 检测 active 是否退化（错误率/延迟综合分），退化则自动回滚到上一个可用模型；切换失败安全回退普通路径，不中断会话。
+- **终端原生命令风格配色** — 模型最终输出（流式 + 非流式兜底）配色改为 shell 命令风格：命令/行内代码/文件路径用青色高亮，错误红色、数字/重点词黄色、代码块深灰底近白字，标题保留青/蓝层级锚点。
+
 ### 2026-09-26
 
 - **安全与代码质量** — 从 config.yaml 移除硬编码 API key，改用环境变量占位符，确保版本控制安全；修复 sqlite_memory FTS5 检测避免保留字命名冲突；tools/core.py 的 edit() 方法补全统一 diff 解析；清理 agent.py 中误导性注释。
