@@ -79,6 +79,7 @@ class WorkingMemoryEvent:
     role: str  # user | assistant | tool | observation | system
     content: str
     event_type: str = "message"  # message | tool_call | tool_result | plan | thought
+    content_type: str = "text"  # text, code, data, table, diagram
     timestamp: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -92,12 +93,14 @@ class WorkingMemory:
         self._lock = threading.Lock()
 
     def add(self, role: str, content: str, event_type: str = "message",
-            metadata: Optional[Dict[str, Any]] = None):
+        content_type: str = "text",  # text, code, data, table, diagram
+        metadata: Optional[Dict[str, Any]] = None):
         with self._lock:
             self.events.append(WorkingMemoryEvent(
                 role=role,
                 content=content,
                 event_type=event_type,
+                content_type=content_type,
                 metadata=metadata or {}
             ))
             if len(self.events) > self.max_events:
@@ -118,11 +121,13 @@ class WorkingMemory:
 
     def add_tool_call(self, tool_name: str, arguments: Dict[str, Any]):
         self.add("assistant", f"{tool_name}({arguments})", "tool_call",
-                 {"tool_name": tool_name, "args": arguments})
+                 content_type="text",
+                 metadata={"tool_name": tool_name, "args": arguments})
 
     def add_tool_result(self, tool_name: str, result: str, success: bool):
         self.add("tool", result, "tool_result",
-                 {"tool_name": tool_name, "success": success})
+                 content_type="text",
+                 metadata={"tool_name": tool_name, "success": success})
 
     def get_events(self, event_types: Optional[List[str]] = None,
                    since: Optional[float] = None,
