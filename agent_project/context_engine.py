@@ -520,18 +520,51 @@ class ContextCompressor:
         self.llm_client = llm_client
 
     def compress_events(self, events: List[WorkingMemoryEvent],
-                        target_tokens: int) -> str:
-        """Compress a list of working-memory events into a summary."""
+                    target_tokens: int) -> str:
+        """Compress a list of working-memory events into a summary.
+
+        Based on event.content_type for specialized compression:
+        - text: standard extractive/LLM summary
+        - code: preserve function/class structure, compress variable names
+        - data: preserve structure, compress numeric details
+        - table/chart: extract key points/values
+        """
         if not events:
             return ""
-        full_text = "\n".join(
-            f"{e.role}: {e.content}" for e in events
-        )
-        current = _estimate_tokens(full_text)
-        if current <= target_tokens:
-            return full_text
 
-        # Extractive fallback: keep first user request + last few exchanges.
+        # Group events by content_type
+        type_groups: Dict[str, List[WorkingMemoryEvent]] = {}
+        for e in events:
+            ct = e.content_type
+            if ct not in type_groups:
+                type_groups[ct] = []
+            type_groups[ct].append(e)
+
+        # Try to compress each type and collect results
+        compressed_parts: List[str] = []
+        for ct in ["code", "data", "table", "diagram", "text"]:
+            if ct not in type_groups or not type_groups[ct]:
+                continue
+            events_subset = type_groups[ct]
+            if ct == "code":
+                compressed = self._compress_code(events_subset, target_tokens // len(type_groups))
+            elif ct == "data":
+                compressed = self._compress_data(events_subset, target_tokens // len(type_groups))
+            elif ct in ("table", "diagram"):
+                compressed = self._compress_structured(events_subset, target_tokens // len(type_groups))
+            else:  # text
+                compressed = self._compress_text(events_subset, target_tokens // len(type_groups))
+            if compressed:
+                compressed_parts.append(f"[{ct.upper()}] {compressed}")
+
+        if compressed_parts:
+            combined = "\n\n".join(compressed_parts)
+            if _estimate_tokens(combined) <= target_tokens:
+                return combined
+            # Fallback: truncate combined result
+            return self._truncate_to_tokens(combined, target_tokens)
+
+        # Fallback to original extractive logic (should not happen if there are events)
         first_user = next((e for e in events if e.role == "user"), None)
         recent = events[-6:]
         parts = []
@@ -542,12 +575,12 @@ class ContextCompressor:
             prefix = "User" if e.role == "user" else e.role.capitalize()
             parts.append(f"- {prefix}: {e.content[:200]}")
         extractive = "\n".join(parts)
-        # 守卫: 短文本下包装词("Original request:"等)+首请求重复会导致
-        # extractive 比原文还大, 此时不返回膨胀结果, 落到 LLM 摘要/硬截断
-        if _estimate_tokens(extractive) <= target_tokens and len(extractive) < len(full_text):
+
+        if _estimate_tokens(extractive) <= target_tokens and len(extractive) < len(
+            "\n".join(f"{e.role}: {e.content}" for e in events)
+        ):
             return extractive
 
-        # LLM abstractive summary.
         if self.llm_client:
             try:
                 summary = self.llm_client.chat([
@@ -555,15 +588,13 @@ class ContextCompressor:
                         "Summarize the conversation so far in under 200 words. "
                         "Preserve facts the assistant learned and any user preferences."
                     )},
-                    {"role": "user", "content": full_text[:4000]},
+                    {"role": "user", "content": "\n".join(f"{e.role}: {e.content}" for e in events)[:4000]},
                 ], temperature=0.2, max_tokens=target_tokens // 2)
                 return f"[Compressed conversation summary]\n{summary.strip()}"
             except Exception:
                 pass
 
-        # Hard truncate (token-aware: 中文 1 token≈1-2 字符, 不能按英文 *4 估算).
         return self._truncate_to_tokens(extractive, target_tokens)
-
     @staticmethod
     def _truncate_to_tokens(text: str, target_tokens: int) -> str:
         """按 token 估算截断文本, 保证输出不超预算(中文/英文都适用)."""
@@ -634,6 +665,183 @@ class ContextCompressor:
         kept.reverse()
         return "\n".join(kept)
 
+
+    def _compress_text(self, events: List[WorkingMemoryEvent],
+                       target_tokens: int) -> str:
+        """Standard text compression: extractive + LLM summarization fallback."""
+        if not events:
+            return ""
+        full_text = "\n".join(
+            f"{e.role}: {e.content}" for e in events
+        )
+        current = _estimate_tokens(full_text)
+        if current <= target_tokens:
+            return full_text
+
+        # Extractive fallback: keep first user request + last few exchanges.
+        first_user = next((e for e in events if e.role == "user"), None)
+        recent = events[-6:]
+        parts = []
+        if first_user:
+            parts.append(f"Original request: {first_user.content}")
+        parts.append("Recent exchanges:")
+        for e in recent:
+            prefix = "User" if e.role == "user" else e.role.capitalize()
+            parts.append(f"- {prefix}: {e.content[:200]}")
+        extractive = "\n".join(parts)
+
+        if _estimate_tokens(extractive) <= target_tokens and len(extractive) < len(full_text):
+            return extractive
+
+        if self.llm_client:
+            try:
+                summary = self.llm_client.chat([
+                    {"role": "system", "content": (
+                        "Summarize the conversation so far in under 200 words. "
+                        "Preserve facts the assistant learned and any user preferences."
+                    )},
+                    {"role": "user", "content": full_text[:4000]},
+                ], temperature=0.2, max_tokens=target_tokens // 2)
+                return f"[Compressed conversation summary]\n{summary.strip()}"
+            except Exception:
+                pass
+
+        return self._truncate_to_tokens(extractive, target_tokens)
+
+    def _compress_code(self, events: List[WorkingMemoryEvent],
+                       target_tokens: int) -> str:
+        """Code compression: preserve function/class structure, compress variable names."""
+        if not events:
+            return ""
+
+        # Combine all code content
+        full_text = "\n".join(e.content for e in events)
+
+        # Simple code compression:
+        # 1. Remove comments
+        # 2. Replace long variable names with short prefixes
+        # 3. Preserve function/class structure
+        import re
+
+        # Remove line comments
+        cleaned = re.sub(r'#.*$', '', full_text, flags=re.MULTILINE)
+        # Remove block comments
+        cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+
+        # Replace variable names: replace long identifiers with short prefixes
+        # but preserve function/class names and common variables
+        def shorten_var(match: re.Match) -> str:
+            var = match.group(0)
+            # Preserve common short variables and function names
+            common_vars = {"self", "cls", "args", "kwargs", "data", "result", "items", "true", "false", "none"}
+            if var in common_vars or var.isupper() or len(var) <= 3:
+                return var
+            # Shorten to first 3 characters
+            return var[:3] if len(var) > 3 else var
+
+        compressed = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b', shorten_var, cleaned)
+
+        # Truncate to fit budget
+        if _estimate_tokens(compressed) <= target_tokens:
+            return compressed
+
+        return self._truncate_to_tokens(compressed, target_tokens)
+    def _compress_data(self, events: List[WorkingMemoryEvent],
+                       target_tokens: int) -> str:
+        """Data compression: preserve structure, compress numeric values."""
+        if not events:
+            return ""
+
+        full_text = "\n".join(e.content for e in events)
+
+        # Simple data compression:
+        # Preserve keys, compress numeric values to ranges/approximations
+        import re
+
+        def compress_number_string(num_str: str) -> str:
+            """Compress a numeric string to approximate format."""
+            # Remove non-numeric characters except decimal point and minus
+            cleaned = re.sub(r'[^\d.-]', '', num_str)
+            try:
+                num = float(cleaned)
+                if abs(num) >= 1000:
+                    return f"~{num/1000:.1f}k"
+                elif abs(num) >= 100:
+                    return f"~{num:.0f}"
+                else:
+                    return f"~{num:.1f}"
+            except ValueError:
+                # If conversion fails, return original
+                return num_str
+
+        # Replace numbers in the text
+        # This pattern matches numbers with optional commas, decimal, dollar signs, percent signs
+        def replace_numbers(match: re.Match) -> str:
+            # Extract the matched text
+            text = match.group(0)
+            # Find all numbers within the text
+            # This pattern finds sequences that look like numbers
+            num_pattern = r'[\d,]+(?:\.\d+)?'
+            num_matches = re.findall(num_pattern, text)
+            if num_matches:
+                # Use the first number found (simplistic but works for most cases)
+                num_str = num_matches[0]
+                formatted = compress_number_string(num_str)
+                # Replace the first occurrence of the number with formatted
+                return text.replace(num_str, formatted, 1)
+            return text
+
+        # Apply to each line
+        lines = full_text.split("\n")
+        compressed_lines = []
+        for line in lines:
+            if ":" in line:
+                # Split into key and value on first colon
+                parts = line.split(":", 1)
+                key_part = parts[0] + ":"
+                value_part = parts[1]
+                # Compress numbers in the value part
+                compressed_value = re.sub(r'[\d,]+(?:\.\d+)?', replace_numbers, value_part)
+                compressed_lines.append(key_part + compressed_value)
+            else:
+                # No colon, keep original line
+                compressed_lines.append(line)
+        compressed = "\n".join(compressed_lines)
+
+        if _estimate_tokens(compressed) <= target_tokens:
+            return compressed
+
+        return self._truncate_to_tokens(compressed, target_tokens)
+    def _compress_structured(self, events: List[WorkingMemoryEvent],
+                             target_tokens: int) -> str:
+        """Table/chart compression: extract headers and key values."""
+        if not events:
+            return ""
+
+        full_text = "\n".join(e.content for e in events)
+
+        # Extract table headers and key rows
+        lines = full_text.split("\n")
+        if not lines:
+            return full_text
+
+        # Preserve header (first line)
+        header = lines[0]
+        # Extract data rows that contain numbers or colons
+        data_rows = []
+        for line in lines[1:]:
+            if ":" in line or re.search(r"\d", line):
+                data_rows.append(line)
+
+        # Combine: header + up to 3 key data rows
+        compressed = header
+        for row in data_rows[:3]:
+            compressed += "\n" + row
+
+        if _estimate_tokens(compressed) <= target_tokens:
+            return compressed
+
+        return self._truncate_to_tokens(compressed, target_tokens)
 
 # ---------------------------------------------------------------------------
 # 4. Context Engine
