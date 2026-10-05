@@ -1107,7 +1107,7 @@ class FileOpsTool(BaseTool):
                     cache = self._fast_read_cache.load_cache(resolved)
                     if cache is None:
                         cache = self._fast_read_cache.cache_file(resolved)
-                        header = f"[fast_read] cached {cache['chunk_count']} chunks from {resolved} using {cache['model']}\n\n"
+                        header = f"[fast_read] cached {cache['chunk_count']} chunks from {resolved}\n\n"
                     else:
                         header = f"[fast_read] loaded cached {cache['chunk_count']} chunks from {resolved}\n\n"
                     if query:

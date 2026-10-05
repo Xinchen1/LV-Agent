@@ -210,6 +210,28 @@ def test_repeated_failing_call_stops_with_no_progress_status():
 
 
 # ---------------------------------------------------------------------------
+# fast_read 首次调用(缓存未命中)不再 KeyError 'model'
+# ---------------------------------------------------------------------------
+
+def test_fast_read_first_call_cache_miss_succeeds(tmp_path):
+    """cache_file() 返回值无 'model' 键, 表头误引 cache['model'] 导致首次必失败."""
+    from agent_project.tools.file_ops import FastReadCache, FileOpsTool
+    f = tmp_path / "long_article.md"
+    f.write_text(("# 标题\n\n" + "这是一段很长的测试内容。" * 40 + "\n\n") * 10, encoding="utf-8")
+
+    cache = FastReadCache(cache_dir=str(tmp_path / "cache"))
+    tool = FileOpsTool()
+    tool._fast_read_cache = cache
+
+    r = tool.execute(action="fast_read", path=str(f))
+    assert r.success, f"首次 fast_read 应成功, 实际 error: {r.error}"
+    assert "cached" in (r.output or "")
+    # 二次命中缓存
+    r2 = tool.execute(action="fast_read", path=str(f), query="测试内容")
+    assert r2.success, f"二次 fast_read 应成功, 实际 error: {r2.error}"
+
+
+# ---------------------------------------------------------------------------
 # 超时放弃的同参调用不重复起线程
 # ---------------------------------------------------------------------------
 
