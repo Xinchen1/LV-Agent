@@ -88,6 +88,102 @@ def _clean_content_text(text: str) -> str:
   return _EMOJI_RE.sub("", strip_tool_tags(text))
 
 
+# 敏感输入(API Key 等)的掩码: 逐字符回显符号, 粘贴同样逐字显示。
+# 不用 getpass 的原因是它完全不回显 —— 用户粘贴后看不到"到底粘进去没有"。
+_SECRET_MASK = "•"
+_RE_ESC_FINAL = re.compile(r"[@-~]")
+
+
+def _consume_escape_sequence(read_char) -> None:
+  """吞掉终端转义序列(如 bracketed paste 的 \\x1b[200~ / \\x1b[201~),
+  否则 ESC 字符会被当成输入内容, 掩码数量与实际长度对不上。"""
+  ch = read_char()
+  if ch not in ("[", "O"):
+    return
+  while True:
+    c = read_char()
+    if not c or _RE_ESC_FINAL.match(c):
+      return
+
+
+def _masked_read_loop(read_char, write, mask: str = _SECRET_MASK) -> str:
+  """掩码读取的核心循环(纯逻辑, 便于测试)。
+
+  read_char() 每次返回 1 个字符(EOF 返回 "")；write(s) 负责输出掩码/退格。
+  返回输入内容; 空行 EOF 抛 EOFError, Ctrl-C 抛 KeyboardInterrupt。
+  """
+  chars = []
+  while True:
+    ch = read_char()
+    if ch == "":                      # EOF: 有内容则视为提交, 无内容则取消
+      if chars:
+        return "".join(chars)
+      raise EOFError
+    if ch == "\x1b":                  # 转义序列(粘贴标记), 不计入内容
+      _consume_escape_sequence(read_char)
+      continue
+    if ch in ("\r", "\n"):            # Enter 提交
+      return "".join(chars)
+    if ch in ("\x7f", "\x08"):        # Backspace / Delete: 擦掉一个掩码
+      if chars:
+        chars.pop()
+        write("\b \b")
+      continue
+    if ch == "\x03":                  # Ctrl-C
+      raise KeyboardInterrupt
+    if ch == "\x04":                  # Ctrl-D
+      if chars:
+        return "".join(chars)
+      raise EOFError
+    if ch < " " and ch != "\t":       # 其余控制字符忽略
+      continue
+    chars.append(ch)
+    write(mask)
+
+
+def read_secret_masked(prompt: str, mask: str = _SECRET_MASK) -> str:
+  """交互式终端里逐字符掩码读取敏感输入(粘贴时也逐字显示掩码)。
+
+  非 TTY(管道/重定向)无法逐字符读取, 退回整行读取。
+  结束时无论成功/取消都会补一个换行并恢复终端模式。
+  """
+  import os
+  import sys
+
+  def write(text: str) -> None:
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+  try:
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    if not sys.stdin.isatty():
+      raise OSError("stdin is not a tty")
+    saved = termios.tcgetattr(fd)
+  except Exception:
+    write(prompt)
+    line = sys.stdin.readline()
+    if line == "":
+      raise EOFError
+    return line.strip()
+
+  write(prompt)
+
+  def read_char() -> str:
+    return os.read(fd, 1).decode("utf-8", "ignore")
+
+  try:
+    tty.setcbreak(fd, termios.TCSADRAIN)   # 关闭 canonical + echo(掩码由我们输出)
+    return _masked_read_loop(read_char, write, mask).strip()
+  finally:
+    try:
+      termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    except Exception:
+      pass
+    write("\n")
+
+
 def _portrait_path() -> Path:
   return Path(__file__).parent / "assets" / "portrait.png"
 
@@ -2282,10 +2378,9 @@ class SuperAgentCLI:
     return True
 
   def _ask_secret(self, prompt_text: str) -> str:
-    """读取敏感输入(API Key 等): 掩码回显, 不在终端明文显示/落历史."""
+    """读取敏感输入(API Key 等): 逐字符掩码回显(粘贴同样逐字显示), 不在终端明文显示/落历史."""
     try:
-      import getpass
-      return getpass.getpass(prompt_text + ": ").strip()
+      return read_secret_masked(prompt_text + ": ")
     except (EOFError, KeyboardInterrupt):
       print(" cancelled.")
       return ""
