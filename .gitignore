@@ -80,3 +80,17 @@ electron.pid
 session_*.md
 latest_*.md
 desktop/
+
+# Agent memory / privacy — NEVER commit
+memory.md
+user.md
+episodes.json
+conversation_history.json
+wiki_graph.json
+*.skill.md
+insert.md
+delete.md
+update.md
+skip.md
+extract_preference.md
+summarize_error.md

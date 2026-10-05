@@ -13,9 +13,11 @@ think -> act -> observe -> converge loop.
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import json
 import logging
 import re
+import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -183,6 +185,10 @@ class ToolExecutor:
         self.max_workers = max_workers
         self.tool_timeout = tool_timeout
         self.logger = logging.getLogger("ToolExecutor")
+        # 超时放弃的调用: cache_key -> 完成事件。Python 线程无法强杀,
+        # 同参数调用在后台线程结束前直接跳过, 防止慢工具(如 file_ops Python
+        # fallback)反复叠线程导致堆积/雪崩。
+        self._inflight: Dict[str, threading.Event] = {}
 
     def execute_calls(
         self,
@@ -198,6 +204,10 @@ class ToolExecutor:
         if len(deduped) < len(calls):
             self.logger.debug(f"deduplicated {len(calls)} -> {len(deduped)} tool calls")
 
+        # 清理已自然结束的后台调用记录(超时线程跑完后允许重新发起)
+        for k in [k for k, ev in self._inflight.items() if ev.is_set()]:
+            self._inflight.pop(k, None)
+
         pending = []
         cache_hits = []
         for call in deduped:
@@ -206,12 +216,30 @@ class ToolExecutor:
                 res = self.per_turn_cache[cache_key]
                 cache_hits.append((call, res.output or res.error or "", res.success))
                 continue
+            # 上一次同参数调用仍在后台运行(已超时放弃) → 不再起新线程, 直接跳过
+            ev = self._inflight.get(cache_key)
+            if ev is not None and not ev.is_set():
+                results.append((call, (
+                    "SYSTEM SKIP: 同一调用上一次执行仍在后台运行(已超时放弃等待), 未重复启动。"
+                    "请换用其他工具, 或稍后再试。"), False))
+                continue
             pending.append((call, cache_key))
 
         if pending:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(pending), self.max_workers))
             try:
-                futures = {executor.submit(self._execute_one, call, ctx): (call, cache_key) for call, cache_key in pending}
+                futures = {}
+                for call, cache_key in pending:
+                    ev = threading.Event()
+                    self._inflight[cache_key] = ev
+
+                    def _run(c: ToolCallRequest = call, ev: threading.Event = ev):
+                        try:
+                            return self._execute_one(c, ctx)
+                        finally:
+                            ev.set()
+
+                    futures[executor.submit(_run)] = (call, cache_key)
                 done, not_done = concurrent.futures.wait(futures, timeout=self.tool_timeout)
                 # 超时项: 标记失败但不中断整体, 已完成结果继续保留
                 for future in not_done:
@@ -226,6 +254,7 @@ class ToolExecutor:
                     results.append((call, obs, ok))
                 for future in done:
                     call, cache_key = futures[future]
+                    self._inflight.pop(cache_key, None)
                     try:
                         ok, obs = future.result()
                     except Exception as e:
@@ -334,17 +363,64 @@ class ToolExecutor:
         if not tool:
             return False, f"Tool not found: {tool_name}"
 
+        # 按 execute() 签名过滤模型多生成的字段(如 description):
+        # 直接 tool.execute(**args) 会因未知 kwarg 抛 TypeError 废掉整次调用
+        args = self._filter_args_to_schema(tool_name, tool, args)
+
         try:
             if args:
                 result = tool.execute(**args)
             else:
                 result = tool.execute()
+        except TypeError as e:
+            # 签名过滤后仍不匹配 → 从错误信息提取肇事键剔除后重试一次
+            dropped = self._drop_unexpected_kwargs(args, e)
+            if dropped is not None and dropped != args:
+                self.logger.warning(f"retry {tool_name} after dropping bad kwargs: {e}")
+                try:
+                    result = tool.execute(**dropped) if dropped else tool.execute()
+                except Exception as e2:
+                    return False, f"Tool execution error: {e2}"
+            else:
+                return False, f"Tool execution error: {e}"
         except Exception as e:
             return False, f"Tool execution error: {e}"
 
         if result.success:
             return True, (result.output or "").strip()[:2500]
         return False, f"Tool error: {result.error or 'unknown error'}"
+
+    def _filter_args_to_schema(self, tool_name: str, tool: Any, args: Dict[str, Any]) -> Dict[str, Any]:
+        """剔除工具 execute() 签名不接受的参数, 保留其余原样传入."""
+        if not args:
+            return args
+        try:
+            sig = inspect.signature(tool.execute)
+        except (TypeError, ValueError):
+            return args
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return args  # 工具自身接收 **kwargs, 全部放行
+        allowed = {
+            name for name, p in params.items()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        dropped_keys = [k for k in args if k not in allowed]
+        if dropped_keys:
+            self.logger.warning(f"dropped unsupported args for {tool_name}: {dropped_keys}")
+            args = {k: v for k, v in args.items() if k in allowed}
+        return args
+
+    @staticmethod
+    def _drop_unexpected_kwargs(args: Dict[str, Any], err: TypeError) -> Optional[Dict[str, Any]]:
+        """从 'unexpected keyword argument' 错误中提取肇事键并剔除; 无法定位则返回 None."""
+        m = re.search(r"unexpected keyword argument ['\"]?(\w+)", str(err))
+        if not m:
+            return None
+        key = m.group(1)
+        if key not in args:
+            return None
+        return {k: v for k, v in args.items() if k != key}
 
 
 # ---------------------------------------------------------------------------
@@ -386,9 +462,16 @@ class ConvergenceChecker:
         if step_number >= ctx.max_steps:
             return True
         # 重复调用检测不受 min_steps 限制，避免 budget=1 时无限重试
+        # key 必须与 _execute_tool_calls 写入 call_counts 的格式一致
+        # (json.dumps({"name","args"})), 否则查表永远 miss、重复调用永不收敛
+        # 阈值 3: 允许同一调用失败后重试 2 次; 若 2 次即停, 会截断
+        # "第2次重试成功"的正常场景(成功后模型会换新调用, 计数不再涨)。
         for call in policy_output.tool_calls:
-            key = f"{call.tool_name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
-            if ctx.call_counts.get(key, 0) >= 2:
+            key = json.dumps(
+                {"name": call.tool_name, "args": call.arguments},
+                sort_keys=True, ensure_ascii=False,
+            )
+            if ctx.call_counts.get(key, 0) >= 3:
                 return True
         if step_number < self.min_steps:
             return False
@@ -408,12 +491,6 @@ class ConvergenceChecker:
         # 全部是去重拦截且 ≥3 个, 且步骤足够多 → 模型在绕圈, 停止并让其反思
         if len(dedup_stops) >= 3 and step_number >= 6 and len(hard_stops) == 0:
             return True
-
-        # Repeated identical tool calls 3+ times
-        for call in policy_output.tool_calls:
-            key = f"{call.tool_name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
-            if ctx.call_counts.get(key, 0) >= 3:
-                return True
 
         # 规划完成: 全部节点已被 DONE[<node_id>] 标记覆盖 → 提前收敛
         if ctx.plan_node_ids and set(ctx.plan_node_ids) <= ctx.plan_done:
@@ -751,6 +828,15 @@ class ExecutionEngine:
                 output = self._generate(prompt, ctx, step_number)
                 if not output:
                     output = ""
+                # 生成退化检测: 模型把同一句话复读数十次(原句循环)时,
+                # 折叠重复内容再解析, 并在阶段2计为无进展步
+                _degenerate = False
+                if self._is_degenerate_repetition(output):
+                    _degenerate = True
+                    output = self._collapse_repetition(output)
+                    self.logger.warning(
+                        f"step {step_number}: degenerate repetition in model output; collapsed to first occurrences"
+                    )
                 parsed = policy.parse_output(output, ctx)
 
                 # 规划驱动: 扫描 DONE[<node_id>] 标记, 记录已完成节点。
@@ -794,6 +880,22 @@ class ExecutionEngine:
                 if not parsed.tool_calls:
                     ctx.steps.append(record)
                     trace.steps.append(record)
+                    # 纯文本轮也计入无进展: 连续只说不做/原句复读 → 熔断,
+                    # 交下方 force_final_answer 基于已有观察兜底。
+                    # (此前该分支直接 continue, 绕过了阶段4的无进展检查,
+                    #  是"同一句话循环几十次"的根因)
+                    ctx.no_progress_streak += 1
+                    if _degenerate:
+                        self.logger.warning(f"step {step_number}: text-only degenerate loop counted as no-progress")
+                    if ctx.no_progress_streak >= 3:
+                        self.logger.warning(
+                            f"loop stopped after {ctx.no_progress_streak} consecutive no-action steps (step {step_number})"
+                        )
+                        self._emit_status(
+                            ctx,
+                            f"连续 {ctx.no_progress_streak} 步无动作, 已停止(基于现有观察生成答案)",
+                        )
+                        break
                     if step_number >= ctx.max_steps:
                         break  # 预算已耗尽, 交给下方 force_final_answer 兜底
                     wants_more = self._wants_to_continue(output)
@@ -833,10 +935,9 @@ class ExecutionEngine:
                     provisional = last_obs.strip()[:800]
                     if provisional and not trace.final_answer:
                         summary = f"工具执行结果摘要:\n\n{provisional}"
-                        # 直接向 UI 透出内容, 保证搜索结果可见
+                        # 仅向 UI 透出内容(不入 trace/observations):
+                        # 真实观察已在上方 append, 再写一份会造成上下文重复膨胀
                         self._emit(ctx, "content", summary)
-                        # 同时写入 trace, 避免下一轮继续空转
-                        trace.observations.append(f"[工具摘要] {provisional}")
                         # 不把摘要写入 final_answer，也不提前结束循环，保持后续推理继续
 
                 # 动态重规划: 工具观察暴露前置条件失败时, 修订 DAG 并回注下一轮提示
@@ -857,11 +958,34 @@ class ExecutionEngine:
                 else:
                     ctx.no_progress_streak = 0
 
+                # 去重硬熔断: 模型无视 "⊙ STOP" 提示仍发起同一调用 → 立即收敛,
+                # 不再等下一轮(此前只靠 ConvergenceChecker 的重复检测, 来得太晚)
+                if any("⊙ STOP" in str(obs) for _c, obs, _ok in exec_results):
+                    self._emit_status(ctx, "检测到无视去重提示的重复调用, 强制收敛")
+                    break
+
                 self._monitor_and_inject(ctx, output)
 
                 if step_number >= ctx.max_steps:
                     if self._extend_loops(ctx):
                         self._emit_status(ctx, f"↑ loop {ctx.max_steps} (增加思考预算, 仍在推进)")
+
+                # 重复同一调用≥3次 → 收敛并显式告知停止原因(判据与
+                # ConvergenceChecker 一致; 不能只靠它静默 break, 用户/测试
+                # 需要知道 loop 是因无进展而停, 不是莫名结束)
+                if any(
+                    ctx.call_counts.get(
+                        json.dumps({"name": c.tool_name, "args": c.arguments},
+                                   sort_keys=True, ensure_ascii=False),
+                        0,
+                    ) >= 3
+                    for c in parsed.tool_calls
+                ):
+                    self._emit_status(
+                        ctx,
+                        "同一工具调用重复≥3次, 连续无进展, 已停止(基于现有观察生成答案)",
+                    )
+                    break
 
                 if self.convergence.should_stop(ctx, parsed, step_number):
                     break
@@ -938,6 +1062,8 @@ class ExecutionEngine:
         finally:
             trace.duration_ms = int((time.time() - start) * 1000)
             trace.quality_score = self._score_trace(trace)
+            # 透出动态扩展后实际到达的步数上限, 供 UI 显示真实预算(而非初始值)
+            trace.metadata["max_steps_final"] = ctx.max_steps
 
         return trace
 
@@ -1227,7 +1353,16 @@ class ExecutionEngine:
                 return False  # 连续≥3次同一调用
             return True  # 开始尝试，短时间不判为打转
 
-        obs = ctx.observations[-6:] if len(ctx.observations) > 6 else ctx.observations
+        # 观察窗口限定在最近几步(而非全局最近6条):
+        # 8步前的陈旧成功不能为当前卡死背书
+        obs: List[str] = []
+        for st in recent_steps:
+            obs.extend(str(o) for o in (getattr(st, "observations", None) or []))
+        if not obs:
+            # 尚无步骤记录(外部直接注入观察/引擎外评估) → 回退全局窗口
+            obs = ctx.observations[-6:]
+        else:
+            obs = obs[-6:]
         if not obs:
             return False
         _fail_markers = (
@@ -1312,6 +1447,48 @@ class ExecutionEngine:
                 return True
 
         return False
+
+    @staticmethod
+    def _is_degenerate_repetition(text: str, min_repeats: int = 5) -> bool:
+        """检测模型输出是否陷入原句复读退化(单行重复或两行交替复读).
+
+        典型案例: "让我查看…。\n\n我需要…让我执行一次命令。" 循环几十次直到 max_tokens。
+        """
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if len(lines) < min_repeats:
+            return False
+        counts: Dict[str, int] = {}
+        for ln in lines:
+            counts[ln] = counts.get(ln, 0) + 1
+        if max(counts.values()) >= min_repeats:
+            return True
+        # 两行块交替复读 (A B A B ...): 按两行一组统计
+        if len(lines) >= min_repeats * 2:
+            a, b = lines[0], lines[1]
+            if a and b and a != b:
+                pairs = sum(
+                    1 for i in range(0, len(lines) - 1, 2)
+                    if lines[i] == a and lines[i + 1] == b
+                )
+                if pairs >= min_repeats:
+                    return True
+        return False
+
+    @staticmethod
+    def _collapse_repetition(text: str, keep: int = 2) -> str:
+        """折叠复读文本: 每条重复行只保留前 keep 次, 唯一行原样保留."""
+        seen: Dict[str, int] = {}
+        out: List[str] = []
+        for ln in (text or "").splitlines():
+            key = ln.strip()
+            if not key:
+                out.append(ln)
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > keep:
+                continue
+            out.append(ln)
+        return "\n".join(out).strip()
 
     @staticmethod
     def _clean_final_text(text: str) -> str:
