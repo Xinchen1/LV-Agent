@@ -69,6 +69,29 @@ def clean_runtime_text(text: str) -> str:
     return _RE_WS.sub(" ", text).strip()
 
 
+# 工具失败文案前缀(中英文统一): 三个 adapter 共用同一判定,
+# 避免中文错误"工具调用失败: ..."在界面上被当成成功打 ✓。
+ERROR_PREFIXES = (
+    "tool execution error", "tool error", "timed out", "system stop",
+    "工具调用失败", "工具执行失败", "抱歉，执行时遇到问题", "执行失败",
+)
+# 策略拦截(安全/权限)属于"可解释的拒绝", 用琥珀色 ◐ 而不是红色 ✗
+POLICY_HINTS = (
+    "blocked for safety", "denied by", "harness denied", "denied by harness",
+    "not allowed", "not in allowed", "permission denied", "forbidden", "权限",
+)
+
+
+def is_policy_text(text: str) -> bool:
+    low = (text or "").lower()
+    return any(k in low for k in POLICY_HINTS)
+
+
+def is_error_text(text: str) -> bool:
+    """工具结果是否为失败(与策略拦截无关, 由调用方先排除 policy)."""
+    return (text or "").lower().startswith(ERROR_PREFIXES)
+
+
 def _line_starts_nonascii(line: str) -> bool:
     """行首(忽略前导空白)是否为非 ASCII 字符——用于判定'是否切到了用户语言'."""
     s = line.lstrip()
@@ -200,14 +223,10 @@ class PlainStreamAdapter(StreamAdapter):
         line = clean_runtime_text(text)
         if not line:
             return
-        low = line.lower()
-        is_warn = (
-            low.startswith(("tool error", "tool execution error", "timed out", "system stop"))
-            or "blocked for safety" in low or "denied" in low or "not allowed" in low
-        )
+        is_warn = is_error_text(line) or is_policy_text(line)
         level = "warn" if is_warn else "tool_result"
         # Summarize large tool outputs instead of flooding non-TTY logs.
-        if len(line) > self.max_tool_result_len and not low.startswith(("tool error", "tool execution error")):
+        if len(line) > self.max_tool_result_len and not is_error_text(line):
             summary = self._summarize_tool_result(line)
             line = f"{summary} ({len(line)} chars; full result in prompt)"
         print(f"{self._prefix(level)}  <- {fit_line(line)}", flush=True)
@@ -282,7 +301,7 @@ class JsonStreamAdapter(StreamAdapter):
     def emit_tool_result(self, text: str) -> None:
         self._flush_content()
         cleaned = clean_runtime_text(text)
-        success = not any(cleaned.lower().startswith(p) for p in ("tool error", "tool execution error", "timed out", "system stop"))
+        success = not is_error_text(cleaned)
         # Avoid dumping huge JSON blobs into JSON Lines output.
         if len(cleaned) > self.max_tool_result_len and success:
             cleaned = self._summarize_tool_result(cleaned)
@@ -486,19 +505,18 @@ class RichStreamAdapter(StreamAdapter):
             print(f"\n{terminal.token('─ tools ─', 'rule')}")
             self._tool_header_printed = True
         _PENDING_DOT = "\033[32;5m•\033[0m"
-        print(f" {_PENDING_DOT} {terminal.token(text, 'muted')}")
+        # 参数可能很长(写入内容/长 JSON), 收窄到一行内避免终端折行刷屏
+        line = fit_line(text, max(min(term_width() - 4, 110), 40))
+        print(f" {_PENDING_DOT} {terminal.token(line, 'muted')}")
 
     def _print_tool_result(self, text: str) -> None:
         if self._live is not None:
             self._stop_thinking()
         from agent_project import terminal
-        low = text.lower()
-        # 策略提示(非错误): 安全拦截/权限拒绝等 → 用黄色而非红色(优先判断, 可能带 "Tool error:" 前缀)
-        is_policy = any(k in low for k in ("blocked for safety", "denied by", "harness denied",
-                                             "denied by harness", "not allowed", "not in allowed",
-                                             "permission denied", "forbidden"))
-        # 真错误: 执行失败/超时/系统停止
-        is_error = (not is_policy) and low.startswith(("tool execution error", "timed out", "system stop", "tool error:"))
+        # 策略提示(非错误): 安全拦截/权限拒绝等 → 用琥珀色而非红色(优先判断, 可能带 "Tool error:" 前缀)
+        is_policy = is_policy_text(text)
+        # 真错误: 执行失败/超时/系统停止(中英文前缀统一见 ERROR_PREFIXES)
+        is_error = (not is_policy) and is_error_text(text)
 
         # 结构化结果(web_search 等返回 JSON 列表)始终压缩, 以静默列表呈现, 去掉 JSON 噪音
         compact = self._compact_tool_result(text)
@@ -582,7 +600,8 @@ class RichStreamAdapter(StreamAdapter):
         """
         from agent_project import terminal
         width = max(min(term_width() - 8, 72), 40)
-        max_lines = 3  # 极简: 最多显示 3 行, 其余折叠
+        # 错误信息(含 traceback)多显示几行, 成功结果保持极简折叠
+        max_lines = 6 if is_error and not policy else 3
         name = self._last_tool_name or "exec"
         lines = text.rstrip().split("\n")
         if policy:
@@ -616,7 +635,8 @@ class RichStreamAdapter(StreamAdapter):
                 print(f" {terminal.token('│ ' + ln, 'muted')}")
         if more > 0:
             print(f" {terminal.token(f'│ … ({more} more lines)', 'muted')}")
-        footer = terminal.token(f"╰─ {len(lines)} lines{tail}", style)
+        _n = len(lines)
+        footer = terminal.token(f"╰─ {_n} line{'' if _n == 1 else 's'}{tail}", style)
         print(f" {footer}\n")
 
     # ------------------------------------------------------------------

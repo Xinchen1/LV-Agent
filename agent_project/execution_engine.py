@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .checkpoint import CheckpointManager
+from .stream_adapters import is_error_text
 from .tools import TOOLS_REGISTRY, ToolResult
 
 # Precompiled patterns — avoid recompilation in hot paths (called per turn / per text clean)
@@ -933,7 +934,7 @@ class ExecutionEngine:
                     # 取最近一次成功工具输出的前 800 字符作为兜底摘要
                     last_obs = ctx.observations[-1] if ctx.observations else ""
                     provisional = last_obs.strip()[:800]
-                    if provisional and not trace.final_answer:
+                    if provisional and not trace.final_answer and self._should_echo_observation(provisional):
                         summary = f"工具执行结果摘要:\n\n{provisional}"
                         # 仅向 UI 透出内容(不入 trace/observations):
                         # 真实观察已在上方 append, 再写一份会造成上下文重复膨胀
@@ -1536,6 +1537,21 @@ class ExecutionEngine:
         elif trace.duration_ms > 60000:
             score -= 0.1
         return max(0.0, min(1.0, score))
+
+    # 工具观察超过该长度时结果框会折叠, 需要额外回显摘要; 以内已在框内完整显示
+    _ECHO_MIN_CHARS = 400
+
+    @classmethod
+    def _should_echo_observation(cls, obs: str) -> bool:
+        """工具观察是否需要作为临时正文再回显一次.
+
+        短输出/失败输出已经在 ✗✓ 结果框里出现, 逐字回显只会让界面出现同一段文字两遍;
+        只有被折叠的长输出才值得再给一份可滚动正文。
+        """
+        text = (obs or "").strip()
+        if not text or is_error_text(text):
+            return False
+        return len(text) > cls._ECHO_MIN_CHARS
 
     def _stream_reasoning(self, ctx: ExecutionContext, reasoning: str):
         if not reasoning or not ctx.stream_callback:
