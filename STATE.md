@@ -14,3 +14,4 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-05 22:40] 精简 file_ops（砍 grep/find/analyze/backup/diff，三工具分工 + 纠偏提示）+ 输出美化（工具参数 JSON 化、错误 ✗ 只出现一次、[TOOL:] 不泄漏、footer 单复数），新增 12 个回归测试（310 全绿）。
 - [2026-10-05 23:05] 配置向导 API Key 改为逐字符掩码回显（替换 getpass 完全不回显），支持退格擦除与粘贴转义序列（316 全绿）。
 - [2026-10-05 23:35] 安装包去隐私重打包：electron-builder extraResources 移除 config.yaml、过滤 agent_project 下 config/memory/session 等隐私文件；根 config.yaml 真实 key 改 ${ENV:-} 占位；重建 dmg/zip 上传并发布 GitHub v1.0.0 正式版，官网 Download 按钮恢复可下载。
+- [2026-10-05 23:55] 修复安装包“已损坏”：app 仅 linker-signed 被 Gatekeeper 判定损坏，手动 codesign --force --deep --sign - 重签，重打 zip(ditto)/dmg(hdiutil) 后重新上传 v1.0.0 并发布；release 说明补充右键打开/xattr -cr 提示。
