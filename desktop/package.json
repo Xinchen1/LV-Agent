@@ -48,12 +48,19 @@
           "!**/*.pyc",
           "!**/.pytest_cache/**",
           "!**/data/**",
-          "!**/logs/**"
+          "!**/logs/**",
+          "!**/config.yaml",
+          "!**/*.backup",
+          "!**/*_session*.md",
+          "!**/episodes.json",
+          "!**/conversation_history.json",
+          "!**/wiki_graph.json",
+          "!**/memory.md",
+          "!**/user.md",
+          "!**/.env*",
+          "!**/*.skill.md",
+          "!**/test_data_output/**"
         ]
-      },
-      {
-        "from": "../config.yaml",
-        "to": "config.yaml"
       },
       {
         "from": "../config.example.yaml",
