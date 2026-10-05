@@ -197,6 +197,11 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-10-05
+
+- **循环加固（11 项修复）** — 复读检测与折叠（原句/两句交替重复超阈值自动压缩，不再刷屏）；阶段 2 纯文本空转熔断（连续 3 轮无工具无答案强制收尾，此前绕过无进展检查可无限催促）；工具参数按 `execute()` 签名过滤 + TypeError 提取肇事 kwarg 自动重试（模型多生成 `description` 等字段不再废掉整次调用）；修复 ConvergenceChecker 去重 key 与 `call_counts` 写入格式不一致导致的死代码（阈值对齐为 ≥3 次）；超时放弃的同参调用不再重复起线程（inflight Event 防堆积）；限流文本识别（ResourceExhausted/rate limit）+ 指数退避；fast-path 错误透出真实 `str(e)[:200]` 而非笼统提示；glob 0 结果给出可操作提示；API Key 输入改 getpass 掩码（5 处）；摘要去重防上下文污染。
+- **测试与安全** — 新增 `tests/test_loop_hardening.py` 11 个回归用例，全量 297 passed；`.gitignore` 屏蔽 `memory.md`/`user.md`/`episodes.json`/`conversation_history.json`/`wiki_graph.json`/`*.skill.md` 等记忆隐私文件，确保永不入库。
+
 ### 2026-09-27
 
 - **自进化 B 方案接入** — hotswap 真正接管 LLM 后端：初始化时把 `self.backend` 注册为 `model_backend` 能力槽；`reload_backend`（/model 切换模型）改为通过 hotswap 切换，新后端替换为 active、旧后端保留进版本图并记为回滚目标；每回合 `force_observe()` 检测 active 是否退化（错误率/延迟综合分），退化则自动回滚到上一个可用模型；切换失败安全回退普通路径，不中断会话。
