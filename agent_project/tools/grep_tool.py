@@ -386,7 +386,16 @@ class GlobTool(BaseTool):
                 results.append(f"{rel}{kind}{size_str}")
 
             output = f"Found {len(results)} file(s) matching '{pattern}' in {search_path}:\n"
-            output += "\n".join(results) if results else "  (none)"
+            if results:
+                output += "\n".join(results)
+            else:
+                output += (
+                    "  (none)\n"
+                    "提示: 0 结果时请换策略——"
+                    "① macOS 截图命名常为 '截屏 日期' / 'Screenshot 名称' / '屏幕快照', 中英文关键词都要试;"
+                    "② 放宽 pattern(如 *关键词*), 或改用 bash_exec: find <目录> -iname '*关键词*';"
+                    "③ 确认目录无误后再找。"
+                )
             if timed_out:
                 output += "\n(partial: 遍历超时, 仅为部分结果)"
 
