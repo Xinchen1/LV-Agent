@@ -54,6 +54,10 @@ class ToolCallParser:
         "read", "multi_read", "fast_read", "write", "list", "exists",
         "analyze", "grep", "diff", "backup", "find", "apply_diff", "verify", "open",
     }
+    # NOTE: analyze/grep/diff/backup/find are no longer file_ops actions (they were
+    # split into search_files / glob / bash_exec). They stay in this set so a flat
+    # {"action":"grep",...} model output still parses as a file_ops call and gets a
+    # redirect hint from FileOpsTool._REMOVED_ACTIONS instead of being dropped.
 
     # Precompiled regexes for _parse_json_with_bare_quotes (avoid re.compile in loops)
     _RE_JSON_KEY = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:')

@@ -2413,9 +2413,14 @@ class OpenMythosAgent:
             started_at = datetime.now()
         # 清洗后平滑重放干净答案(非实时流式时统一输出, 避免 think 残留/回声)。
         # 若正文已由实时流逐字透出(already_streamed), 则不再重放, 防止双重显示。
-        if stream_callback and final_answer and not already_streamed:
-            for i in range(0, len(final_answer), 8):
-                stream_callback("content", final_answer[i:i + 8])
+        # 工具失败的兜底答案已由 ✗ 结果框展示过, 同一段错误不重播第二次。
+        from .stream_adapters import is_error_text
+        from .response_filter import strip_tool_tags
+        _error_shown = is_error_text(final_answer or "")
+        if stream_callback and final_answer and not already_streamed and not _error_shown:
+            replay_text = strip_tool_tags(final_answer)
+            for i in range(0, len(replay_text), 8):
+                stream_callback("content", replay_text[i:i + 8])
                 time.sleep(0.003)
 
         if self.context_engine and not self._is_truncated_answer(final_answer):
@@ -5015,13 +5020,30 @@ class OpenMythosAgent:
             pass
 
         try:
-            stream_callback("tool_call", f"{action.tool_name}: {self._redact_secrets(str(action.arguments))}")
-            stream_callback("tool_result", self._redact_secrets(final_answer) if not tool_result.success else display_text)
-            if not suppress_content:
+            stream_callback("tool_call", f"{action.tool_name}: {self._format_tool_args(action.arguments)}")
+            stream_callback("tool_result", display_text)
+            if not suppress_content and tool_result.success:
                 # Mark content as started so the final answer is not re-printed verbatim.
-                stream_callback("content", "\n" + display_text)
+                # [TOOL:...] 若混进工具输出, 直接剥掉, 不让协议标记泄漏到正文。
+                from .response_filter import strip_tool_tags
+                stream_callback("content", "\n" + strip_tool_tags(display_text))
         except Exception:
             pass
+
+    @classmethod
+    def _format_tool_args(cls, arguments: Any, limit: int = 200) -> str:
+        """工具调用参数的展示文本: JSON 而非 Python dict(双引号/中文可读)并截断超长值."""
+        if isinstance(arguments, dict):
+            try:
+                text = json.dumps(arguments, ensure_ascii=False, default=str)
+            except Exception:
+                text = str(arguments)
+        else:
+            text = str(arguments)
+        text = cls._redact_secrets(text)
+        if len(text) > limit:
+            text = text[: limit - 1] + "…"
+        return text
 
     def _build_tool_retry_prompt(self, task: str, raw_answer: str,
                                  action: ToolCall, tool_result: ToolResult) -> str:

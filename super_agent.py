@@ -52,7 +52,9 @@ from agent_project.stream_adapters import (
   RichStreamAdapter,
   select_stream_adapter,
   render_markdown_rich,
+  is_error_text,
 )
+from agent_project.response_filter import strip_tool_tags
 from agent_project import terminal
 from agent_project.ui import StatusBar
 
@@ -82,7 +84,8 @@ _EMOJI_RE = re.compile(
 
 
 def _clean_content_text(text: str) -> str:
-  return _EMOJI_RE.sub("", text)
+  # 剥离泄漏到正文的 [TOOL:...] 协议标记(兜底, 流式层已先过滤一遍)
+  return _EMOJI_RE.sub("", strip_tool_tags(text))
 
 
 def _portrait_path() -> Path:
@@ -424,14 +427,15 @@ class SuperAgentCLI:
     ok = bool(result.get('success'))
     status = terminal.token("ok", "success") if ok else terminal.token("failed", "error")
     # budget 是初始思考预算, 可能被动态扩循环超出; 与实际执行 steps 不一致时显示真实区间
-    budget_disp = f"budget {budget}~{loops}" if budget and loops and loops > budget else f"budget {budget}"
-    meta = " · ".join([
+    budget_disp = f"budget {budget}~{loops}" if budget and loops and loops > budget else (f"budget {budget}" if budget else "")
+    step_disp = f"{loops} step" + ("" if loops == 1 else "s")
+    meta = " · ".join(x for x in [
       status,
-      terminal.token(f"{loops} steps", "muted"),
-      terminal.token(budget_disp, "muted"),
+      terminal.token(step_disp, "muted"),
+      terminal.token(budget_disp, "muted") if budget_disp else "",
       terminal.token(f"{duration:.1f}s", "muted"),
       terminal.token(f"{tokens_display} tokens", "muted"),
-    ])
+    ] if x)
     # 细线分隔 + 灰色元信息, 让结果与元数据有层次
     return terminal.token("· " + "─" * 28 + " ·", "rule") + "\n " + meta
   def start_telegram(self):
@@ -2104,7 +2108,8 @@ class SuperAgentCLI:
     """统一收尾: 打印未流式答案 + 元信息 + 自动打开报告."""
     content_streamed = result.pop('_content_streamed', False)
     final_answer = result.get('final_answer', '')
-    if not content_streamed and final_answer:
+    # 工具失败的兜底答案已由 ✗ 结果框展示, 不再重复打印同一段错误
+    if not content_streamed and final_answer and not is_error_text(final_answer):
       # 兜底路径也走 markdown 高亮, 与流式输出一致(而不是纯文本)
       print("\n" + render_markdown_rich(_clean_content_text(final_answer)))
     print(f"\n{self.format_result(result)}")

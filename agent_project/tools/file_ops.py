@@ -17,7 +17,6 @@ import hashlib
 import subprocess
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -342,13 +341,26 @@ class FastReadCache:
 
 class FileOpsTool(BaseTool):
     name = "file_ops"
+
+    # 旧子动作已拆分到专用工具, 调用时直接给纠偏提示而不是静默失败。
+    # 提示保持短(结果框按终端宽度截断), 必须点名目标工具。
+    _REMOVED_ACTIONS = {
+        "grep": "grep 已移除 -> 用 search_files(query=..., path=...) 搜内容",
+        "find": "find 已移除 -> 用 glob(pattern=..., path=...) 找文件名",
+        "analyze": "analyze 已移除 -> 用 bash_exec ('ls -la' / 'wc -l')",
+        "backup": "backup 已移除 -> 用 bash_exec ('cp -a <file> <file>.bak')",
+        "diff": "diff 已移除 -> 用 bash_exec ('diff <a> <b>')",
+    }
+
     description = (
-        "Powerful file operations tool. Supports read, multi_read, fast_read, write, list, exists, "
-        "analyze, grep, diff, backup, find, apply_diff (search/replace edits), verify (syntax check), "
-        "and open (launch with the default system application) operations on files and directories. "
+        "File operations on files and directories: read, multi_read, fast_read, write, list, exists, "
+        "apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
+        "system application). All I/O is performed by a native Rust backend with persistent process "
+        "pooling for low latency.\n"
         "Use fast_read for long articles: it chunks the file, builds a local vector cache, and retrieves "
-        "only the relevant chunks for a given query. All I/O is performed by a native Rust backend with "
-        "persistent process pooling for low latency."
+        "only the relevant chunks for a given query.\n"
+        "This tool does NOT search: use search_files (content) or glob (file names) instead, and "
+        "bash_exec for diff/backup/analyze."
     )
 
     parameters = {
@@ -356,7 +368,7 @@ class FileOpsTool(BaseTool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "analyze", "grep", "diff", "backup", "find", "apply_diff", "verify", "open"],
+                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open"],
                 "description": "File operation to perform"
             },
             "path": {
@@ -379,10 +391,6 @@ class FileOpsTool(BaseTool):
             "limit": {
                 "type": "integer",
                 "description": "Maximum lines to read"
-            },
-            "pattern": {
-                "type": "string",
-                "description": "Search pattern for grep/find action"
             },
             "diff": {
                 "type": "string",
@@ -726,7 +734,7 @@ class FileOpsTool(BaseTool):
     def _python_fallback(self, payload: Dict[str, Any]) -> ToolResult:
         """Pure-Python fallback for basic file ops when the Rust binary is
         unavailable (wrong architecture / missing). Supports the most common
-        actions: read, write, list, exists, grep, analyze."""
+        actions: read, write, list, exists, multi_read, apply_diff, verify."""
         action = payload.get("action", "")
         path = payload.get("path", "")
         try:
@@ -769,57 +777,6 @@ class FileOpsTool(BaseTool):
                 return ToolResult(success=True, output="\n".join(lines) or "(empty)", metadata={"count": len(entries), "fallback": "python"})
             if action == "exists":
                 return ToolResult(success=True, output=str(p.exists()), metadata={"exists": p.exists(), "fallback": "python"})
-            if action == "grep":
-                if not p.exists():
-                    return ToolResult(success=False, output="", error=f"Path not found: {path}")
-                pat = payload.get("pattern", "")
-                try:
-                    regex = re.compile(pat)
-                except re.error:
-                    regex = re.compile(re.escape(pat))
-                # 目录 -> 递归搜索文件; 单文件 -> 直接搜索
-                files_to_scan = []
-                if p.is_dir():
-                    try:
-                        for root, dirs, fnames in os.walk(p):
-                            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "target", "dist", "build", ".cache")]
-                            for fn in fnames:
-                                files_to_scan.append(str(Path(root) / fn))
-                    except Exception:
-                        files_to_scan = []
-                else:
-                    files_to_scan = [str(p)]
-                matches = []
-                limit = int(payload.get("limit") or payload.get("max_results") or 200)
-                for fp in files_to_scan:
-                    if len(matches) >= limit:
-                        break
-                    try:
-                        with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                            for i, line in enumerate(f, 1):
-                                if regex.search(line):
-                                    matches.append(f"{fp}:{i}:{line.rstrip()}")
-                                    if len(matches) >= limit:
-                                        break
-                    except Exception:
-                        continue
-                if not matches:
-                    return ToolResult(success=True, output=f"(no matches for '{pat}' in {path})", metadata={"matches": 0, "fallback": "python"})
-                return ToolResult(success=True, output="\n".join(matches), metadata={"matches": len(matches), "fallback": "python"})
-            if action == "analyze":
-                if not p.exists():
-                    return ToolResult(success=False, output="", error=f"Path not found: {path}")
-                stat = p.stat()
-                info = f"path: {p}\nsize: {stat.st_size} bytes\nmodified: {datetime.fromtimestamp(stat.st_mtime)}"
-                if p.is_file():
-                    try:
-                        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-                        info += f"\nlines: {len(lines)}\ntype: file"
-                    except Exception:
-                        info += "\ntype: binary file"
-                else:
-                    info += f"\ntype: directory\nentries: {len(list(p.iterdir()))}"
-                return ToolResult(success=True, output=info, metadata={"fallback": "python"})
             if action == "open":
                 resolved_path = str(self._resolve_path_smart(path))
                 return self._open_path(resolved_path)
@@ -827,56 +784,23 @@ class FileOpsTool(BaseTool):
                 return self._python_apply_diff(p, payload)
             if action == "verify":
                 return self._python_verify(p)
-            if action == "find":
-                return self._python_find(p, payload)
             if action == "multi_read":
                 return self._python_multi_read(payload)
-            if action == "diff":
-                return ToolResult(success=False, output="",
-                                  error="diff 需 Rust 二进制(可改用 bash_exec: diff <file1> <file2>)")
-            if action == "backup":
-                return self._python_backup(p)
+            # Removed sub-actions already redirect in execute(); this is a
+            # safety net for direct _python_fallback() callers.
+            if action in self._REMOVED_ACTIONS:
+                return ToolResult(success=False, output="", error=self._REMOVED_ACTIONS[action])
             # Unsupported action in fallback
             return ToolResult(
                 success=False, output="",
                 error=f"Action '{action}' requires the Rust binary (incompatible/missing on this machine). "
                       f"Install Rust and run `cargo build --release` in the rust_file_ops/ directory, "
-                      f"or use a supported action: read, write, list, exists, grep, analyze, find, multi_read, backup."
+                      f"or use a supported action: read, multi_read, fast_read, write, list, exists, "
+                      f"apply_diff, verify, open."
             )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Python fallback error: {e}")
 
-    def _python_find(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
-        """纯 Python find: 按文件名模式(glob)递归查找, 列出匹配文件.
-
-        与 Rust 实现对齐的常见用法: pattern='package.json' / '**/*.md' / '*.py'。
-        限制: 目录下文件过多时可能较慢(纯 Python 递归), 正常项目规模可用。
-        """
-        import fnmatch
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"Path not found: {p}")
-        pattern = payload.get("pattern") or "*"
-        base_pattern = pattern
-        if "/" in pattern or "**" in pattern:
-            base_pattern = pattern.split("/")[-1] or "*"
-        limit = int(payload.get("limit") or payload.get("max_results") or 100)
-        matches = []
-        try:
-            for root, dirs, files in os.walk(p):
-                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "target", "dist", "build", ".obsidian", ".cache")]
-                for fname in files:
-                    if fnmatch.fnmatch(fname, base_pattern):
-                        matches.append(str(Path(root) / fname))
-                    if len(matches) >= limit:
-                        break
-                if len(matches) >= limit:
-                    break
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"find failed: {e}")
-        if not matches:
-            return ToolResult(success=True, output=f"(no matches for '{pattern}' in {p})", metadata={"count": 0, "fallback": "python"})
-        out = f"Found {len(matches)} file(s) in {p} matching '{pattern}':\n" + "\n".join(matches)
-        return ToolResult(success=True, output=out, metadata={"count": len(matches), "fallback": "python"})
 
     def _python_multi_read(self, payload: Dict[str, Any]) -> ToolResult:
         """纯 Python multi_read: 并行读取多个文件, 合并输出."""
@@ -897,22 +821,6 @@ class FileOpsTool(BaseTool):
             except Exception as e:
                 results.append(f"--- {fp} [ERROR: {e}] ---")
         return ToolResult(success=True, output="\n\n".join(results), metadata={"files": len(paths), "fallback": "python"})
-
-    def _python_backup(self, p: Path) -> ToolResult:
-        """纯 Python backup: 复制文件/目录到带时间戳的 .bak 副本."""
-        import shutil
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"Path not found: {p}")
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        backup_path = Path(str(p) + f".{stamp}.bak")
-        try:
-            if p.is_dir():
-                shutil.copytree(p, backup_path)
-            else:
-                shutil.copy2(p, backup_path)
-            return ToolResult(success=True, output=f"Backup saved to {backup_path}", metadata={"backup": str(backup_path), "fallback": "python"})
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"backup failed: {e}")
 
     def _python_apply_diff(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
         """纯 Python 的 apply_diff: 支持 SEARCH/REPLACE 块, 精确+行级匹配, 失败给最近行提示."""
@@ -1090,6 +998,10 @@ class FileOpsTool(BaseTool):
             paths = [path]
         if action == "multi_read" and not path:
             path = "."
+        # 已下线的子动作: 不执行, 返回指向专用工具的纠偏提示
+        redirect = self._REMOVED_ACTIONS.get(str(action).strip().lower())
+        if redirect:
+            return ToolResult(success=False, output="", error=redirect)
         try:
             resolved = str(self._resolve_path_smart(path))
 
