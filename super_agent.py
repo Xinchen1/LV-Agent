@@ -423,10 +423,12 @@ class SuperAgentCLI:
     tokens_display = f"{tokens // 1000}.{tokens % 1000 // 100}k" if tokens >= 1000 else str(tokens)
     ok = bool(result.get('success'))
     status = terminal.token("ok", "success") if ok else terminal.token("failed", "error")
+    # budget 是初始思考预算, 可能被动态扩循环超出; 与实际执行 steps 不一致时显示真实区间
+    budget_disp = f"budget {budget}~{loops}" if budget and loops and loops > budget else f"budget {budget}"
     meta = " · ".join([
       status,
       terminal.token(f"{loops} steps", "muted"),
-      terminal.token(f"budget {budget}", "muted"),
+      terminal.token(budget_disp, "muted"),
       terminal.token(f"{duration:.1f}s", "muted"),
       terminal.token(f"{tokens_display} tokens", "muted"),
     ])
@@ -2274,10 +2276,21 @@ class SuperAgentCLI:
     print("\033[32mconfig updated\033[0m")
     return True
 
+  def _ask_secret(self, prompt_text: str) -> str:
+    """读取敏感输入(API Key 等): 掩码回显, 不在终端明文显示/落历史."""
+    try:
+      import getpass
+      return getpass.getpass(prompt_text + ": ").strip()
+    except (EOFError, KeyboardInterrupt):
+      print(" cancelled.")
+      return ""
+    except Exception:
+      return Prompt.ask(prompt_text).strip()
+
   def _configure_nvidia(self, cfg):
     import yaml
     print("\n\033[1mNVIDIA NIM\033[0m\n")
-    api_key = Prompt.ask("API Key (nvapi-...)").strip()
+    api_key = self._ask_secret("API Key (nvapi-...)")
     if not api_key:
       print(" \033[31mAPI key required\033[0m")
       return
@@ -2320,7 +2333,7 @@ class SuperAgentCLI:
   def _configure_anthropic(self, cfg):
     import yaml
     print("\n\033[1mAnthropic\033[0m\n")
-    api_key = Prompt.ask("API Key (sk-ant-...)").strip()
+    api_key = self._ask_secret("API Key (sk-ant-...)")
     if not api_key.startswith('sk-ant-'):
       print(" \033[33mwarning: Anthropic keys usually start with 'sk-ant-'\033[0m")
 
@@ -2363,7 +2376,7 @@ class SuperAgentCLI:
   def _configure_openai_direct(self, cfg):
     import yaml
     print("\n\033[1mOpenAI API\033[0m\n")
-    api_key = Prompt.ask("API Key (sk-...)").strip()
+    api_key = self._ask_secret("API Key (sk-...)")
     model = Prompt.ask("model", default="gpt-4o-mini").strip()
     cfg.setdefault('agent', {})
     cfg['agent']['backend'] = 'openai'
@@ -2380,7 +2393,7 @@ class SuperAgentCLI:
   def _configure_openrouter(self, cfg):
     import yaml
     print("\n\033[1mOpenRouter\033[0m\n")
-    api_key = Prompt.ask("API Key").strip()
+    api_key = self._ask_secret("API Key")
     model = Prompt.ask("model", default="openai/gpt-4o-mini").strip()
     cfg.setdefault('agent', {})
     cfg['agent']['backend'] = 'openai'
@@ -2414,7 +2427,7 @@ class SuperAgentCLI:
   def _configure_deepseek(self, cfg):
     import yaml
     print("\n\033[1mDeepSeek\033[0m\n")
-    api_key = Prompt.ask("API Key").strip()
+    api_key = self._ask_secret("API Key")
     if not api_key:
       print(" \033[31mAPI key required\033[0m")
       return

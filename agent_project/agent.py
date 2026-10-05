@@ -2573,8 +2573,11 @@ class OpenMythosAgent:
                     )
             except Exception as e:
                 # 稳定性: 后端调用失败(重试耗尽/非连接错误)不让整轮崩溃, 降级为友好提示
+                # 错误消息必须透出(截断到200字): 只给类型名会掩盖
+                # "模型ID不存在/401鉴权失败/限流"等可直接定位的真实原因
                 self.logger.error(f"fast generate failed: {type(e).__name__}: {e}")
-                raw_answer = f"抱歉, 生成暂时失败({type(e).__name__}), 请稍后重试。"
+                _err_brief = str(e).strip().replace("\n", " ")[:200] or "无详情"
+                raw_answer = f"抱歉, 生成暂时失败({type(e).__name__}): {_err_brief}, 请稍后重试。"
 
         # 动态 token 统计：从后端读取真实使用量
         tokens_used = getattr(self.backend, "last_total_tokens", None)

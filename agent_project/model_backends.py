@@ -869,9 +869,16 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                         "Please check your API key and base_url."
                     ) from e
                 # Rate limit: exponential backoff.
-                if status == 429:
+                # 无 HTTP 状态码的限流(如 ResourceExhausted / "request limit
+                # reached")同样按限流处理, 走确定性指数退避而非通用重试
+                _rate_limited = status == 429 or any(
+                    k in str(e).lower()
+                    for k in ("rate limit", "resourceexhausted", "request limit",
+                              "too many requests", "quota exceeded")
+                )
+                if _rate_limited:
                     wait = backoff_base * (2 ** attempt)
-                    print(_style(f"  rate limit (429), retrying in {wait}s", "2"))
+                    print(_style(f"  rate limit, retrying in {wait}s ({type(e).__name__})", "2"))
                     time.sleep(wait)
                     if attempt == max_attempts - 1:
                         self._cb_record_failure()
