@@ -16,7 +16,7 @@ def tool_returns_listing(action) -> bool:
     name = getattr(action, "tool_name", "")
     args = getattr(action, "arguments", {}) or {}
     if name == "file_ops":
-        return str(args.get("action", "")).lower() in ("list", "find", "grep")
+        return str(args.get("action", "")).lower() == "list"
     if name in ("bash_exec", "run_code", "python_exec"):
         return True
     return False
@@ -32,6 +32,9 @@ def skip_tool_retry(action, tool_result) -> bool:
     if name == "web_search" and any(
         k in err for k in ("no search results", "no results", "无结果", "没有找到", "nothing found", "timed out", "timeout")
     ):
+        return True
+    # file_ops 已下线子动作的纠偏提示: 原样重试必然复现, 交给上层重新规划
+    if name == "file_ops" and ("已移除 ->" in err or "removed from file_ops" in err):
         return True
     return False
 
