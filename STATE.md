@@ -23,4 +23,6 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-06 14:35] 系统梳理+站点对齐：清理 1.5G dist/、.codeartsdoer/、frontend-design-proposal/、.DS_Store/.pytest_cache/__pycache__、.bak/PDF/session 残档；/deep_research 补自动补全；pyproject 版本对齐站点 V1.1.0（DMG 仍是 1.0.0，下次打包需出 1.1.0）。
 - [2026-10-06 22:40] 实测 lv 四任务后修复：config.yaml NIM key 外置到 .env（${NVAPI_KEY:-}）；删 .env 里失效的 OPENAI_API_KEY；置信度行过滤正则放宽（吞 1.02/85%/整数）；hotswap asyncio.iscoroutinefunction→inspect；telegram 未装时静默、fallback tokenizer 降 debug；新增 30s 慢后端提示与 _last_activity 空闲看门狗。 pytest 316 全绿。loops 偏高实为模型步数而非配置 bug，未改。
 - [2026-10-06 23:10] file_ops 本地强操作补齐：新增 mkdir/delete/move/copy/stat 五个原生 action（Python 实现、系统路径防护仍生效、Rust 后端不支持的操作在 execute 层拦截处理），tool 描述与 schema 同步，test_file_ops_slim 白名单更新。
+- [2026-10-06 23:15] MCP filesystem 映射修 bug：create_directory 原错误映射到 file_ops list（实际执行是列目录而不是建目录），已改指 mkdir；get_file_info 改指 stat；补齐 delete_file/move_file/copy_file→delete/move/copy。
+- [2026-10-06 23:10] file_ops 本地强操作补齐：新增 mkdir/delete/move/copy/stat 五个原生 action（Python 实现、系统路径防护仍生效、Rust 后端不支持的操作在 execute 层拦截处理），tool 描述与 schema 同步，test_file_ops_slim 白名单更新。
 - [2026-10-06 22:55] UI 简洁化：工具结果兜底摘要从 800 字符→200（合并换行封顶）；⊙ STOP/⊙ Smart Dedup 的 cached 摘录不再透出 400 字原始结果（改为只报字符数）。pytest 316 全绿。
