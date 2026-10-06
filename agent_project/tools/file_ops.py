@@ -358,7 +358,7 @@ class FileOpsTool(BaseTool):
 
     description = (
         "File operations on files and directories: read, multi_read, fast_read, write, list, exists, "
-        "stat, mkdir, delete, move, copy, apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
+        "stat, mkdir, delete, move, copy, tree (depth-limited directory tree), du (directory size), apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
         "apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
         "system application). All I/O is performed by a native Rust backend with persistent process "
         "pooling for low latency.\n"
@@ -373,7 +373,7 @@ class FileOpsTool(BaseTool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat"],
+                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat", "tree", "du"],
                 "description": "File operation to perform"
             },
             "path": {
@@ -437,6 +437,7 @@ class FileOpsTool(BaseTool):
         self._stat_cache = _FileStatCache()
         self._pool = _RustProcessPool(size=4)
         self._batch_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="file_ops_batch_")
+        self._prewarm_pool()
 
     _PATH_ALIASES = {
         "文档": "Documents",
@@ -458,6 +459,17 @@ class FileOpsTool(BaseTool):
         "家目录": "~",
         "主目录": "~",
     }
+
+    def _prewarm_pool(self) -> None:
+        """后台预热 rust 进程池: 消除首次 file_ops 调用 ~20ms 的进程拉起冷启动."""
+        import threading as _th
+        def _warm():
+            try:
+                self._pool.call({"action": "exists", "path": "/tmp"}, timeout=5)
+            except Exception as e:
+                import logging as _l
+                _l.getLogger("lv.file_ops").debug(f"pool prewarm failed: {e}")
+        _th.Thread(target=_warm, daemon=True).start()
 
     def __del__(self):
         try:
@@ -1083,9 +1095,72 @@ class FileOpsTool(BaseTool):
 
             # 本地强操作:  mkdir/delete/move/copy/stat 由 Python 原生实现( Rust 后端暂不支持),
             # 带路径防护; 避免把简单本地操作甩给 bash_exec.
-            if action in ("mkdir", "delete", "move", "copy", "stat"):
+            if action in ("mkdir", "delete", "move", "copy", "stat", "tree", "du"):
                 import shutil, os, time as _time, json as _json
                 p = Path(resolved)
+                if action == "tree":
+                    depth = int((options or {}).get("depth") or kwargs.get("depth") or 2)
+                    max_entries = 200
+                    lines: List[str] = []
+                    def _walk(d: Path, prefix: str, level: int) -> None:
+                        if level > depth or len(lines) >= max_entries:
+                            return
+                        try:
+                            entries = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+                        except Exception:
+                            return
+                        hidden = 0
+                        for i, e in enumerate(entries):
+                            if len(lines) >= max_entries:
+                                hidden += 1
+                                continue
+                            conn = "└── " if i == len(entries) - 1 else "├── "
+                            mark = "/" if e.is_dir() else ""
+                            lines.append(f"{prefix}{conn}{e.name}{mark}")
+                            if e.is_dir():
+                                ext = "    " if i == len(entries) - 1 else "│   "
+                                _walk(e, prefix + ext, level + 1)
+                        if hidden:
+                            lines.append(f"{prefix}… ({hidden} more)")
+                    if not p.exists():
+                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
+                    lines.append(str(p) + ("/" if p.is_dir() else ""))
+                    if p.is_dir():
+                        _walk(p, "", 1)
+                    return ToolResult(success=True, output="\n".join(lines), metadata={"depth": depth, "entries": len(lines)})
+                if action == "du":
+                    max_files = 20000
+                    total = 0
+                    files = 0
+                    dirs = 0
+                    def _size(d: Path) -> None:
+                        nonlocal total, files, dirs
+                        try:
+                            for e in d.iterdir():
+                                if files >= max_files:
+                                    return
+                                if e.is_symlink():
+                                    continue
+                                if e.is_dir():
+                                    dirs += 1
+                                    _size(e)
+                                else:
+                                    try:
+                                        total += e.stat().st_size
+                                        files += 1
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            return
+                    if not p.exists():
+                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
+                    if p.is_file():
+                        total = p.stat().st_size
+                        files = 1
+                    else:
+                        _size(p)
+                    human = f"{total/1073741824:.2f}GB" if total >= 1073741824 else (f"{total/1048576:.1f}MB" if total >= 1048576 else f"{total/1024:.1f}KB")
+                    return ToolResult(success=True, output=f"{resolved}: {human} ({files} files, {dirs} dirs)", metadata={"bytes": total, "files": files, "dirs": dirs})
                 if action == "stat":
                     if not p.exists():
                         return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
