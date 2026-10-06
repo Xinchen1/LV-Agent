@@ -26,5 +26,6 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-06 23:15] MCP filesystem 映射修 bug：create_directory 原错误映射到 file_ops list（实际执行是列目录而不是建目录），已改指 mkdir；get_file_info 改指 stat；补齐 delete_file/move_file/copy_file→delete/move/copy。
 - [2026-10-06 23:30] 本地操作快路：_try_direct_intent_path 让高置信只读意图(file_ops list/read/stat/exists/multi_read/verify、glob、search_files、weather)直接执行不经 LLM；_classify_intent 新增"X 几个文件夹/有哪些文件"规则(桌面/文档/下载/当前目录)。pytest 316 全绿，实测 桌面几个文件夹 毫秒直出。
 - [2026-10-06 23:45] 思考过程不再全量刷屏：LiveStreamFilter 在中文输出尚未开始前抑制匹配英文自言自语模式的行；PlainStreamAdapter.emit_reasoning 改为只打一行 "thinking…" 轻提示。
+- [2026-10-07 00:05] 修 rust 探测误判：_check_rust_binary 原用 --version 探测，但 one-shot 模式 read_to_string(stdin) 在 TTY 下永远阻塞 → 3s 超时 → 误判"不可用"白掉 Python fallback 还拖慢启动 3s；改用真实 JSON 请求 + input=（写完即关），RUST_AVAILABLE 恢复 True，list 走 rust 进程池。
 - [2026-10-06 23:10] file_ops 本地强操作补齐：新增 mkdir/delete/move/copy/stat 五个原生 action（Python 实现、系统路径防护仍生效、Rust 后端不支持的操作在 execute 层拦截处理），tool 描述与 schema 同步，test_file_ops_slim 白名单更新。
 - [2026-10-06 22:55] UI 简洁化：工具结果兜底摘要从 800 字符→200（合并换行封顶）；⊙ STOP/⊙ Smart Dedup 的 cached 摘录不再透出 400 字原始结果（改为只报字符数）。pytest 316 全绿。
