@@ -546,7 +546,7 @@ class SuperAgentCLI:
       terminal.token(f"{tokens_display} tokens", "muted"),
     ] if x)
     # 细线分隔 + 灰色元信息, 让结果与元数据有层次
-    return terminal.token("· " + "─" * 28 + " ·", "rule") + "\n " + meta
+    return terminal.token("─" * 30, "rule") + "\n " + meta
   def start_telegram(self):
     if self._tg_process is not None and self._tg_process.poll() is None:
       print(" telegram bot already running")
@@ -1651,8 +1651,8 @@ class SuperAgentCLI:
     # 3) 画状态栏
     sys.stdout.write(self._footer_line())
     sys.stdout.write("\r\n")
-    # 4) 上移两行回到输入框行
-    sys.stdout.write("\033[2A\033[G")
+    # 4) 上移两行回到输入框行, 清行避免残留
+    sys.stdout.write("\033[2A\033[G\033[K")
     sys.stdout.flush()
     # 5) 渲染输入提示: 三段式「Lv + 路径 -> 光标」(参考设计方案)
     sys.stdout.write(self._prompt_prefix())
