@@ -204,11 +204,11 @@ class PlainStreamAdapter(StreamAdapter):
             print(f"{self._prefix('status')}{line}", flush=True)
 
     def emit_reasoning(self, text: str) -> None:
-        # In plain mode we intentionally keep reasoning compact: only emit
-        # complete sentences or significant fragments to avoid spamming logs.
-        cleaned = clean_runtime_text(text)
-        if cleaned and (cleaned.endswith((".", "。", "!", "?", "？", "！", ":", "：")) or len(cleaned) > 40):
-            print(f"{self._prefix('reasoning')}{fit_line(cleaned)}", flush=True)
+        # Plain 环境不做长 dynamic line;只打一次"思考中"提示,不刷全文
+        if clean_runtime_text(text):
+            if not getattr(self, "_reasoning_noted", False):
+                self._reasoning_noted = True
+                print(f"{self._prefix('status')}thinking…", flush=True)
 
     def emit_tool_call(self, text: str) -> None:
         if not self._tool_header_printed:

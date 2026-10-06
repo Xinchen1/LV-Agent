@@ -581,11 +581,14 @@ class _LiveStreamFilter:
         self._buf = ""
         self._in_tool = False
         self._in_think = False
+        # 还没见过中文等非 ASCII 内容前, 把英文"自言自语"整行抑制(流式早期泄露)
+        self._seen_non_ascii = False
 
     def reset(self) -> None:
         self._buf = ""
         self._in_tool = False
         self._in_think = False
+        self._seen_non_ascii = False
 
     def feed(self, text: str) -> None:
         if not text:
@@ -654,11 +657,19 @@ class _LiveStreamFilter:
         self._emit_clean(chunk)
 
     def _emit_clean(self, text: str) -> None:
+        from .response_filter import is_mostly_english, STRIP_SELFTALK_RE
         kept = []
         for ln in text.split("\n"):
             stripped = ln.strip()
             if self._LABEL_RE.match(stripped):
                 continue
+            # 在尚未输出任何非 ASCII(中文答案)前, 抑制英文自言自语整行,
+            # 避免模型内心独白(流式提前透出)刷满屏幕; 一旦开始输出中文就放开。
+            if not self._seen_non_ascii:
+                if any(ord(c) > 127 for c in ln):
+                    self._seen_non_ascii = True
+                elif is_mostly_english(stripped) and STRIP_SELFTALK_RE.search(stripped):
+                    continue
             # 去掉 "Final Answer:" 前缀, 保留答案正文, 让输出更干净
             if stripped.startswith("Final Answer:"):
                 ln = stripped[len("Final Answer:"):].lstrip()
