@@ -1,0 +1,11 @@
+name = "lv-agent-stats"
+main = "index.js"
+compatibility_date = "2026-10-06"
+
+[[kv_namespaces]]
+binding = "STATS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# 设置后访问 /stats 需要 ?key=...
+# [vars]
+# ADMIN_KEY = "change-me"

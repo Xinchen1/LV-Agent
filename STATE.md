@@ -18,3 +18,4 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-06 15:05] 安全扫描与加固：防火墙+隐身已开；SuperIDE 远程调试端口 9223 已从 app.asar 永久移除并重启；.zshrc 明文 API key 迁移到 chmod600 的 ~/.env.keys；.claude/.fcc/.lv_agent 的 .env 权限收紧为 600。
 - [2026-10-06 17:30] 把本地 Qwopus3.5 接入各端：opencode/pi 新增 local ollama provider；gemini-cli 经 gateway 的 ollama/ 前缀路由（已重启网关并实测）；FCC .env 加入 ollama/ 模型与 allowlist（fcc watchdog 已清理）；SuperIDE config-store 新增 local-ollama 模型并重打 asar 重启。
 - [2026-10-06 19:00] 新增 Qwopus3.5-9B-Coder：HF 拉取主包成功后 CDN 断连，用已缓存 blob 直接 ollama create 注册为 Qwopus3.5-9B-Coder:latest（可跑）；已加入 opencode/pi/FCC 双 .env allowlist/gemini settings/SuperIDE config-store，fcc /v1/models 与 /v1/messages 实测通过。
+- [2026-10-06 13:50] 心跳统计改造：_version_beacon 改为每 15 分钟周期心跳并带 ts/uptime/真实包版本；新增 cloudflare-stats-worker（POST /api/version 记录 iid 去重装机量，GET /stats 看 24h/7d 活跃、版本与平台分布）。域名 lv-agent.cleveris.research 当前 NXDOMAIN，需 wrangler login 后创建 KV 并部署。

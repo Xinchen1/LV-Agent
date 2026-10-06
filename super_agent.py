@@ -322,13 +322,13 @@ class SuperAgentCLI:
     threading.Thread(target=self._version_beacon, daemon=True).start()
 
   def _version_beacon(self):
-    """匿名版本检查(顺带使用统计): 查新版 + 让官方知道有人在用。
+    """匿名版本检查 + 周期心跳(可统计装机量与在线人数)。
 
-    隐私: 只发随机安装 ID + 版本号 + 平台, 无任务内容; LV_TELEMETRY=0 关闭。
+    隐私: 只发随机安装 ID + 版本号 + 平台 + 时间戳, 无任务内容; LV_TELEMETRY=0 关闭。
     企业级用量会在服务端留下痕迹, 是 AGPL 执法的线索来源之一。
     """
     try:
-      import os as _os, json as _json, uuid as _uuid, urllib.request as _url
+      import os as _os, json as _json, uuid as _uuid, urllib.request as _url, time as _time
       if _os.getenv("LV_TELEMETRY", "1") == "0":
         return
       iid_file = Path.home() / ".lv_agent" / "install_id"
@@ -341,11 +341,24 @@ class SuperAgentCLI:
           iid_file.write_text(iid)
       except Exception:
         iid = "unknown"
+      try:
+        from importlib.metadata import version as _pkg_version
+        _v = _pkg_version("lv-agent")
+      except Exception:
+        _v = "1.0.0"
       url = _os.getenv("LV_UPDATE_URL", "https://lv-agent.cleveris.research/api/version")
-      req = _url.Request(url, data=_json.dumps(
-        {"iid": iid, "v": "1.0.0", "platform": sys.platform}).encode(),
-        headers={"Content-Type": "application/json"})
-      _url.urlopen(req, timeout=4).read()
+      interval = int(_os.getenv("LV_BEACON_INTERVAL", "900"))  # 默认 15 分钟一次
+      started = _time.time()
+      while True:
+        try:
+          req = _url.Request(url, data=_json.dumps({
+            "iid": iid, "v": _v, "platform": sys.platform,
+            "ts": int(_time.time()), "uptime_s": int(_time.time() - started),
+          }).encode(), headers={"Content-Type": "application/json"})
+          _url.urlopen(req, timeout=4).read()
+        except Exception:
+          pass
+        _time.sleep(interval)
     except Exception:
       pass
 
