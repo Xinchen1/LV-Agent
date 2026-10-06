@@ -97,12 +97,15 @@ class ToolCallParser:
             _mcp_fs_map = {
                 "mcp_filesystem_read_file": ("file_ops", {"action": "read"}),
                 "mcp_filesystem_read_text_file": ("file_ops", {"action": "read"}),
-                "mcp_filesystem_get_file_info": ("file_ops", {"action": "exists"}),
+                "mcp_filesystem_get_file_info": ("file_ops", {"action": "stat"}),
                 "mcp_filesystem_list_directory": ("file_ops", {"action": "list"}),
                 "mcp_filesystem_list_allowed_directories": ("file_ops", {"action": "list"}),
                 "mcp_filesystem_write_file": ("file_ops", {"action": "write"}),
                 "mcp_filesystem_search_files": ("search_files", {}),
-                "mcp_filesystem_create_directory": ("file_ops", {"action": "list"}),
+                "mcp_filesystem_create_directory": ("file_ops", {"action": "mkdir"}),
+                "mcp_filesystem_delete_file": ("file_ops", {"action": "delete"}),
+                "mcp_filesystem_move_file": ("file_ops", {"action": "move"}),
+                "mcp_filesystem_copy_file": ("file_ops", {"action": "copy"}),
             }
             _lower = tool_name.strip().lower()
             if _lower in _mcp_fs_map:
