@@ -3598,6 +3598,14 @@ class OpenMythosAgent:
 
         内部自行构建 memory/history 上下文并落盘历史. 纯搬移自 run(), 不改行为.
         """
+        # ===== 确定性本地操作直达路径(最高优先级, 0 LLM 开销) =====
+        # 高置信只读本地意图(列目录/读文件/stat/glob/天气)直接执行工具返回,
+        # 不进 turbo/simple/LLM 任何回合。放在最前, 避免被 simple query 快路(仍走 LLM)截胡。
+        direct = self._try_direct_intent_path(task, stream_callback=stream_callback, token_callback=token_callback)
+        if direct is not None:
+            self._append_to_history(task, direct.get('final_answer', ''))
+            return direct
+
         # ===== 首次对话:强制极速 Turbo 模式 =====
         if mode == 'production' and is_session_first_turn and not has_persisted_history and self.config.fast_mode:
             self._status(stream_callback, "turbo · first turn")
@@ -3639,12 +3647,6 @@ class OpenMythosAgent:
             )
             self._append_to_history(task, result.get('final_answer') or result.get('observations', [{}])[-1].get('output', ''))
             return result
-
-        # Deterministic local-op fast path: high-confidence local intents execute directly.
-        direct = self._try_direct_intent_path(task, stream_callback=stream_callback, token_callback=token_callback)
-        if direct is not None:
-            self._append_to_history(task, direct.get('final_answer', ''))
-            return direct
 
         # Fast path for location/locate queries: avoid blind directory listing.
         location_result = self._try_location_fast_path(
