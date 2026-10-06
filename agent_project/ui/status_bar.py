@@ -82,12 +82,16 @@ class StatusBar:
             right = ""
 
         # Layout: directory | context bar | commands
-        mid_len = len(ctx_mid)
-        right_len = len(right)
+        # ANSI 转义计入 len() 会导致行长超框换行 -> 用可见宽度测量
+        import re as _re
+        def _vlen(t: str) -> int:
+            return len(_re.sub(r"\x1b\[[0-9;]*m", "", t))
+        mid_len = _vlen(ctx_mid)
+        right_len = _vlen(right)
         left_budget = max(6, width - mid_len - right_len - 2)
-        if len(left) > left_budget:
+        if _vlen(left) > left_budget:
             left = "…" + left[-(left_budget - 1):]
-        pad = max(1, width - len(left) - mid_len - right_len)
+        pad = max(1, width - _vlen(left) - mid_len - right_len)
         line = left + " " * pad + ctx_mid + right
         return self.r.style(line[:width], _MUTED)
 
