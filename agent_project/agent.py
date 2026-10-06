@@ -1177,6 +1177,16 @@ class OpenMythosAgent:
         ) and not re.match(r'^(什么(是|叫|叫做)|啥(是|叫)|什么是|啥是)\s*\S+', t, re.IGNORECASE):
             return ("__memory_query__", {}, 0.95, "detected memory-query intent (answer from injected memory, no web search)")
 
+        # -1.2) "X 几个文件夹/有哪些文件" 类本地查询 → file_ops list
+        if not any(v in t for v in ('创建','新建','删除','移动','复制','修改','编辑')) and \
+           (re.search(r'(几个|有哪些|有什么|列表|列一下|有哪).*(文件|文件夹|目录|files|folders)', t) or \
+           re.search(r'(文件|文件夹|目录).*(几个|有哪些|有什么)', t)):
+            m = re.search(r'(桌面|文档|下载|Desktop|Documents|Downloads|Home|主目录|当前目录|这个目录)', t)
+            target = m.group(1) if m else "."
+            if target == "主目录": target = "~"
+            elif target == "当前目录" or target == "这个目录": target = "."
+            return ("file_ops", {"action": "list", "path": target}, 0.9, "detected local folder-count intent")
+
         # -1) 看/读文件夹意图: "看下 X 文件夹/目录" → 定位并在当前目录下 list
         if any(k in tl for k in ("看下", "看一下", "看看", "查看", "浏览", "读一下", "读取", "打开") ) and any(
             k in tl for k in ("文件夹", "目录", "folder", "dir", "目录结构", "里面", "内容")
@@ -3630,6 +3640,12 @@ class OpenMythosAgent:
             self._append_to_history(task, result.get('final_answer') or result.get('observations', [{}])[-1].get('output', ''))
             return result
 
+        # Deterministic local-op fast path: high-confidence local intents execute directly.
+        direct = self._try_direct_intent_path(task, stream_callback=stream_callback, token_callback=token_callback)
+        if direct is not None:
+            self._append_to_history(task, direct.get('final_answer', ''))
+            return direct
+
         # Fast path for location/locate queries: avoid blind directory listing.
         location_result = self._try_location_fast_path(
             task, stream_callback=stream_callback, token_callback=token_callback
@@ -4289,6 +4305,52 @@ class OpenMythosAgent:
         if past:
             ctx = (ctx + "\n\n" + past).strip() if ctx else past
         return ctx
+
+    def _try_direct_intent_path(self, task: str, stream_callback=None, token_callback=None) -> Optional[Dict[str, Any]]:
+        """确定性本地操作快路: 命中高置信只读/明确意图时直接执行工具, 不经 LLM 回合循环。"""
+        try:
+            classified = self._classify_intent(task)
+        except Exception:
+            return None
+        if not classified:
+            return None
+        tool_name, args, conf, reason = classified
+        if conf < 0.85:
+            return None
+        # 只放行只读/明确无副作用的操作; 写/删/移动等必须走主循环
+        SAFE = {
+            "file_ops": {"list", "read", "stat", "exists", "verify", "multi_read", "fast_read"},
+            "glob": None, "search_files": None, "weather": None,
+        }
+        if tool_name not in SAFE:
+            return None
+        if tool_name == "file_ops":
+            action = args.get("action") if isinstance(args, dict) else None
+            if action not in SAFE["file_ops"]:
+                return None
+        try:
+            from .tools import TOOLS_REGISTRY
+            tool = TOOLS_REGISTRY.get(tool_name)
+            if tool is None:
+                return None
+            self._status(stream_callback, f"fast path · {tool_name}")
+            res = tool.execute(**args) if isinstance(args, dict) else None
+            if res is None or not getattr(res, "success", False):
+                return None
+            out = (res.output or "").strip()
+            if not out:
+                return None
+            return {
+                "final_answer": out,
+                "success": True,
+                "outer_loops": 1,
+                "thinking_steps": 1,
+                "observations": [{"tool": tool_name, "output": out[:2000]}],
+                "metadata": {"duration_ms": 0, "fast_path": True, "direct_intent": reason},
+            }
+        except Exception as e:
+            self.logger.debug(f"direct intent fast path failed: {e}")
+            return None
 
     def _format_history_context(self, max_turns: int = 4) -> str:
         """Return working-memory conversation context via ContextEngine."""
