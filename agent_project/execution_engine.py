@@ -933,9 +933,10 @@ class ExecutionEngine:
                 if not parsed.final_answer and exec_results:
                     # 取最近一次成功工具输出的前 800 字符作为兜底摘要
                     last_obs = ctx.observations[-1] if ctx.observations else ""
-                    provisional = last_obs.strip()[:800]
+                    # 兜底摘要需要简洁: 合并换行、封顶 200 字符, 避免把原始工具输出整段透出
+                    provisional = " ".join(last_obs.split())[:200]
                     if provisional and not trace.final_answer and self._should_echo_observation(provisional):
-                        summary = f"工具执行结果摘要:\n\n{provisional}"
+                        summary = f"工具执行结果摘要: {provisional}{'…' if len(last_obs) > 200 else ''}"
                         # 仅向 UI 透出内容(不入 trace/observations):
                         # 真实观察已在上方 append, 再写一份会造成上下文重复膨胀
                         self._emit(ctx, "content", summary)
