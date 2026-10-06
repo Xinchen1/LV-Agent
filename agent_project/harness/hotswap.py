@@ -24,6 +24,7 @@ Phase 2 delivered: version graph, zero-downtime drain, multi-mode events.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import threading
 import time
@@ -527,7 +528,7 @@ class CapabilitySlot:
         if self.disposer is None:
             return None
         try:
-            if asyncio.iscoroutinefunction(self.disposer):
+            if inspect.iscoroutinefunction(self.disposer):
                 if self._event_loop and not self._event_loop.is_closed():
                     fut = asyncio.run_coroutine_threadsafe(
                         self.disposer(), self._event_loop)
