@@ -363,7 +363,7 @@ class SuperAgentCLI:
       pass
 
   _COMMANDS = [
-    "/deep", "/research", "/model", "/models", "/config", "/theme", "/code", "/status",
+    "/deep", "/research", "/deep_research", "/model", "/models", "/config", "/theme", "/code", "/status",
     "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/strategy", "/mcp", "/tg",
     "/learn", "/memskill", "/help", "/exit",
   ]

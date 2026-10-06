@@ -13,7 +13,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "lv-agent"
-version = "0.1.0"
+version = "1.1.0"
 description = "Terminal-native deep-thinking agent: recurrent reasoning, real tools, memory & self-learning"
 authors = ["cleveris research"]
 readme = "README.md"
