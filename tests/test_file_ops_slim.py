@@ -18,7 +18,7 @@ REMOVED_HINTS = {
 }
 
 KEPT_ACTIONS = ["read", "multi_read", "fast_read", "write", "list", "exists",
-                "apply_diff", "verify", "open"]
+                "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat"]
 
 
 def test_removed_actions_return_redirect_hint():

@@ -354,6 +354,7 @@ class FileOpsTool(BaseTool):
 
     description = (
         "File operations on files and directories: read, multi_read, fast_read, write, list, exists, "
+        "stat, mkdir, delete, move, copy, apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
         "apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
         "system application). All I/O is performed by a native Rust backend with persistent process "
         "pooling for low latency.\n"
@@ -368,7 +369,7 @@ class FileOpsTool(BaseTool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open"],
+                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat"],
                 "description": "File operation to perform"
             },
             "path": {
@@ -409,6 +410,10 @@ class FileOpsTool(BaseTool):
             "query": {
                 "type": "string",
                 "description": "For fast_read: the question/keyword to retrieve relevant chunks from the cached document"
+            },
+            "destination": {
+                "type": "string",
+                "description": "Target path (required for move / copy actions)"
             },
             "top_k": {
                 "type": "integer",
@@ -968,6 +973,7 @@ class FileOpsTool(BaseTool):
         return results
 
     def execute(self, action: str, path: str = "", content: Optional[str] = None,
+                destination: Optional[str] = None,
                 offset: Optional[int] = None, limit: Optional[int] = None,
                 pattern: Optional[str] = None, diff: Optional[str] = None,
                 encoding: str = "utf-8", line_numbers: bool = True,
@@ -1070,6 +1076,51 @@ class FileOpsTool(BaseTool):
 
             if action == "open":
                 return self._open_path(resolved)
+
+            # 本地强操作:  mkdir/delete/move/copy/stat 由 Python 原生实现( Rust 后端暂不支持),
+            # 带路径防护; 避免把简单本地操作甩给 bash_exec.
+            if action in ("mkdir", "delete", "move", "copy", "stat"):
+                import shutil, os, time as _time, json as _json
+                p = Path(resolved)
+                if action == "stat":
+                    if not p.exists():
+                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
+                    st = p.stat()
+                    info = {"path": str(p), "is_dir": p.is_dir(), "size": st.st_size,
+                            "modified": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(st.st_mtime)),
+                            "mode": oct(st.st_mode)[-3:]}
+                    return ToolResult(success=True, output=_json.dumps(info, ensure_ascii=False, indent=2), metadata=info)
+                if action == "mkdir":
+                    p.mkdir(parents=True, exist_ok=True)
+                    return ToolResult(success=True, output=f"mkdir -p {resolved}")
+                if action == "delete":
+                    containment = self._assert_contained(p)
+                    if containment:
+                        return ToolResult(success=False, output="", error=containment)
+                    if not p.exists():
+                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                        return ToolResult(success=True, output=f"Removed directory {resolved}")
+                    p.unlink()
+                    return ToolResult(success=True, output=f"Deleted {resolved}")
+                dest = destination or kwargs.get("destination") or (options or {}).get("destination")
+                if not dest:
+                    return ToolResult(success=False, output="", error=f"'destination' required for {action}")
+                dest_p = Path(str(self._resolve_path_smart(str(dest))))
+                containment = self._assert_contained(dest_p)
+                if containment:
+                    return ToolResult(success=False, output="", error=containment)
+                if action == "move":
+                    shutil.move(str(p), str(dest_p))
+                    return ToolResult(success=True, output=f"Moved {resolved} -> {dest_p}")
+                if action == "copy":
+                    if p.is_dir():
+                        shutil.copytree(str(p), str(dest_p), dirs_exist_ok=True)
+                    else:
+                        dest_p.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(p), str(dest_p))
+                    return ToolResult(success=True, output=f"Copied {resolved} -> {dest_p}")
 
             payload: Dict[str, Any] = {"action": action, "path": resolved}
             if content is not None:
