@@ -53,11 +53,15 @@ def _check_rust_binary() -> bool:
     if not binary.exists():
         return False
     try:
+        # 用真实 JSON 请求探测(one-shot 模式 read_to_string(stdin), TTY 下继承终端
+        # stdin 会永远阻塞到超时 -> 误判"不可用"掉 Python fallback)。
+        # input= 写完即关写端, 子进程立刻拿到 EOF, 不挂 stdin。
         proc = subprocess.run(
-            [str(binary), "--version"],
+            [str(binary)],
+            input='{"action":"exists","path":"/tmp"}',
             capture_output=True, text=True, timeout=3,
         )
-        return proc.returncode == 0
+        return proc.returncode == 0 and '"success"' in (proc.stdout or "").lower()
     except Exception:
         # "Bad CPU type in executable" lands here
         return False
