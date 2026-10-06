@@ -16,3 +16,4 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-05 23:35] 安装包去隐私重打包：electron-builder extraResources 移除 config.yaml、过滤 agent_project 下 config/memory/session 等隐私文件；根 config.yaml 真实 key 改 ${ENV:-} 占位；重建 dmg/zip 上传并发布 GitHub v1.0.0 正式版，官网 Download 按钮恢复可下载。
 - [2026-10-05 23:55] 修复安装包“已损坏”：app 仅 linker-signed 被 Gatekeeper 判定损坏，手动 codesign --force --deep --sign - 重签，重打 zip(ditto)/dmg(hdiutil) 后重新上传 v1.0.0 并发布；release 说明补充右键打开/xattr -cr 提示。
 - [2026-10-06 15:05] 安全扫描与加固：防火墙+隐身已开；SuperIDE 远程调试端口 9223 已从 app.asar 永久移除并重启；.zshrc 明文 API key 迁移到 chmod600 的 ~/.env.keys；.claude/.fcc/.lv_agent 的 .env 权限收紧为 600。
+- [2026-10-06 17:30] 把本地 Qwopus3.5 接入各端：opencode/pi 新增 local ollama provider；gemini-cli 经 gateway 的 ollama/ 前缀路由（已重启网关并实测）；FCC .env 加入 ollama/ 模型与 allowlist（fcc watchdog 已清理）；SuperIDE config-store 新增 local-ollama 模型并重打 asar 重启。
