@@ -101,8 +101,8 @@ def clean_fast_answer(text: str) -> str:
     if len(text) > 64000:
         text = text[:64000]
     # 0. 剥离可能残留在正文的置信度行(置信度只在思考内部, 不给用户看)
-    text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?\s*$', '', text).strip()
-    text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]\s*0?\.\d{1,2}\s*[。]?', '', text).strip()
+    text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]?\s*\d{1,3}(?:\.\d{1,3})?%?\s*[。.]?\s*$', '', text).strip()
+    text = re.sub(r'\s*(?:置信度|confidence)\s*[:：]?\s*\d{1,3}(?:\.\d{1,3})?%?\s*[。.]?', '', text).strip()
     # 1. 去掉完整 think 块(支持 <think>/<thinking>)
     text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     # 1b. 防御:模型未用 <think> 标签、把英文自我推理混进正文时, 剥离开头的英文"自言自语"块

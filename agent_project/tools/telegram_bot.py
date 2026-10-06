@@ -782,4 +782,4 @@ def create_telegram_bot(
 if _HAS_TELEGRAM:
     TOOLS_REGISTRY.register(TelegramBotTool())
 else:
-    print(_style("  telegram tool not registered (python-telegram-bot not installed)", "2"))
+    pass  # 可选依赖未装时静默跳过

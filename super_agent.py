@@ -1044,6 +1044,7 @@ class SuperAgentCLI:
       )
 
     def stream_callback(kind, token):
+      self._last_activity = time.time()
       # ESC 中断检查: 用户在任务运行时按 ESC, 立即中断
       if self._interrupt_event.is_set():
         raise KeyboardInterrupt("user pressed ESC")
@@ -1095,6 +1096,7 @@ class SuperAgentCLI:
         adapter.emit_content(token)
 
     def token_callback(tokens: int):
+      self._last_activity = time.time()
       if isinstance(adapter, RichStreamAdapter):
         adapter.add_tokens(tokens)
       if live is not None and is_deep_research:
@@ -1110,11 +1112,25 @@ class SuperAgentCLI:
       # Prime adapter so user sees immediate feedback even before first token.
       adapter.emit_status("thinking")
       self._running = True
+      self._last_activity = time.time()
       # 重置中断标志(上一轮可能残留)
       self._interrupt_event.clear()
       # 后台监听 ESC: 用户在任务运行时按 ESC 中断
       esc_listener = threading.Thread(target=self._listen_for_esc, daemon=True)
       esc_listener.start()
+      # 慢后端提示: 30s 无任何 token/status 输出时提醒用户(后端超时由 config timeout 控制)
+      def _slow_watch():
+        import time as _t
+        warned = False
+        while self._running:
+          try:
+            if not warned and _t.time() - self._last_activity > 30:
+              print(f"\033[2m  后端响应较慢, 已等待 >30s(单次超时上限见 config.yaml timeout/max_model_retries)\033[0m", flush=True)
+              warned = True
+            _t.sleep(5)
+          except Exception:
+            break
+      threading.Thread(target=_slow_watch, daemon=True).start()
       # 深度研究: 启动 rich Live 进度面板
       if is_deep_research and sys.stdout.isatty():
         try:

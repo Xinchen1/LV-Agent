@@ -688,7 +688,7 @@ class OpenMythosAgent:
 
     def _create_simple_tokenizer(self):
         """Create a fallback tokenizer for testing only."""
-        print(_style("  fallback tokenizer (not for production OpenMythos models)", "2"))
+        import logging as _l; _l.getLogger("lv.agent").debug("fallback tokenizer in use")
 
         class SimpleTokenizer:
             def __init__(self):
