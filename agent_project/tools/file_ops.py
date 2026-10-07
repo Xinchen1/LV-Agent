@@ -722,6 +722,33 @@ class FileOpsTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"local op delegation failed: {e}")
 
+    def _list_summary(self, path: str) -> ToolResult:
+        """返回真正对用户友好的目录摘要，而不是裸 ls -la。"""
+        p = Path(path)
+        if not p.exists():
+            return ToolResult(success=False, output="", error=f"Path not found: {path}")
+        if not p.is_dir():
+            return ToolResult(success=False, output="", error=f"Path is not a directory: {path}")
+        entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        dirs = [e for e in entries if e.is_dir()]
+        files = [e for e in entries if e.is_file()]
+        lines = []
+        lines.append(f"Directories({len(dirs)}):")
+        for e in dirs[:20]:
+            lines.append(f"  {e.name}")
+        if len(dirs) > 20:
+            lines.append(f"  ... (+{len(dirs)-20} more)")
+        lines.append(f"Files({len(files)}):")
+        for e in files[:20]:
+            try:
+                size = e.stat().st_size
+            except Exception:
+                size = 0
+            lines.append(f"  {e.name} ({size:d} bytes)")
+        if len(files) > 20:
+            lines.append(f"  ... (+{len(files)-20} more)")
+        return ToolResult(success=True, output="\n".join(lines), metadata={"count": len(entries), "dirs": len(dirs), "files": len(files)})
+
     def _bash_list(self, path: str) -> ToolResult:
         """列目录走 bash ``ls -aF``(命令行风格), 输出保持 `d name  size` 可解析格式.
 
@@ -1061,7 +1088,7 @@ class FileOpsTool(BaseTool):
                     return ToolResult(success=False, output="", error=containment)
 
             if action == "list":
-                return self._bash_list(resolved)
+                return self._list_summary(resolved)
 
             if action == "fast_read":
                 try:
