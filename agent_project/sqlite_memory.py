@@ -131,57 +131,73 @@ class SQLiteSessionStore:
             logger.warning(f"Could not retrieve recent turns: {e}")
             return []
 
+    @staticmethod
+    def _fts_sanitize(q: str) -> str:
+        """FTS5 查询消毒: 裸传用户输入(含逗号/特殊字符)会 MATCH 语法错误。
+        把每个词加双引号、空格/OR 拼接, 返回安全查询串。"""
+        import re as _re
+        terms = [t for t in _re.split(r'[\s,，。、;;;:：!?！？()\[\]]+', q) if t.strip()]
+        if not terms:
+            return '""'
+        return ' OR '.join(f'"{t}"' for t in terms)
+
     def search(self, query: str, session_id: str = "", k: int = 10) -> List[TurnRecord]:
         try:
             with self._connection() as conn:
                 if self._fts5_available:
-                    if session_id:
-                        rows = conn.execute(
-                            """
-                            SELECT t.* FROM turns t
-                            JOIN turns_fts f ON t.id = f.rowid
-                            WHERE turns_fts MATCH ? AND t.session_id = ?
-                            ORDER BY rank
-                            LIMIT ?
-                            """,
-                            (query, session_id, k),
-                        ).fetchall()
-                    else:
-                        rows = conn.execute(
-                            """
-                            SELECT t.* FROM turns t
-                            JOIN turns_fts f ON t.id = f.rowid
-                            WHERE turns_fts MATCH ?
-                            ORDER BY rank
-                            LIMIT ?
-                            """,
-                            (query, k),
-                        ).fetchall()
+                    try:
+                        rows = self._fts_search(conn, query, session_id, k)
+                        return [self._row_to_record(row) for row in rows]
+                    except Exception as fe:
+                        logger.warning(f"FTS search fallback to LIKE: {fe}")
+                # LIKE 分词兜底: 任一关键词命中即可
+                import re as _re
+                terms = [
+                    t for t in _re.split(r"[\s,，。.;;：:!?！？、]+", query)
+                    if len(t.strip()) >= 2
+                ]
+                if not terms:
+                    terms = [query.strip()]
+                conds = " OR ".join(["content LIKE ?"] * len(terms))
+                params = [f"%{t}%" for t in terms]
+                if session_id:
+                    rows = conn.execute(
+                        f"SELECT * FROM turns WHERE ({conds}) AND session_id = ? ORDER BY created_at DESC LIMIT ?",
+                        params + [session_id, k],
+                    ).fetchall()
                 else:
-                    # 分词: 任一关键词命中即可(避免整句 LIKE 匹配失败)
-                    import re as _re
-                    terms = [
-                        t for t in _re.split(r"[\s,，。.;;：:!?！？、]+", query)
-                        if len(t.strip()) >= 2
-                    ]
-                    if not terms:
-                        terms = [query.strip()]
-                    conds = " OR ".join(["content LIKE ?"] * len(terms))
-                    params = [f"%{t}%" for t in terms]
-                    if session_id:
-                        rows = conn.execute(
-                            f"SELECT * FROM turns WHERE ({conds}) AND session_id = ? ORDER BY created_at DESC LIMIT ?",
-                            params + [session_id, k],
-                        ).fetchall()
-                    else:
-                        rows = conn.execute(
-                            f"SELECT * FROM turns WHERE {conds} ORDER BY created_at DESC LIMIT ?",
-                            params + [k],
-                        ).fetchall()
+                    rows = conn.execute(
+                        f"SELECT * FROM turns WHERE {conds} ORDER BY created_at DESC LIMIT ?",
+                        params + [k],
+                    ).fetchall()
                 return [self._row_to_record(row) for row in rows]
         except Exception as e:
             logger.warning(f"Could not search session store: {e}")
             return []
+
+    def _fts_search(self, conn, query: str, session_id: str, k: int):
+        safe_q = self._fts_sanitize(query)
+        if session_id:
+            return conn.execute(
+                """
+                SELECT t.* FROM turns t
+                JOIN turns_fts f ON t.id = f.rowid
+                WHERE turns_fts MATCH ? AND t.session_id = ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (safe_q, session_id, k),
+            ).fetchall()
+        return conn.execute(
+            """
+            SELECT t.* FROM turns t
+            JOIN turns_fts f ON t.id = f.rowid
+            WHERE turns_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (safe_q, k),
+        ).fetchall()
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> TurnRecord:
