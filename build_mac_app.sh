@@ -1,352 +1,243 @@
-# LV Agent System Analysis
-
-## Overview
-
-This analysis examines the LV Agent project at `/Users/mac/Desktop/agent_project` for redundancy, verbosity, and performance optimization opportunities. The system is a terminal-native AI agent framework with a Harness micro-kernel architecture, supporting multiple LLM backends, tool integration, and memory systems.
-
----
-
-## 1. Redundancy Analysis
-
-### 1.1 Duplicate Loop Logic
-**Location:** `execution_engine.py`, `agent.py`, `policies.py`, `reasoning.py`
-
-**Issue:** The system has multiple overlapping loop execution implementations:
-- `OpenMythosAgent._run_traditional()` in `agent.py`
-- `ReasoningEngine.reason()` and variants (`_reason_react`, `_reason_super`, etc.) in `reasoning.py`
-- New `ExecutionEngine` in `execution_engine.py` that was created to consolidate the above
-
-**Impact:** 
-- Maintenance burden - bug fixes need to be applied in multiple places
-- Inconsistent behavior between code paths
-- Confusion about which loop implementation to use
-
-**Recommendation:** 
-- Fully migrate to `ExecutionEngine` as the single loop implementation
-- Deprecate and remove `_run_traditional` from `agent.py`
-- Deprecate reasoning.py variants or make them delegate to ExecutionEngine
-
-### 1.2 Tool Registration Duplication
-**Location:** `tools/__init__.py`, multiple tool files
-
-**Issue:** Tools are registered both via `auto_register_tools()` and individual registrations. Some tools have both a class definition and module-level registration.
-
-**Example:** 
-```python
-# tools/__init__.py line 234
-auto_register_tools(TOOLS_REGISTRY)
-```
-
-**Recommendation:** 
-- Standardize on one registration pattern
-- Remove redundant auto_register calls if all tools are already imported
-
-### 1.3 Configuration Loading Paths
-**Location:** `config.py` `load_config()` function
-
-**Issue:** The `load_config()` function handles two config layouts (A and B) with complex fallback logic:
-- Layout A: All settings under `agent:` key
-- Layout B: Top-level flat configuration
-
-The code has compatibility logic that checks for `agent:` key and falls back to top-level, which creates confusion about which format to use.
-
-**Recommendation:** 
-- Choose one consistent config format (Layout B seems to be the current repo format)
-- Remove the legacy compatibility code or document it clearly
-- Add migration script for old config format users
-
-### 1.4 Multiple Memory System Implementations
-**Location:** `memory.py`, `file_memory.py`, `sqlite_memory.py`, `wiki_memory.py`
-
-**Issue:** Four different memory implementations exist with overlapping functionality:
-- `memory.py` - main memory module
-- `file_memory.py` - file-based memory
-- `sqlite_memory.py` - SQLite-based memory  
-- `wiki_memory.py` - wiki-style memory
-
-Each has its own entity extraction, fact storage, etc.
-
-**Recommendation:** 
-- Consolidate into a unified memory abstraction layer
-- Keep one primary implementation (SQLite seems most robust)
-- Make other formats optional import paths or migration targets
-
----
-
-## 2. Verbosity & Code Quality Issues
-
-### 2.1 Excessive Import Bloat
-**Location:** `agent.py` top-level imports
-
-**Issue:** `agent.py` imports many modules at module level that are only needed lazily:
-```python
-from .execution_engine import ExecutionContext, ExecutionEngine
-from .policies import DirectPolicy
-# ... many others
-```
-
-Some of these are only used in `_init_advanced_modules()` or specific code paths.
-
-**Impact:** 
-- Slower agent startup time
-- Larger memory footprint
-- Potential import errors if dependencies missing
-
-**Recommendation:** 
-- Move heavy imports inside `_init_advanced_modules()` or lazy-load them
-- Use `TYPE_CHECKING` guard for type hints only imports
-- The comment in `agent.py` already acknowledges this: "heavy modules are loaded lazily inside _init_advanced_modules()"
-
-### 2.2 Precompiled Regex Could Be Optimized
-**Location:** `execution_engine.py` regex patterns at module level
-
-**Issue:** Many regex patterns are precompiled at module level, but some are only used occasionally:
-```python
-_RESEARCH_TASK_RE = re.compile(r"(分析|报告|...", re.IGNORECASE)
-_SUBSTANCE_RE = re.compile(r"(?:结论|综上|...)")
-```
-
-Some of these are checked on every turn but may not all be necessary.
-
-**Impact:** 
-- Modest memory usage for compiled patterns
-- Some patterns may never be used in typical workflows
-
-**Recommendation:** 
-- Audit which regexes are actually in hot paths
-- Move infrequently used patterns to lazy initialization
-- Group related patterns to reduce compilation count
-
-### 2.3 Excessive Comment Blocks
-**Location:** Multiple files including `super_agent.py`, `agent.py`
-
-**Issue:** Large comment blocks that describe obvious code behavior or are outdated:
-
-In `super_agent.py`:
-```python
-# Load environment variables from .env if present.
-try:
-  from dotenv import load_dotenv
-  env_path = Path(__file__).parent / ".env"
-  if env_path.exists():
-    load_dotenv(env_path)
-except Exception:
-  pass
-
-# 自动补装 Pillow,保证头像渲染依赖可用.
-try:
-  importlib.import_module("PIL")
-except Exception:
-  try:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow", "-q"])
-  except Exception:
-    pass
-```
-
-**Impact:** 
-- Increases file size
-- Can become outdated/misleading
-
-**Recommendation:** 
-- Move pip install logic to setup/install scripts, not runtime
-- Remove or condense obvious comments
-- Use docstrings instead of inline comments for function-level documentation
-
-### 2.4 Hardcoded Values Without Configuration
-**Location:** Various files with hardcoded thresholds
-
-**Issue:** Several thresholds and limits are hardcoded rather than configurable:
-- `_otsu_threshold` function uses hardcoded percentiles (0.78, 0.96)
-- `execution_engine.py` has hardcoded regex patterns for "DONE[]", JSON detection
-- `config.yaml` has many sensible defaults but some are buried
-
-**Recommendation:** 
-- Expose key thresholds as config options
-- Add documentation for why specific values were chosen
-- Allow runtime overrides where practical
-
-### 2.5 Exception Handling Verbosity
-**Location:** Try/except blocks throughout codebase
-
-**Issue:** Broad exception handling that silently fails:
-```python
-except Exception:
-  pass  # or continue, or return default
-```
-
-Examples in `super_agent.py`, `config.py`, and many other files.
-
-**Impact:** 
-- Hard to debug when things go wrong
-- Errors get lost in production
-
-**Recommendation:** 
-- At minimum, log the exception before passing
-- Use specific exception types where possible
-- Add telemetry for swallowed exceptions
-
----
-
-## 3. Performance Optimization Opportunities
-
-### 3.1 Startup Time Optimization
-**Current State:** Agent startup involves:
-1. Loading config YAML
-2. Initializing model backend
-3. Setting up logging
-4. Lazy-loading advanced modules
-5. Building harness kernel
-6. Initializing tool registry
-
-**Optimization Opportunities:**
-- **Move pip install to install time**: The `super_agent.py` auto-installs Pillow at runtime - move to `install.sh` or `build_mac_app.sh`
-- **Pre-compile regexes only when needed**: Some regex patterns in `execution_engine.py` may never be used depending on config
-- **Conditional module loading**: Only load memory/harness/reflection modules when actually enabled in config
-- **Reduce import chain**: `agent.py` imports 20+ modules at top level; many could be lazy-loaded
-
-**Estimated Impact:** 200-500ms faster startup (measurable on cold start)
-
-### 3.2 Memory Operations
-**Current State:** Multiple memory backends with separate storage paths:
-- KG store: `./data/kg_store`
-- Episodic store: `./data/episodic_store`
-- File memory: `./data/memory.md`
-- User memory: `./data/user.md`
-- Sessions DB: `./data/sessions.db`
-
-**Optimization Opportunities:**
-- **Unify storage paths**: Many paths could share base directory
-- **Batch entity extraction**: Instead of extracting per-turn, batch multiple turns
-- **Cache entity extraction results**: Avoid re-extracting same entities
-- **Compression**: The `compression_max_tokens: 512` config suggests context compression is already planned
-
-**Estimated Impact:** 30-50% reduction in disk I/O for long-running sessions
-
-### 3.3 Tool Result Caching
-**Current State:** `_tool_result_cache = ToolResultCache()` is initialized in `agent.py`
-
-**Optimization Opportunities:**
-- **LRU size configuration**: Configure based on expected tool call diversity
-- **Cache key optimization**: Ensure keys are compact (hash vs full arguments)
-- **Cross-turn cache invalidation**: Smart invalidation rather than blind retention
-
-**Estimated Impact:** 40-70% reduction in redundant tool executions for repetitive tasks
-
-### 3.4 Stream Rendering Performance
-**Current State:** `stream_adapters.py` controls rendering with:
-- 0.12s rendering interval
-- 10fps refresh rate
-- Tool output folded to 3 lines
-- Inline highlighting for links/numbers/paths
-
-**Optimization Opportunities:**
-- **Make interval configurable**: Some users may prefer faster/slower rendering
-- **Batch tool output**: Don't fold until N tool calls accumulate
-- **Pre-render common patterns**: Cache rendered formats for repeated tool types
-
-**Estimated Impact:** Subjective UX improvement, minimal CPU impact
-
-### 3.5 Configuration Substitution Overhead
-**Current State:** `_substitute_env_vars()` runs recursively on entire config on every load
-
-**Optimization Opportunities:**
-- **One-time substitution**: Only substitute once during config load, not on every access
-- **Cache resolved config**: Store already-substituted values
-
-**Estimated Impact:** Negligible for single config load, but scales with hot-restarts
-
----
-
-## 4. Specific Code Improvements
-
-### 4.1 Super Agent Startup (`super_agent.py`)
-**Issues:**
-1. Auto-pip-install at runtime (lines 25-32)
-2. Emoji regex compilation on every import
-3. Portrait rendering on every startup
-
-**Fixes:**
-```python
-# Move pip install to install script
-# Cache emoji regex as module constant (already done)
-# Portrait rendering should be optional/minimal on startup
-```
-
-### 4.2 Execution Engine Hot Paths (`execution_engine.py`)
-**Issues:**
-1. Multiple regex compilations per turn
-2. Double-nested loops for observation processing
-3. Repeated JSON parsing attempts
-
-**Fixes:**
-- Pre-compile all patterns once (already done)
-- Cache JSON parse attempts
-- Batch observation processing
-
-### 4.3 Config Loading (`config.py`)
-**Issues:**
-1. Complex dual-format compatibility logic
-2. Recursive env var substitution on every call
-3. Vast number of default values in Pydantic models
-
-**Fixes:**
-- Simplify to single config format
-- Substitute env vars once during file read
-- Use config class defaults for missing values
-
----
-
-## 5. Prioritized Recommendations
-
-### High Priority (Immediate Impact)
-
-1. **Consolidate loop architecture**: Pick ExecutionEngine as single loop implementation, remove `_run_traditional` and reasoning.py variants
-2. **Move runtime pip installs to build scripts**: super_agent.py should not install packages at runtime
-3. **Simplify config loading**: Choose one format (top-level flat), remove dual-format compatibility code
-4. **Lazy-load heavy modules**: Only import execution_engine, policies, etc. when actually needed
-
-### Medium Priority (Code Quality)
-
-5. **Add proper error logging**: Replace broad `except: pass` with logged exceptions
-6. **Optimize regex usage**: Audit which patterns are in hot paths, move others to lazy init
-7. **Unify memory backends**: Consolidate to primary implementation with optional imports
-8. **Make rendering interval configurable**: User preference for stream output speed
-
-### Low Priority (Polish)
-
-9. **Reduce comment verbosity**: Replace obvious comments with docstrings
-10. **Cache config substitution results**: One-time substitution during load
-11. **Optimize tool cache sizes**: Configure LRU based on tool diversity
-12. **Add type hints to more functions**: Improve IDE support and catch errors early
-
----
-
-## 6. Refactoring Plan
-
-### Phase 1: Core Consolidation (1-2 days)
-1. Migrate all loop logic to ExecutionEngine
-2. Remove `_run_traditional` from agent.py
-3. Make ExecutionEngine the default runner
-4. Update all references to use new unified API
-
-### Phase 2: Configuration & Startup (2-3 days)
-1. Simplify config.yaml to top-level flat format
-2. Remove dual-format compatibility code in config.py
-3. Move runtime pip installs to install.sh/build_mac_app.sh
-4. Add config validation with clear error messages
-
-### Phase 3: Memory & Tools (2-3 days)
-1. Consolidate memory implementations
-2. Standardize tool registration pattern
-3. Optimize tool result cache sizing
-4. Add cache warming for frequently used tools
-
-### Phase 4: Polish & Testing (2-3 days)
-1. Add proper error logging throughout
-2. Make rendering settings configurable
-3. Reduce comment verbosity, add docstrings
-4. Create comprehensive test suite for core loops
-
----
-
-*Analysis generated for LV Agent project*
+#!/bin/bash
+# Copyright (c) 2026 cleveris research
+# SPDX-License-Identifier: MIT
+# Trademark: "LV Agent", "Lv Agent", "cleveris research" are trademarks of cleveris research
+
+
+
+
+# Build LV Agent as a macOS .app bundle
+# This creates "LV Agent.app" that opens in Terminal and runs the agent.
+
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_NAME="LV Agent"
+APP_BUNDLE="$PROJECT_DIR/dist/${APP_NAME}.app"
+CONTENTS="$APP_BUNDLE/Contents"
+MACOS_DIR="$CONTENTS/MacOS"
+RESOURCES="$CONTENTS/Resources"
+
+VERSION="0.1.0"
+ARCH="$(uname -m 2>/dev/null || echo 'universal')"
+
+echo "=== Building ${APP_NAME}.app ==="
+
+# Clean previous build
+rm -rf "$PROJECT_DIR/dist"
+mkdir -p "$MACOS_DIR" "$RESOURCES" "$CONTENTS/Frameworks"
+
+# ── 1. Copy Python project into Resources ──
+echo "[1/5] Copying project files..."
+mkdir -p "$RESOURCES/agent_project"
+cp "$PROJECT_DIR/super_agent.py" "$RESOURCES/"
+cp "$PROJECT_DIR/config.yaml" "$RESOURCES/"
+cp "$PROJECT_DIR/config.example.yaml" "$RESOURCES/"
+cp "$PROJECT_DIR/requirements-core.txt" "$RESOURCES/"
+cp "$PROJECT_DIR/requirements-minimal.txt" "$RESOURCES/" 2>/dev/null || true
+
+# Copy agent_project package
+rsync -a --exclude='__pycache__' --exclude='.pytest_cache' \
+    "$PROJECT_DIR/agent_project/" "$RESOURCES/agent_project/"
+
+# Copy assets
+cp -R "$PROJECT_DIR/assets" "$RESOURCES/"
+
+# Copy data directory (empty placeholder for runtime data)
+mkdir -p "$RESOURCES/data"
+
+# Copy .env if exists (secrets)
+if [ -f "$PROJECT_DIR/.env" ]; then
+    cp "$PROJECT_DIR/.env" "$RESOURCES/"
+fi
+
+# Copy rust binary if available
+RUST_BIN="$PROJECT_DIR/rust_file_ops/target/release/rust_file_ops"
+if [ -x "$RUST_BIN" ]; then
+    mkdir -p "$RESOURCES/rust_file_ops"
+    cp "$RUST_BIN" "$RESOURCES/rust_file_ops/"
+fi
+
+# ── 2. Create a self-contained venv inside the app ──
+echo "[2/5] Creating virtual environment inside app bundle..."
+VENV_DIR="$RESOURCES/.venv"
+PY_LAUNCHER="/opt/homebrew/bin/python3"
+[ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="/usr/bin/python3"
+[ -x "$PY_LAUNCHER" ] || PY_LAUNCHER="python3"
+
+"$PY_LAUNCHER" -m venv "$VENV_DIR" --clear
+
+# Install core dependencies
+echo "[2b/5] Installing dependencies..."
+VENV_PYTHON="$VENV_DIR/bin/python"
+PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+"$VENV_PYTHON" -m pip install --upgrade pip --quiet
+"$VENV_PYTHON" -m pip install -r "$RESOURCES/requirements-core.txt" $PIP_MIRROR --quiet
+"$VENV_PYTHON" -m pip install pillow --quiet
+
+# ── 3. Create the launcher script ──
+echo "[3/5] Creating launcher script..."
+cat > "$MACOS_DIR/$APP_NAME" << 'LAUNCHER_EOF'
+#!/bin/bash
+# LV Agent - macOS App Launcher
+
+# Resolve the .app bundle path
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RESOURCES="$APP_DIR/Resources"
+
+# The app runs from the user's home directory
+cd "$HOME"
+
+# Environment setup
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export CHROMADB_TELEMETRY_DISABLED=1
+unset PYTHONHOME PYTHONPATH
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+VENV_PYTHON="$RESOURCES/.venv/bin/python"
+SUPER_AGENT="$RESOURCES/super_agent.py"
+
+# Create runtime data directory in user's home
+mkdir -p "$HOME/.lv_agent/data" "$HOME/.lv_agent/logs"
+
+# Load .env secrets from app bundle (or user's copy)
+if [ -f "$RESOURCES/.env" ]; then
+    while IFS= read -r line; do
+        key=$(echo "$line" | cut -d'=' -f1 | xargs)
+        val=$(echo "$line" | cut -d'=' -f2- | xargs)
+        case "$key" in
+            NIM_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|DEEPSEEK_API_KEY|SERPAPI_KEY|TELEGRAM_BOT_TOKEN)
+                export "$key=$val"
+                ;;
+        esac
+    done < "$RESOURCES/.env"
+fi
+
+# Also check user's home for .env override
+if [ -f "$HOME/.lv_agent/.env" ]; then
+    while IFS= read -r line; do
+        key=$(echo "$line" | cut -d'=' -f1 | xargs)
+        val=$(echo "$line" | cut -d'=' -f2- | xargs)
+        case "$key" in
+            NIM_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|DEEPSEEK_API_KEY|SERPAPI_KEY|TELEGRAM_BOT_TOKEN)
+                export "$key=$val"
+                ;;
+        esac
+    done < "$HOME/.lv_agent/.env"
+fi
+
+# Open Terminal if not already in one
+if [ -z "$TERM_PROGRAM" ] || [ "$TERM_PROGRAM" != "Apple_Terminal" ] && [ "$TERM_PROGRAM" != "iTerm.app" ] && [ "$TERM_PROGRAM" != "vscode" ]; then
+    osascript -e "tell application \"Terminal\" to activate" 2>/dev/null || true
+fi
+
+echo ""
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║         LV Agent v0.1.0              ║"
+echo "  ║   Terminal-Native AI Agent           ║"
+echo "  ╚══════════════════════════════════════╝"
+echo ""
+
+exec "$VENV_PYTHON" "$SUPER_AGENT" "$@"
+LAUNCHER_EOF
+
+chmod +x "$MACOS_DIR/$APP_NAME"
+
+# ── 4. Create Info.plist ──
+echo "[4/5] Creating Info.plist..."
+cat > "$CONTENTS/Info.plist" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.cleveris.lv-agent</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>LVA </string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>CFBundleExecutable</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>
+PLIST_EOF
+
+# ── 5. Generate a simple app icon (optional, uses portrait if available) ──
+echo "[5/5] Setting up icon..."
+# Create a basic .icns placeholder using sips if portrait exists
+if command -v sips >/dev/null 2>&1 && [ -f "$RESOURCES/assets/portrait.png" ]; then
+    # Convert PNG to icns using macOS tools
+    ICONSET_DIR="$RESOURCES/AppIcon.iconset"
+    mkdir -p "$ICONSET_DIR"
+
+    # Generate required sizes
+    for size in 16 32 64 128 256 512; do
+        sips -z $size $size "$RESOURCES/assets/portrait.png" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null 2>&1
+        DOUBLE=$((size * 2))
+        if [ $DOUBLE -le 1024 ]; then
+            sips -z $DOUBLE $DOUBLE "$RESOURCES/assets/portrait.png" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null 2>&1
+        fi
+    done
+
+    if command -v iconutil >/dev/null 2>&1; then
+        iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES/AppIcon.icns" 2>/dev/null || true
+        rm -rf "$ICONSET_DIR"
+    fi
+fi
+
+# ── Done ──
+echo ""
+echo "=== Build complete! ==="
+echo "  App: $APP_BUNDLE"
+echo ""
+echo "To use:"
+echo "  open \"$APP_BUNDLE\""
+echo ""
+echo "Or copy to /Applications:"
+echo "  cp -R \"$APP_BUNDLE\" /Applications/"
+echo ""
+
+# ── DMG Generation ──
+if command -v hdiutil >/dev/null 2>&1; then
+    echo "  Creating DMG..."
+    DMG_PATH="$PROJECT_DIR/dist/LV-Agent-macOS-${ARCH}-${VERSION}.dmg"
+    DMG_TMP="$PROJECT_DIR/dist/.dmg_tmp"
+    rm -rf "$DMG_TMP" "$DMG_PATH"
+    mkdir -p "$DMG_TMP"
+    cp -R "$APP_BUNDLE" "$DMG_TMP/"
+    # Add Applications symlink for drag-install UX
+    ln -s /Applications "$DMG_TMP/Applications" 2>/dev/null || true
+    hdiutil create -volname "LV Agent ${VERSION}" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_PATH" 2>&1 | tail -5 && echo "  DMG: $DMG_PATH" || echo "  DMG creation failed (non-fatal)"
+    rm -rf "$DMG_TMP"
+else
+    echo "  hdiutil not found, skipping DMG."
+fi
+
+# Size report
+echo ""
+echo "=== Build complete! ==="
+du -sh "$APP_BUNDLE" 2>/dev/null || true
+[ -f "$DMG_PATH" ] && du -sh "$DMG_PATH" 2>/dev/null || true
+[ -f "$ZIP_PATH" ] && du -sh "$ZIP_PATH" 2>/dev/null || true
+echo "  App: $APP_BUNDLE"
