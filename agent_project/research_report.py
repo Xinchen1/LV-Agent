@@ -41,7 +41,7 @@ def is_research_report_task(task: str) -> bool:
     t = task.lower()
 
     research_verbs = [
-        "搜索", "搜一下", "搜", "查找", "查一下", "查", "调研", "研究",
+        "搜索", "搜一下", "搜", "搜集", "搜罗", "收集", "查找", "查一下", "查", "调研", "研究",
         "深度研究", "深度调研", "研究下", "调研下", "研究一下", "调研一下",
         "research", "search", "look up", "investigate",
     ]
@@ -52,6 +52,7 @@ def is_research_report_task(task: str) -> bool:
     output_indicators = [
         "输出", "生成", "写", "保存", "写到", "导出", "md", "markdown",
         "文件", "output", "generate", "save", "write", "export",
+        "pdf", "生成pdf", "docx", "html",
     ]
 
     has_verb = any(v in t for v in research_verbs)
@@ -59,12 +60,15 @@ def is_research_report_task(task: str) -> bool:
     has_output = any(o in t for o in output_indicators)
 
     # Explicit "output/save/write md" triggers research workflow even without "report"
-    explicit_file = "md" in t or "markdown" in t or "输出文件" in t or "保存" in t or "写到" in t
+    explicit_file = (
+        "md" in t or "markdown" in t or "输出文件" in t or "保存" in t or "写到" in t
+        or "pdf" in t or "生成pdf" in t or "生成 pdf" in t
+    )
 
     # 深度研究/调研类请求: "深度研究 X" 本身即隐含生成报告意图, 无需出现"报告/分析"
     # (但纯"搜索/查一下"问句如"帮我查一下天气"不应触发)
     deep_prefix = re.match(r"^(深度研究|深度调研|调研一下|研究一下|研究下|调研下).*", t, re.IGNORECASE)
-    if deep_prefix and has_verb and len(t.strip()) > 6:
+    if deep_prefix and has_verb and len(t.strip()) > 4:
         return True
 
     return has_verb and (has_report or explicit_file)
@@ -88,8 +92,8 @@ def extract_research_topic(task: str) -> str:
     # The lookahead stops at report/action verbs or sentence end, NOT at '的'.
     boundary = r"(?:并|且|然后|接着|再|顺便|给我|帮我|为|给|输出|生成|写|保存|导出|export|save|write|generate|create)?\s*(?:报告|调研报告|研究报告|深度报告|分析|文件|md|markdown|output|report|study|analysis|overview)?\s*(?:$|[。；;，,、！!?？]|\n)"
     patterns = [
-        r"(?:搜索|搜一下|搜|查找|查一下|查|调研|研究|search|look up|research)\s*(?:关于|有关|一下|下)?[\s:：，,、。]*(.+?)(?=" + boundary + r")",
-        r"(?:调研|研究|分析|总结|investigate|analyze|summarise|summarize)\s*(?:关于|有关|一下|下)?[\s:：，,、。]*(.+?)(?=" + boundary + r")",
+        r"(?:搜集|搜罗|收集|搜索|搜一下|搜|查找|查一下|查|深度研究|深度调研|调研|研究|search|look up|research)\s*(?:关于|有关|一下|下)?[\s:：，,、。]*(.+?)(?=" + boundary + r")",
+        r"(?:深度研究|深度调研|调研|研究|分析|总结|investigate|analyze|summarise|summarize)\s*(?:关于|有关|一下|下)?[\s:：，,、。]*(.+?)(?=" + boundary + r")",
     ]
     for pat in patterns:
         m = re.search(pat, t, re.IGNORECASE)
@@ -102,7 +106,7 @@ def extract_research_topic(task: str) -> str:
                 return topic
 
     # Fallback: remove leading verbs and trailing output/report words
-    head_verbs = r"^(搜索|搜一下|搜|查找|查一下|查|调研|研究|分析|总结|search|look up|research|investigate|analyze|summarise|summarize)[\s:：，,、。的]*"
+    head_verbs = r"^(搜集|搜罗|收集|搜索|搜一下|搜|查找|查一下|查|深度研究|深度调研|调研|研究|分析|总结|search|look up|research|investigate|analyze|summarise|summarize)[\s:：，,、。的]*"
     cleaned = re.sub(head_verbs, "", t, flags=re.IGNORECASE).strip()
     cleaned = _strip_trailing_fluff(cleaned)
     cleaned = _strip_report_suffixes(cleaned)
