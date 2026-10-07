@@ -194,6 +194,23 @@ class ToolCallParser:
                     if any(args.get(a) for a in aliases):
                         continue
                     return
+            # 强制按 schema 做类型归一化/纠错, 避免模型生成错误参数类型导致执行挂球
+            args = cls._coerce_args_schema(tool_name, args)
+            # 归一化后再做一次必填检查, 但仍兼容模型常用别名
+            _required_alias = {
+                "glob": {"pattern": ("query",)},
+                "search_files": {"pattern": ("query",), "query": ("pattern",)},
+                "bash_exec": {"command": ("cmd", "shell_command")},
+            }
+            for key in required:
+                if tool_name == "file_ops" and key == "path" and args.get("paths"):
+                    continue
+                val = args.get(key)
+                if val is None or (isinstance(val, str) and not val.strip()):
+                    aliases = _required_alias.get(tool_name, {}).get(key, ())
+                    if any(args.get(a) for a in aliases):
+                        continue
+                    return
             calls.append((tool_name, args))
 
         # Format 1: [TOOL:name] args [/TOOL]
@@ -617,6 +634,67 @@ class ToolCallParser:
                 lines = lines[:-1]
             code = "\n".join(lines).strip()
         return {"code": code}
+
+    @staticmethod
+    def _coerce_args_schema(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """按 tool schema 做参数类型归一化与纠错, 尽量保留有效信息并降低 schema 错配。"""
+        tool = TOOLS_REGISTRY.get(tool_name)
+        if tool is None:
+            return args
+        params = getattr(tool, "parameters", {}) or {}
+        props = params.get("properties", {}) if isinstance(params, dict) else {}
+        if not isinstance(args, dict) or not isinstance(props, dict):
+            return args
+        out = dict(args)
+        for key, spec in props.items():
+            if key not in out:
+                continue
+            if not isinstance(spec, dict):
+                continue
+            typ = spec.get("type")
+            val = out[key]
+            try:
+                if typ == "string":
+                    if not isinstance(val, str):
+                        out[key] = str(val)
+                elif typ == "integer":
+                    if isinstance(val, bool):
+                        out[key] = int(val)
+                    elif isinstance(val, (int, float)):
+                        out[key] = int(val)
+                    elif isinstance(val, str):
+                        out[key] = int(float(val)) if "." in val else int(val)
+                elif typ == "number":
+                    if isinstance(val, str):
+                        out[key] = float(val)
+                    elif isinstance(val, int):
+                        out[key] = float(val)
+                elif typ == "boolean":
+                    if isinstance(val, str):
+                        low = val.strip().lower()
+                        if low in ("true", "yes", "y", "1", "on"):
+                            out[key] = True
+                        elif low in ("false", "no", "n", "0", "off"):
+                            out[key] = False
+                    elif isinstance(val, (int, float)):
+                        out[key] = bool(val)
+                elif typ == "array":
+                    if isinstance(val, str):
+                        out[key] = [val]
+                    elif not isinstance(val, list):
+                        out[key] = [val]
+                elif typ == "object":
+                    if isinstance(val, str):
+                        try:
+                            parsed = json.loads(val)
+                            if isinstance(parsed, dict):
+                                out[key] = parsed
+                        except Exception:
+                            out[key] = val
+            except Exception:
+                # 类型无法纠正时丢弃该属性, 保留已有语义
+                out.pop(key, None)
+        return out
 
     @classmethod
     def _parse_json_with_bare_quotes(cls, s: str) -> Optional[Dict[str, Any]]:
