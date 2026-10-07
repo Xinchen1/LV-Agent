@@ -809,11 +809,20 @@ class FileOpsTool(BaseTool):
                     return ToolResult(success=False, output="", error=f"Path not found: {path}")
                 entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
                 lines = []
-                for e in entries:
-                    prefix = "d " if e.is_dir() else "  "
-                    size = e.stat().st_size if e.is_file() else 0
-                    lines.append(f"{prefix}{e.name:<40s} {size:>10d}")
-                return ToolResult(success=True, output="\n".join(lines) or "(empty)", metadata={"count": len(entries), "fallback": "python"})
+                dirs = [e for e in entries if e.is_dir()]
+                files = [e for e in entries if e.is_file()]
+                lines.append(f"Directories({len(dirs)}):")
+                for e in dirs[:30]:
+                    lines.append(f"  - {e.name}")
+                if len(dirs) > 30:
+                    lines.append(f"  … 还有 {len(dirs) - 30} 项")
+                lines.append(f"Files({len(files)}):")
+                for e in files[:30]:
+                    size = e.stat().st_size
+                    lines.append(f"  - {e.name} ({size:d} bytes)")
+                if len(files) > 30:
+                    lines.append(f"  … 还有 {len(files) - 30} 项")
+                return ToolResult(success=True, output="\n".join(lines) or "(empty)", metadata={"count": len(entries), "dirs": len(dirs), "files": len(files), "fallback": "python"})
             if action == "exists":
                 return ToolResult(success=True, output=str(p.exists()), metadata={"exists": p.exists(), "fallback": "python"})
             if action == "open":
