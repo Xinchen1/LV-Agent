@@ -29,4 +29,5 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-06 23:45] 思考过程不再全量刷屏：LiveStreamFilter 在中文输出尚未开始前抑制匹配英文自言自语模式的行；PlainStreamAdapter.emit_reasoning 改为只打一行 "thinking…" 轻提示。
 - [2026-10-07 00:05] 修 rust 探测误判：_check_rust_binary 原用 --version 探测，但 one-shot 模式 read_to_string(stdin) 在 TTY 下永远阻塞 → 3s 超时 → 误判"不可用"白掉 Python fallback 还拖慢启动 3s；改用真实 JSON 请求 + input=（写完即关），RUST_AVAILABLE 恢复 True，list 走 rust 进程池。
 - [2026-10-07 00:20] 本地操作极致增强：_try_direct_intent_path 提到 _try_fast_routes 最顶（原在 simple query 之后被 LLM 快路截胡）；rust 进程池 init 时后台预热（消除首调 21ms 冷启动）；file_ops 新增 tree（深度受限目录树）/du（目录大小）原生 action；prewarm except 打日志过异常卫生基线。实测：直达路径 11.7ms 全程 0 LLM，list 7ms/stat 0.3ms/tree 2ms/du 2ms（15k 文件目录 1.8s）。
+- [2026-10-07 18:50] 恢复 build_mac_app.sh 为 e9192f1 真实构建脚本（HEAD 中曾被系统分析文本覆盖）。
 - [2026-10-07 18:35] 修 fts5 + 调研意图判定：MATCH 查询消毒（每词加引号 OR 拼接，失败回退 LIKE 分词）；is_research_report_task 补 搜集/搜罗/收集 动词、pdf/docx/html 显式输出；deep_prefix 长度 off-by-one；extract_research_topic 对 搜集 正确剥离。实测“搜集实在智能的产品技术，生成pdf,打开”→ topic=“实在智能的产品技术”，深度调研AI→True。
