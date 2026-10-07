@@ -425,7 +425,22 @@ class ResearchReportGenerator:
             ent_prompt = f"""任务：{task}
 请从任务中抽取要搜索的核心实体名称，只输出实体名称，不要解释。
 例如输入“搜索实在智能的信息”，输出“实在智能”。"""
-            entity = backend.generate(ent_prompt, max_tokens=32, temperature=0.0).strip()
+            entity = backend.generate(ent_prompt, max_tokens=128, temperature=0.0).strip()
+            # 推理模型首 token 多被 <think> 吞噬到 reasoning 字段,
+            # generate() 兜底会把 reasoning 并入 content —— 剥掉自我流水账后再判定,
+            # 防止 "Here's a thinking process..." 进入搜索语料。
+            try:
+                from .response_filter import strip_leaked_reasoning, clean_fast_answer
+                entity_clean = strip_leaked_reasoning(entity).strip()
+                if not entity_clean or entity_clean == entity:
+                    entity_clean = clean_fast_answer(entity).strip()
+                entity = entity_clean
+            except Exception:
+                pass
+            # 二次兜底: 实体不能是自我推理/长句, 取首行即可
+            if entity and ("thinking" in entity.lower() or "user says" in entity.lower()
+                           or len(entity) > 40 or "**" in entity):
+                entity = ""
             if entity and len(entity) > 1:
                 topic = f"{entity} {topic}"
         except Exception:
