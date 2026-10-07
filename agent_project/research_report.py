@@ -201,6 +201,9 @@ def extract_search_keywords(task: str) -> str:
     # 去除多余的英文提示括号
     t = re.sub(r'\s*\([^)]*\)', '', t)
     t = t.strip()
+    # 去掉尾部任务整理/输出/生成指令
+    t = re.sub(r'[，,]\s*(整理|生成|输出|写|保存|导出|转成|转为|做成).*$', '', t)
+    t = re.sub(r'\s+(整理|生成|输出|写|保存|导出|转成|转为|做成).*$', '', t)
 
     verb_patterns = [
         r'(?:帮我搜一下|帮我搜索|帮我查找|帮我查|帮我找一下|帮我找|帮我研究|帮我调研)',
@@ -442,7 +445,8 @@ class ResearchReportGenerator:
                            or len(entity) > 40 or "**" in entity):
                 entity = ""
             if entity and len(entity) > 1:
-                topic = f"{entity} {topic}"
+                if entity.lower() not in topic.lower():
+                    topic = f"{entity} {topic}"
         except Exception:
             pass
 
