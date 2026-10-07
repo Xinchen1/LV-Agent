@@ -22,11 +22,11 @@ Agent 工作流已优化、站点品牌已更新（zh→en），config.yaml 已�
 - [2026-10-06 14:00] GitHub 流量自动存档：scripts/archive_github_stats.sh 每天 09:30 经 launchd 归档 clones/views/stars/forks 到 data/github_traffic.jsonl（绕开 traffic 数据 14 天过期）。
 - [2026-10-06 14:35] 系统梳理+站点对齐：清理 1.5G dist/、.codeartsdoer/、frontend-design-proposal/、.DS_Store/.pytest_cache/__pycache__、.bak/PDF/session 残档；/deep_research 补自动补全；pyproject 版本对齐站点 V1.1.0（DMG 仍是 1.0.0，下次打包需出 1.1.0）。
 - [2026-10-06 22:40] 实测 lv 四任务后修复：config.yaml NIM key 外置到 .env（${NVAPI_KEY:-}）；删 .env 里失效的 OPENAI_API_KEY；置信度行过滤正则放宽（吞 1.02/85%/整数）；hotswap asyncio.iscoroutinefunction→inspect；telegram 未装时静默、fallback tokenizer 降 debug；新增 30s 慢后端提示与 _last_activity 空闲看门狗。 pytest 316 全绿。loops 偏高实为模型步数而非配置 bug，未改。
+- [2026-10-06 22:55] UI 简洁化：工具结果兜底摘要从 800 字符→200（合并换行封顶）；⊙ STOP/⊙ Smart Dedup 的 cached 摘录不再透出 400 字原始结果（改为只报字符数）。pytest 316 全绿。
 - [2026-10-06 23:10] file_ops 本地强操作补齐：新增 mkdir/delete/move/copy/stat 五个原生 action（Python 实现、系统路径防护仍生效、Rust 后端不支持的操作在 execute 层拦截处理），tool 描述与 schema 同步，test_file_ops_slim 白名单更新。
 - [2026-10-06 23:15] MCP filesystem 映射修 bug：create_directory 原错误映射到 file_ops list（实际执行是列目录而不是建目录），已改指 mkdir；get_file_info 改指 stat；补齐 delete_file/move_file/copy_file→delete/move/copy。
 - [2026-10-06 23:30] 本地操作快路：_try_direct_intent_path 让高置信只读意图(file_ops list/read/stat/exists/multi_read/verify、glob、search_files、weather)直接执行不经 LLM；_classify_intent 新增"X 几个文件夹/有哪些文件"规则(桌面/文档/下载/当前目录)。pytest 316 全绿，实测 桌面几个文件夹 毫秒直出。
 - [2026-10-06 23:45] 思考过程不再全量刷屏：LiveStreamFilter 在中文输出尚未开始前抑制匹配英文自言自语模式的行；PlainStreamAdapter.emit_reasoning 改为只打一行 "thinking…" 轻提示。
 - [2026-10-07 00:05] 修 rust 探测误判：_check_rust_binary 原用 --version 探测，但 one-shot 模式 read_to_string(stdin) 在 TTY 下永远阻塞 → 3s 超时 → 误判"不可用"白掉 Python fallback 还拖慢启动 3s；改用真实 JSON 请求 + input=（写完即关），RUST_AVAILABLE 恢复 True，list 走 rust 进程池。
 - [2026-10-07 00:20] 本地操作极致增强：_try_direct_intent_path 提到 _try_fast_routes 最顶（原在 simple query 之后被 LLM 快路截胡）；rust 进程池 init 时后台预热（消除首调 21ms 冷启动）；file_ops 新增 tree（深度受限目录树）/du（目录大小）原生 action；prewarm except 打日志过异常卫生基线。实测：直达路径 11.7ms 全程 0 LLM，list 7ms/stat 0.3ms/tree 2ms/du 2ms（15k 文件目录 1.8s）。
-- [2026-10-06 23:10] file_ops 本地强操作补齐：新增 mkdir/delete/move/copy/stat 五个原生 action（Python 实现、系统路径防护仍生效、Rust 后端不支持的操作在 execute 层拦截处理），tool 描述与 schema 同步，test_file_ops_slim 白名单更新。
-- [2026-10-06 22:55] UI 简洁化：工具结果兜底摘要从 800 字符→200（合并换行封顶）；⊙ STOP/⊙ Smart Dedup 的 cached 摘录不再透出 400 字原始结果（改为只报字符数）。pytest 316 全绿。
+- [2026-10-07 18:35] 修 fts5 + 调研意图判定：MATCH 查询消毒（每词加引号 OR 拼接，失败回退 LIKE 分词）；is_research_report_task 补 搜集/搜罗/收集 动词、pdf/docx/html 显式输出；deep_prefix 长度 off-by-one；extract_research_topic 对 搜集 正确剥离。实测“搜集实在智能的产品技术，生成pdf,打开”→ topic=“实在智能的产品技术”，深度调研AI→True。
