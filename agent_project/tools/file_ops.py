@@ -13,6 +13,7 @@ Enhancements:
 import os
 import re
 import json
+import shlex
 import hashlib
 import subprocess
 import threading
@@ -346,26 +347,14 @@ class FastReadCache:
 class FileOpsTool(BaseTool):
     name = "file_ops"
 
-    # 旧子动作已拆分到专用工具, 调用时直接给纠偏提示而不是静默失败。
-    # 提示保持短(结果框按终端宽度截断), 必须点名目标工具。
-    _REMOVED_ACTIONS = {
-        "grep": "grep 已移除 -> 用 search_files(query=..., path=...) 搜内容",
-        "find": "find 已移除 -> 用 glob(pattern=..., path=...) 找文件名",
-        "analyze": "analyze 已移除 -> 用 bash_exec ('ls -la' / 'wc -l')",
-        "backup": "backup 已移除 -> 用 bash_exec ('cp -a <file> <file>.bak')",
-        "diff": "diff 已移除 -> 用 bash_exec ('diff <a> <b>')",
-    }
-
     description = (
         "File operations on files and directories: read, multi_read, fast_read, write, list, exists, "
-        "stat, mkdir, delete, move, copy, tree (depth-limited directory tree), du (directory size), apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
-        "apply_diff (search/replace edits), verify (syntax check), and open (launch with the default "
-        "system application). All I/O is performed by a native Rust backend with persistent process "
+        "stat, mkdir, delete, move, copy, tree (depth-limited directory tree), du (directory size), apply_diff (search/replace edits), verify (syntax check), open (launch with the default "
+        "system application), grep (content search), find (file names), analyze (directory listing), "
+        "backup (copy to .bak), diff (file diff). All I/O is performed by a native Rust backend with persistent process "
         "pooling for low latency.\n"
         "Use fast_read for long articles: it chunks the file, builds a local vector cache, and retrieves "
-        "only the relevant chunks for a given query.\n"
-        "This tool does NOT search: use search_files (content) or glob (file names) instead, and "
-        "bash_exec for diff/backup/analyze."
+        "only the relevant chunks for a given query."
     )
 
     parameters = {
@@ -373,7 +362,7 @@ class FileOpsTool(BaseTool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat", "tree", "du"],
+                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat", "tree", "du", "grep", "find", "analyze", "backup", "diff"],
                 "description": "File operation to perform"
             },
             "path": {
@@ -704,6 +693,35 @@ class FileOpsTool(BaseTool):
                 return fb
         return result
 
+    def _delegate_legacy_action(self, action: str, *, path: str = "", pattern: Optional[str] = None, query: Optional[str] = None, diff: Optional[str] = None, paths: Optional[List[str]] = None) -> ToolResult:
+        """统一本地操作入口: file_ops 对外暴露 grep/find/analyze/backup/diff, 内部委托到专用工具/系统命令."""
+        try:
+            if action == "grep":
+                from .grep_tool import GrepTool
+                q = query or pattern or ""
+                return GrepTool().execute(query=q, path=path or ".")
+            if action == "find":
+                from .grep_tool import GlobTool
+                pat = pattern or query or "**"
+                return GlobTool().execute(pattern=pat, path=path or ".")
+            if action == "analyze":
+                from .bash_exec import BashExecTool
+                cmd = f"ls -la {shlex.quote(path)}" if path else "ls -la ."
+                return BashExecTool().execute(command=cmd)
+            if action == "backup":
+                from .bash_exec import BashExecTool
+                if not path:
+                    return ToolResult(success=False, output="", error="path required for backup")
+                return BashExecTool().execute(command=f"cp -a {shlex.quote(path)} {shlex.quote(path)}.bak")
+            if action == "diff":
+                from .bash_exec import BashExecTool
+                if diff:
+                    return BashExecTool().execute(command=f"diff {diff}")
+                return ToolResult(success=False, output="", error="diff argument required (usage: diff <fileA> <fileB>)")
+            return ToolResult(success=False, output="", error=f"Unsupported action: {action}")
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"local op delegation failed: {e}")
+
     def _bash_list(self, path: str) -> ToolResult:
         """列目录走 bash ``ls -aF``(命令行风格), 输出保持 `d name  size` 可解析格式.
 
@@ -807,10 +825,9 @@ class FileOpsTool(BaseTool):
                 return self._python_verify(p)
             if action == "multi_read":
                 return self._python_multi_read(payload)
-            # Removed sub-actions already redirect in execute(); this is a
-            # safety net for direct _python_fallback() callers.
-            if action in self._REMOVED_ACTIONS:
-                return ToolResult(success=False, output="", error=self._REMOVED_ACTIONS[action])
+            # 统一本地操作入口: grep/find/analyze/backup/diff 委托到对应实现
+            if action in ("grep", "find", "analyze", "backup", "diff"):
+                return self._delegate_legacy_action(action, path=path, pattern=payload.get("pattern"), query=payload.get("query"), diff=payload.get("diff"), paths=payload.get("paths"))
             # Unsupported action in fallback
             return ToolResult(
                 success=False, output="",
@@ -1020,10 +1037,11 @@ class FileOpsTool(BaseTool):
             paths = [path]
         if action == "multi_read" and not path:
             path = "."
-        # 已下线的子动作: 不执行, 返回指向专用工具的纠偏提示
-        redirect = self._REMOVED_ACTIONS.get(str(action).strip().lower())
-        if redirect:
-            return ToolResult(success=False, output="", error=redirect)
+        # 统一本地操作入口: grep/find/analyze/backup/diff 在 file_ops 内委托到对应实现
+        _a = str(action).strip().lower()
+        if _a in ("grep", "find", "analyze", "backup", "diff"):
+            resolved = str(self._resolve_path_smart(path)) if path else ""
+            return self._delegate_legacy_action(_a, path=resolved, pattern=pattern, query=query, diff=diff, paths=paths)
         try:
             resolved = str(self._resolve_path_smart(path))
 
