@@ -436,7 +436,7 @@ class ResearchReportGenerator:
                     entity_clean = clean_fast_answer(entity).strip()
                 entity = entity_clean
             except Exception:
-                pass
+                entity = entity  # 清洗失败时保留原值, 交由下面的启发式继续兜底
             # 二次兜底: 实体不能是自我推理/长句, 取首行即可
             if entity and ("thinking" in entity.lower() or "user says" in entity.lower()
                            or len(entity) > 40 or "**" in entity):
