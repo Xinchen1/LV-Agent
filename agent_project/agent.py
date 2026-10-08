@@ -1377,6 +1377,12 @@ class OpenMythosAgent:
             if q and len(q) >= 2:
                 return ("web_search", {"query": q}, 0.8, "detected web-search intent")
 
+        # 比较/评价类诉求是对话上下文中的相对问, 不能误触 web_search
+        if any(k in t for k in ('和你自己比', '和hermes比', '和我自己比')) or (
+            '你' in t and ('比' in t or '对比' in t or '评价' in t)
+        ):
+            return None
+
         # LLM 前置意图分析兜底: 规则未命中且有明确动作/需求时,
         # 用一次简短 LLM 调用判断真实意图(应对规则盲区, 如"帮我整理vault")。
         # 长度≥5 是为了避免问候/闲聊等极短输入也触发 LLM 调用(省 token)。
@@ -1409,7 +1415,9 @@ class OpenMythosAgent:
             "{\"tool\": \"主工具\", \"args\": {主工具参数}, \"reason\": \"一句话原因\", "
             "\"secondary\": {\"tool\": \"次工具\", \"args\": {...}} 或 null}\n"
             "主工具 = 用户最核心的动作; secondary = 紧随其后的附加动作(如保存/写入)。\n"
-            "若无法确定(闲聊/无明确动作), 输出 {\"tool\": \"none\"}\n\n"
+            "若无法确定(闲聊/无明确动作), 输出 {\"tool\": \"none\"}\n"
+            "规则: 比较/评价/对比对象是你自己(如 '和你自己比'、'你和hermes比怎么样')，选 none，不要 web_search。\n"
+
             f"用户请求: {task}\n"
             "JSON:"
         )
