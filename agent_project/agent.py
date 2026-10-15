@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import sys
 import time
 import threading
 from .cache import MemoCache, ToolResultCache
@@ -82,6 +83,14 @@ class OpenMythosAgent:
 
         # 初始化模型后端(支持DeepSeek或OpenMythos本地)
         self.backend = self._load_model_backend()
+
+        # 后台预热模型连接(首 token 不再吃 TLS 握手/openai import), 失败静默
+        if "pytest" not in sys.modules and hasattr(self.backend, "warm_up"):
+            threading.Thread(
+                target=self.backend.warm_up,
+                name="backend-warmup",
+                daemon=True,
+            ).start()
 
         # 核心高级模块占位符（延迟加载）
         self.experience_buffer = None
@@ -796,12 +805,14 @@ class OpenMythosAgent:
                 # 懒加载: 只注册服务器配置(不启动进程), 工具异步后台预加载, 不阻塞启动
                 for name, cfg in servers.items():
                     if not manager.servers.get(name):
-                        manager.add_server(name, cfg)
+                        manager.add_server(name, cfg, defer=True)
                 self.mcp_manager = manager
                 self.mcp_orchestrator = McpOrchestrator(manager)
                 # 后台异步发现并注册 MCP 工具(启动不等待, 完成后 tools 可用)
                 def _lazy_mcp_tools():
                     try:
+                        # 先把 defer 登记的 bridge 服务器在后台拉起(会等 init, 绝不能在主线程)
+                        manager.start_pending_servers()
                         # 后台启动每个服务器(懒加载的核心: 不阻塞主线程), 初始化完成后注册工具
                         for name, conn in list(manager.servers.items()):
                             try:
@@ -1151,11 +1162,15 @@ class OpenMythosAgent:
             is_pure_nudge_fn=getattr(self, "_is_pure_nudge", None),
         )
 
-    def _classify_intent(self, task: str) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
+    def _classify_intent(self, task: str, allow_llm: bool = True) -> Optional[Tuple[str, Dict[str, Any], float, str]]:
         """启发式意图分类器.
 
         基于任务文本关键词 + 模式识别, 在 LLM 生成之上做一层确定性兜底:
         当置信度 >= 阈值时, 直接注入对应的工具调用, 避免 LLM 幻觉/犹豫导致漏检。
+
+        allow_llm=False: 只跑规则层(微秒级, 零网络往返)。给直出快路用 ——
+        LLM 升级层固定 conf=0.75, 永远过不了快路的 0.85 门槛, 早先每次调用
+        都是白烧一次 LLM 回合。
 
         Returns:
             (tool_name, arguments, confidence, reason) 或 None(未达阈值)。
@@ -1386,7 +1401,7 @@ class OpenMythosAgent:
         # LLM 前置意图分析兜底: 规则未命中且有明确动作/需求时,
         # 用一次简短 LLM 调用判断真实意图(应对规则盲区, 如"帮我整理vault")。
         # 长度≥5 是为了避免问候/闲聊等极短输入也触发 LLM 调用(省 token)。
-        if len(t) >= 5:
+        if allow_llm and len(t) >= 5:
             llm_intent = self._llm_intent_classify(t)
             if llm_intent:
                 return llm_intent
@@ -2658,7 +2673,14 @@ class OpenMythosAgent:
         # 用户意图明显冲突(如"查新闻"却去 find 全盘扫描)时,
         # 用确定性规则注入正确的工具调用(置信度高的场景)。
         _classifier_override = False
-        classified = self._classify_intent(task)
+        # 先跑规则层(微秒级): 模型已给出有效工具且规则无冲突时根本用不上
+        # LLM 升级层 —— 早先每回合都无条件跑一次 LLM 意图分析, 纯白烧往返。
+        classified = self._classify_intent(task, allow_llm=False)
+        if classified is None and (action is None or not TOOLS_REGISTRY.get(action.tool_name)):
+            # 模型没有可执行动作 + 规则也没给出意图 → 这时才值得花一次 LLM
+            # 意图分析去救场(规则盲区, 如"帮我整理vault")。
+            if len(task.strip()) >= 5:
+                classified = self._classify_intent(task, allow_llm=True)
         # 规则层高置信(>=0.8)或 LLM 升级层(conf 0.75)都视为可信意图, 可 override
         if classified and classified[2] >= 0.7:
             c_tool, c_args, c_conf, c_reason = classified
@@ -4332,7 +4354,9 @@ class OpenMythosAgent:
     def _try_direct_intent_path(self, task: str, stream_callback=None, token_callback=None) -> Optional[Dict[str, Any]]:
         """确定性本地操作快路: 命中高置信只读/明确意图时直接执行工具, 不经 LLM 回合循环。"""
         try:
-            classified = self._classify_intent(task)
+            # 只跑规则层: LLM 升级层 conf=0.75 过不了下面的 0.85 门槛,
+            # 调了也只会被拒, 却要先烧一次 LLM 网络往返。
+            classified = self._classify_intent(task, allow_llm=False)
         except Exception:
             return None
         if not classified:

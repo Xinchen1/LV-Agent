@@ -19,30 +19,103 @@ from typing import Any, Dict, List, Optional
 from . import TOOLS_REGISTRY, BaseTool, ToolResult
 
 
+# CPU type constants (Mach-O cputype)
+_MH_MAGIC_64 = 0xFEEDFACF
+_MH_CIGAM_64 = 0xCFFAEDFE
+_MH_MAGIC = 0xFEEDFACE
+_MH_CIGAM = 0xCEFAEDFE
+_FAT_MAGIC = 0xCAFEBABE
+_FAT_CIGAM = 0xBEBAFECA
+_CPU_TYPE_X86_64 = 0x01000007
+_CPU_TYPE_ARM64 = 0x0100000C
+
+
+def _binary_arch_compatible(path: Path) -> bool:
+    """检查二进制 CPU 架构是否与本机兼容(读文件头, 0 子进程).
+
+    真实教训: 旧实现用 `[binary, "--version"]` 探测, 但 rust_mcp_bridge 是
+    守护进程, 忽略 --version 直接 bind socket 永不退出 → 每次启动白等 3s
+    超时再放弃 bridge。改成读 Mach-O/ELF 头, 微秒级且不会挂起。
+    解析不了(脚本/未知格式)时保守放行, 交给真实连接阶段去失败。
+    """
+    import platform
+    import struct
+
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(64)
+    except OSError:
+        return False
+    if len(hdr) < 8:
+        return False
+
+    machine = platform.machine().lower()
+    want = {"arm64": _CPU_TYPE_ARM64, "aarch64": _CPU_TYPE_ARM64,
+            "x86_64": _CPU_TYPE_X86_64, "amd64": _CPU_TYPE_X86_64}.get(machine)
+    if want is None:
+        return True  # 未知平台: 不猜, 放行
+
+    magic_le = struct.unpack("<I", hdr[:4])[0]
+    magic_be = struct.unpack(">I", hdr[:4])[0]
+
+    # Mach-O (单架构)
+    if magic_le in (_MH_MAGIC_64, _MH_MAGIC):
+        cputype = struct.unpack("<I", hdr[4:8])[0]
+        return (cputype & 0xFFFFFFFF) == want
+    if magic_be in (_MH_MAGIC_64, _MH_MAGIC):
+        cputype = struct.unpack(">I", hdr[4:8])[0]
+        return (cputype & 0xFFFFFFFF) == want
+
+    # Mach-O fat/universal: 任一 slice 匹配即可
+    if magic_be in (_FAT_MAGIC, _FAT_CIGAM):
+        nfat = min(struct.unpack(">I", hdr[4:8])[0], 8)
+        for i in range(nfat):
+            off = 8 + i * 20
+            if off + 4 > len(hdr):
+                break
+            if struct.unpack(">I", hdr[off:off + 4])[0] == want:
+                return True
+        return False
+
+    # ELF: e_machine @ 18 (EI_DATA @ 5 决定端序)
+    if hdr[:4] == b"\x7fELF":
+        little = hdr[5] != 2
+        e_machine = struct.unpack("<H" if little else ">H", hdr[18:20])[0]
+        want_machine = {0x0100000C: 0xB7, 0x01000007: 0x3E}.get(want)
+        if want_machine is None:
+            return True
+        return e_machine == want_machine
+
+    return True  # 非 Mach-O/ELF(如 shebang 脚本): 放行
+
+
+_BRIDGE_PROBE_NOT_SET = object()
+_RUST_BRIDGE_PROBE: Any = _BRIDGE_PROBE_NOT_SET  # 进程级缓存, 只探测一次
+
+
 def _find_rust_mcp_bridge() -> Optional[str]:
     """Locate the rust_mcp_bridge binary next to rust_file_ops or on PATH.
 
-    Returns None if the binary exists but has a wrong CPU architecture
-    (e.g. x86_64 binary on arm64), so the caller can skip the 6-second
-    socket-wait timeout and fall back to the pure-Python stdio client
-    immediately.
+    Zero-subprocess: the CPU architecture is verified by reading the binary
+    header (the old `--version` probe hung for 3s because the bridge is a
+    daemon that never exits). Result is cached per process.
+    Returns None when the binary is missing or built for a wrong CPU.
     """
+    global _RUST_BRIDGE_PROBE
+    if _RUST_BRIDGE_PROBE is not _BRIDGE_PROBE_NOT_SET:
+        return _RUST_BRIDGE_PROBE
+
+    result: Optional[str] = None
     candidate = Path(__file__).parent.parent.parent / "rust_file_ops" / "target" / "release" / "rust_mcp_bridge"
     if candidate.exists() and os.access(candidate, os.X_OK):
-        # Quick architecture compatibility check — avoids a 6s startup delay
-        # when the binary was compiled for a different CPU (copy-to-new-machine).
-        try:
-            probe = subprocess.run(
-                [str(candidate), "--version"],
-                capture_output=True, text=True, timeout=3,
-            )
-            if probe.returncode == 0:
-                return str(candidate)
-            return None  # binary exists but crashes → wrong arch
-        except Exception:
-            return None  # "Bad CPU type" or timeout → skip
-    from_path = shutil.which("rust_mcp_bridge")
-    return from_path
+        if _binary_arch_compatible(candidate):
+            result = str(candidate)
+    if result is None:
+        from_path = shutil.which("rust_mcp_bridge")
+        if from_path and _binary_arch_compatible(Path(from_path)):
+            result = from_path
+    _RUST_BRIDGE_PROBE = result
+    return result
 
 
 class RustMcpBridge:
@@ -364,6 +437,7 @@ class McpManager:
         self._registered_tool_names: Dict[str, List[str]] = {}
         self._bridge: Optional[RustMcpBridge] = None
         self._bridge_configs: Dict[str, Dict[str, Any]] = {}
+        self._pending_bridge: Dict[str, Dict[str, Any]] = {}
         self._use_bridge = False
         self._logger = logging.getLogger("McpManager")
 
@@ -401,7 +475,7 @@ class McpManager:
             resolved.append(a)
         return resolved
 
-    def _add_server_internal(self, name: str, cfg: Dict[str, Any]) -> Optional[Any]:
+    def _add_server_internal(self, name: str, cfg: Dict[str, Any], defer: bool = False) -> Optional[Any]:
         if not isinstance(cfg, dict):
             return None
         if not cfg.get("enabled", True):
@@ -410,26 +484,23 @@ class McpManager:
         if not command:
             return None
 
+        # runtime 缺失(npx/uvx 未安装)直接跳过: 之前会照常 spawn 再报
+        # "MCP server 'x' failed: No such file or directory" 烧日志+线程。
+        if shutil.which(command) is None and not Path(command).exists():
+            self._logger.debug(f"mcp server '{name}' skipped: runtime '{command}' not found")
+            return None
+
         # Resolve path placeholders so the config stays machine-independent.
         raw_args = cfg.get("args", []) or []
         args = self._resolve_path_placeholders(raw_args)
 
         if self._use_bridge and self._bridge:
-            self._bridge_configs[name] = cfg
-            resp = self._bridge.add_server(
-                name=name,
-                command=command,
-                args=args,
-                env=cfg.get("env"),
-                timeout=cfg.get("timeout", 60),
-                init_timeout=cfg.get("init_timeout", 120),
-            )
-            if not resp.get("success"):
-                self._logger.warning(f"mcp server '{name}' failed: {resp.get('error')}")
-                self._bridge_configs.pop(name, None)
+            if defer:
+                # 启动期只登记, 真正的 add_server(要拉起子进程/等 init)由
+                # start_pending_servers() 在后台线程执行, 不阻塞主线程。
+                self._pending_bridge[name] = {"cfg": cfg, "args": args, "command": command}
                 return None
-            self._logger.info(f"mcp server '{name}' ready ({len(resp.get('metadata', {}).get('tools', []))} tools)")
-            return resp
+            return self._bridge_add_server(name, cfg, command, args)
 
         conn = McpServerConnection(
             name=name,
@@ -443,14 +514,49 @@ class McpManager:
         # 懒加载: 不立即启动进程, 首次调用工具时才启动(避免启动时 npx 拉包卡顿)
         return conn
 
-    def add_server(self, name: str, cfg: Dict[str, Any]) -> Optional[Any]:
-        """Add and start a server at runtime. Replaces existing connection."""
+    def _bridge_add_server(self, name: str, cfg: Dict[str, Any], command: str, args: List[str]) -> Optional[Any]:
+        """通过 rust bridge 启动并登记一个 MCP 服务器(会阻塞等 init)。"""
+        self._bridge_configs[name] = cfg
+        resp = self._bridge.add_server(
+            name=name,
+            command=command,
+            args=args,
+            env=cfg.get("env"),
+            timeout=cfg.get("timeout", 60),
+            init_timeout=cfg.get("init_timeout", 120),
+        )
+        if not resp.get("success"):
+            self._logger.warning(f"mcp server '{name}' failed: {resp.get('error')}")
+            self._bridge_configs.pop(name, None)
+            return None
+        self._logger.info(f"mcp server '{name}' ready ({len(resp.get('metadata', {}).get('tools', []))} tools)")
+        return resp
+
+    def start_pending_servers(self) -> None:
+        """启动 defer 登记的 bridge 服务器(设计为在后台线程调用, 不阻塞主线程)。"""
+        pending = list(self._pending_bridge.items())
+        self._pending_bridge.clear()
+        if not pending or not (self._use_bridge and self._bridge):
+            return
+        for name, entry in pending:
+            try:
+                self._bridge_add_server(name, entry["cfg"], entry["command"], entry["args"])
+            except Exception as e:
+                self._logger.debug(f"lazy mcp {name} start failed: {e}")
+
+    def add_server(self, name: str, cfg: Dict[str, Any], defer: bool = False) -> Optional[Any]:
+        """Add and start a server at runtime. Replaces existing connection.
+
+        defer=True: 只登记不启动(启动放到 start_pending_servers), 用于启动期
+        避免 npx 拉包/子进程 init 阻塞主线程。
+        """
         old = self.servers.get(name)
         if old:
             old.disconnect()
         self.servers.pop(name, None)
         self._registered_tool_names.pop(name, None)
-        return self._add_server_internal(name, cfg)
+        self._pending_bridge.pop(name, None)
+        return self._add_server_internal(name, cfg, defer=defer)
 
     def remove_server(self, name: str):
         """Disconnect and remove a server."""
@@ -460,6 +566,7 @@ class McpManager:
         if conn:
             conn.disconnect()
         self._bridge_configs.pop(name, None)
+        self._pending_bridge.pop(name, None)
         self._registered_tool_names.pop(name, None)
 
     def discover_tools(self) -> List[Dict[str, Any]]:

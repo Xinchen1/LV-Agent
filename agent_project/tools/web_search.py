@@ -26,18 +26,18 @@ try:
 except ImportError:
     _HAS_AIOHTTP = False
 
-# Optional fast parser
-try:
-    from bs4 import BeautifulSoup  # noqa: F401
-    _HAS_BS4 = True
-except ImportError:
-    _HAS_BS4 = False
+# Optional fast parser — 只做 find_spec 探测, 真正的 import 推迟到首次解析
+# (bs4 模块级 import ~15ms, 而大多数启动/搜索路径根本不解析 HTML)
+def _probe_module(name: str) -> bool:
+    try:
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
 
-try:
-    import lxml  # noqa: F401
-    _HAS_LXML = True
-except ImportError:
-    _HAS_LXML = False
+
+_HAS_BS4 = _probe_module("bs4")
+_HAS_LXML = _probe_module("lxml")
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 from .search_cache import SearchCache
 from .search_fusion import SearchFusion
@@ -203,22 +203,27 @@ class WebSearchTool(BaseTool):
             self._recent_sigs.append(sig)
             if len(self._recent_sigs) > 20:
                 self._recent_sigs.pop(0)
-            # 0. 模型先行分析: 只在查询较复杂且不含日期时触发，避免额外延迟
-            # 检测是否包含日期格式: 2026-08-23 / 2026/08/23 / 2026.08.23 / 2026 / 2025 等
+            # 0. 模型先行分析: 使用独立的快速查询优化后端（避免主模型延迟）
             has_date = bool(re.search(r'20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{2}', query))
-            if len(query) > 20 and not has_date and any(k in query for k in ['最新','新闻','产品','价格']):
+            query_optimizer_cfg = self.cfg.get("query_optimizer", {})
+            if query_optimizer_cfg.get("enabled", False) and len(query) > 20 and not has_date and any(k in query for k in ['最新','新闻','产品','价格','深度','报告','对比']):
                 try:
-                    backend = self.llm_backend
-                    if backend is None:
-                        from .model_backends import get_backend
-                        backend = get_backend()
+                    from .model_backends import OpenAIBackend
+                    optimizer = OpenAIBackend(
+                        api_key=os.getenv(query_optimizer_cfg.get("api_key_env", "")),
+                        base_url=query_optimizer_cfg.get("base_url", "https://api.deepseek.com/v1"),
+                        model=query_optimizer_cfg.get("model", "deepseek-chat"),
+                        temperature=query_optimizer_cfg.get("temperature", 0.0),
+                        max_tokens=query_optimizer_cfg.get("max_tokens", 64),
+                        timeout=query_optimizer_cfg.get("timeout", 10),
+                    )
                     analysis_prompt = f"""用户原始查询：{query}
 请抽取核心实体和意图，输出一条准确、可直接用于搜索引擎的查询关键词，5-15字。只输出关键词，不要解释。"""
-                    refined = backend.generate(analysis_prompt, max_tokens=64, temperature=0.0).strip()
+                    refined = optimizer.generate(analysis_prompt, max_tokens=64, temperature=0.0).strip()
                     if refined and len(refined) > 2 and refined != query:
                         query = refined
                 except Exception:
-                    # 熔断：模型失败不影响搜索
+                    # 熔断：优化失败不影响搜索
                     pass
             # 智能 Query 优化(清理/增强), deep 模式保留原始深度词但同样优化
             if query:
@@ -573,7 +578,9 @@ class WebSearchTool(BaseTool):
         Falls back to the stdlib html.parser at call time if lxml cannot be
         used (e.g. not installed in the active environment), so search never
         breaks on a missing optional dependency.
+        bs4 在这里才真正 import(模块级 import 白吃 ~15ms, 首次解析才需要).
         """
+        from bs4 import BeautifulSoup
         if _HAS_LXML:
             def _bs(html):
                 try:

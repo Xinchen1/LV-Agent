@@ -434,7 +434,9 @@ class OpenAIBackend:
         # Connection pool and health check
         self._client = None
         self._consecutive_errors = 0
-        self._last_health_check = 0
+        # 新建的 client 必然健康: 若从 0 起算, 首次 generate 会同步打一次
+        # /models 探活(最多 5s), 把首 token 时间白白拉长。
+        self._last_health_check = time.time()
         self._health_check_interval = 300  # 5 minutes
         # 限流熔断: 连续限流/连接失败达阈值后短路, 交互轮直接 fast-fail
         # (每轮烧 35s+ 退避是"慢"的主因之一), 恢复后自动闭合
@@ -509,6 +511,18 @@ class OpenAIBackend:
                     "Install with: pip install openai"
                 )
         return self._client
+
+    def warm_up(self, timeout: float = 8.0) -> None:
+        """后台预热: 提前创建 client + 打一次 /models, 消除首 token 的 TLS 握手成本.
+
+        在 agent init 后由 daemon 线程调用; 失败静默(预热只是优化, 真实请求自带重试).
+        成功才刷新健康时间戳: 失败时留给首个真实请求走正常探活/重试路径。
+        """
+        try:
+            self.client.models.list(timeout=timeout)
+        except Exception:
+            return
+        self._last_health_check = time.time()
 
     def _build_system_prompt(self, n_loops: int) -> str:
         """
@@ -636,13 +650,20 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
         now = time.time()
         if now - self._last_health_check < self._health_check_interval:
             return
-        self._last_health_check = time.time()
+        self._last_health_check = now
         try:
             # Use a minimal request to verify connection with short timeout
             import httpx
+        except ImportError:
+            return  # 探不了活就别动现有 client(缺依赖不等于连接坏)
+        try:
             resp = httpx.get(f"{self.base_url.rstrip('/')}/models", timeout=5.0)
             resp.raise_for_status()
-        except Exception:
+        except Exception as e:
+            # 收到 HTTP 响应(哪怕 4xx/5xx) = TCP/代理链路是通的, 客户端没坏,
+            # 重建只会白白丢掉连接池; 只有拿不到响应(连接错误/超时)才重建。
+            if _extract_http_status(e) is not None:
+                return
             # Connection likely stale (idle timeout, proxy down, Ollama unloaded model)
             # Force recreate on next property access
             self._client = None
@@ -885,6 +906,10 @@ THINKING DEPTH: LIGHT (n_loops<8, 快速收敛)
                     continue
                 # Other retryable errors.
                 if self._should_retry(e):
+                    # 连接层失败(无 HTTP 状态): 丢弃连接池, 重试换全新连接 ——
+                    # 否则 keep-alive 死连接会把每一轮重试都打在同一根坏管子上。
+                    if status is None:
+                        self._client = None
                     wait = self._calculate_backoff(attempt)
                     print(_style(f"  API error, retrying in {wait:.1f}s: {e}", "2"))
                     time.sleep(wait)
