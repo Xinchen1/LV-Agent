@@ -39,7 +39,10 @@ ruff = "^0.1.0"
 
 # Optional dependencies
 torch = { version = ">=2.1.0,<3.0", optional = true }
+# 对外提供 MCP endpoint (agent_project.mcp_server) 才需要, Agent 本体不依赖
+mcp = { version = ">=2.0", optional = true }
 
 [tool.poetry.extras]
 ml = ["chromadb", "sentence-transformers"]
-all = ["torch", "chromadb", "sentence-transformers"]
+mcp = ["mcp"]
+all = ["torch", "chromadb", "sentence-transformers", "mcp"]

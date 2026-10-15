@@ -118,6 +118,39 @@ Planner 分解任务 → 分配 thinking loops
 
 ---
 
+## 作为 MCP Server 被第三方平台调用（对外提供 endpoint）
+
+Agent 可以把内置工具**反向暴露**成远程 MCP endpoint，供其他 Agent 平台（例如需要填「MCP endpoint」的合作面板）连接。本项目自带的 MCP 客户端（`/mcp` 指令）是消费别人的 server；这里是对外提供的 server。
+
+```bash
+pip install "mcp>=2.0"                      # 官方 SDK，Agent 本体不依赖
+
+# 本机自测
+python -m agent_project.mcp_server --check                  # 只打印要填的地址
+python -m agent_project.mcp_server                          # http://127.0.0.1:8788/mcp
+
+# 对外暴露（务必带 token）
+python -m agent_project.mcp_server --host 0.0.0.0 --port 8788 --token <你的token>
+```
+
+第三方面板里这样填：
+
+| 字段 | 填什么 |
+|---|---|
+| MCP endpoint | `http://<可达地址>:8788/mcp`（对外场景换成 https 域名） |
+| 工具名 | **留空**，由对端 `tools/list` 自动发现 |
+| Bearer token | 选启动时 `--token` 的那把，并在密钥保险箱里保存 |
+
+暴露的工具：
+
+- 全部内置工具（`web_search` / `file_ops` / `bash_exec` / `python_exec` / `calculator` / `git` / … 共 29 个）
+- `lv_agent`：任务级工具，把整个 Agent（推理循环 + 记忆 + 反思）当作一个工具调用，只回传最终答案
+
+环境变量：`LV_MCP_HOST` / `LV_MCP_PORT` / `LV_MCP_PATH` / `LV_MCP_TOKEN` / `LV_MCP_STATELESS` / `LV_MCP_ALLOWED_HOSTS` / `LV_MCP_JSON_RESPONSE`。
+健康检查：`GET /healthz`。本机以外的平台要访问，需自行套一层隧道或反代（如 cloudflared / nginx）并走 HTTPS + token——公网无鉴权等于把 shell 和文件工具送人。
+
+---
+
 ## 快速开始
 
 ### 方式一：一键安装（推荐，全局 `lv` 命令）
