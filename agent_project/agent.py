@@ -4245,12 +4245,13 @@ class OpenMythosAgent:
         if self._is_complex_task(task):
             return min(self.config.max_thinking_loops, max(4, self.config.default_thinking_loops + 2))
 
+        task_lower = task.lower()
+
         # 长程 / 跨文件 / 长上下文类查询：拉满
         long_signals = ['整个', '全局', '长程', 'long', 'month', 'workflow', '多步', 'multiple', 'cross', 'project', 'codebase']
         if any(sig in task_lower for sig in long_signals) and len(task) > 50:
             return self.config.max_thinking_loops
 
-        task_lower = task.lower()
         base = self.config.default_thinking_loops
 
         # 查询策略库

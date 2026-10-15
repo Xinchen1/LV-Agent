@@ -14,6 +14,7 @@
 import subprocess
 import sys
 import time
+import types
 import logging
 import shutil
 import os
@@ -339,3 +340,72 @@ def test_agent_init_starts_warmup_thread_in_background():
     assert '"pytest" not in sys.modules' in init_src, "pytest 环境必须跳过预热"
     # init 里不允许同步调用 warm_up(必须包在线程 target 里)
     assert "self.backend.warm_up()" not in init_src, "warm_up 不许在主线程同步调用"
+
+
+# ----------------------------------------------------------------------
+# 7. MemoCache 递归死锁(线上"73s 0tk 永久转圈"事故根因)
+# ----------------------------------------------------------------------
+
+def test_memo_cache_allows_reentrant_factory():
+    """factory 内再次 get_or_set 不许死锁(不可重入 Lock 曾导致 UI 永久卡死)."""
+    import threading
+    from agent_project.cache import MemoCache
+
+    c = MemoCache()
+    hits = []
+
+    def inner_factory():
+        hits.append("inner")
+        return "INNER"
+
+    def outer_factory():
+        # 模拟 _decide_thinking_loops -> _is_simple_query 的嵌套 _cache_get
+        inner = c.get_or_set(("ns_b", 1), inner_factory)
+        hits.append("outer")
+        return f"OUTER+{inner}"
+
+    result = {}
+
+    def run():
+        result["v"] = c.get_or_set(("ns_a", 1), outer_factory)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "MemoCache.get_or_set 递归调用死锁(factory 内再取缓存)"
+    assert result.get("v") == "OUTER+INNER"
+    assert hits == ["inner", "outer"]
+
+
+def test_memo_cache_still_caches_across_calls():
+    """加锁改 RLock 后, 记忆化语义必须保持: factory 只跑一次."""
+    from agent_project.cache import MemoCache
+
+    c = MemoCache()
+    n = {"calls": 0}
+
+    def f():
+        n["calls"] += 1
+        return 42
+
+    assert c.get_or_set(("ns", 1), f) == 42
+    assert c.get_or_set(("ns", 1), f) == 42
+    assert n["calls"] == 1, "重复 key 必须命中缓存, 不许重复执行 factory"
+
+
+def test_decide_thinking_loops_no_nameerror():
+    """task_lower 曾先用后定义 -> NameError; 且该函数内嵌套 _cache_get(死锁点)."""
+    a = make_agent()
+    a.config = types.SimpleNamespace(
+        max_thinking_loops=8,
+        default_thinking_loops=3,
+        reflection=types.SimpleNamespace(thinking_loops_for_reflection=4),
+    )
+    a.strategy_db = None
+    a._pending_correction = None
+
+    # 非 simple / 非 complex 的长任务: 旧实现走到 long_signals 就 NameError
+    n = a._compute_decide_thinking_loops(
+        "帮我整理一下整个项目仓库的目录结构和所有历史提交记录做一份完整的梳理", "production"
+    )
+    assert isinstance(n, int) and 1 <= n <= 8

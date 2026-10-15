@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import OrderedDict
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Callable, Dict, Optional, Tuple
 
 _DEFAULT_CAPACITY = 512
@@ -59,7 +59,10 @@ class MemoCache:
 
     def __init__(self):
         self._store: Dict[Tuple, Any] = {}
-        self._lock = Lock()
+        # 必须可重入: get_or_set 持锁执行 factory(), 而 factory 内部常常再次
+        # 走 _cache_get (如 _decide_thinking_loops -> _is_simple_query),
+        # 不可重入 Lock 会让同线程二次进入直接死锁(表现为 UI 永久转圈 0 token).
+        self._lock = RLock()
 
     def get_or_set(self, key: Tuple, factory: Callable[[], Any]) -> Any:
         with self._lock:
