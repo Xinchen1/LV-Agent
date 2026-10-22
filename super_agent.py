@@ -1641,9 +1641,14 @@ class SuperAgentCLI:
     非 TTY 环境退化为普通 input.
     """
     if not sys.stdout.isatty() or not sys.stdin.isatty():
+      # 管道模式(桌面 Electron main): 先发轮次结束+就绪标记, main 据此排队下一条消息
+      self._pipe_mode = True
+      sys.stdout.write("LV_READY_7f3a2e\n")
       sys.stdout.write("You › ")
       sys.stdout.flush()
-      return input().strip()
+      line = input().strip()
+      # \x1f = 桌面主进程对消息内换行的转义, 在此还原为真实换行
+      return line.replace("\x1f", "\n")
 
     # 1) 到新行行首
     sys.stdout.write("\r\n")
@@ -2118,8 +2123,9 @@ class SuperAgentCLI:
         continue
 
       # 多段任务: 空行分隔 -> 排队; 相邻相关任务自动合并为一次执行
+      # (管道模式跳过: 桌面消息里的空行只是 Composer 上下文排版, 不是独立任务)
       segments = [s.strip() for s in re.split(r"\n\s*\n", user_input) if s.strip()]
-      if len(segments) > 1:
+      if len(segments) > 1 and not getattr(self, '_pipe_mode', False):
         self._run_task_batch(segments)
         continue
 

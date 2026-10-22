@@ -5,17 +5,18 @@
 - tools/telegram_bot : agent_callback(tg_msg, ctx) -> response 文本
 - super_agent.py     : agent.run(prompt, code_mode=False) 直接同步调用
 
-本模块只做抽象, 不合并老入口(行为不变):
+本模块只做抽象, 不合并老入口:
 - ChannelMessage: 统一入站消息(渠道/用户/会话/文本/附件)
 - ChannelEvent  : 统一出站事件(kind, token) —— 与现有 stream_callback 同形
-- Channel(ABC)  : handle_inbound() 默认实现 = agent.run + 事件扇出,
-                  各端只需实现投递(sink), 不必重写调度
+- Channel(ABC)  : handle_inbound() 默认实现 = 先排队(FIFO)再 agent.run + 事件扇出
+                  agent 忙时消息排队等待而非失败, 队列满则快速拒绝并给出可读原因
 - Gateway       : 渠道注册表 + dispatch, 按 chat_id 做最小会话路由键
 - LocalChannel  : 内存样板实现(单测/冒烟/脚本用), 证明抽象可用
 """
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -48,14 +49,25 @@ class ChannelEvent:
 
 
 class Channel(ABC):
-    """渠道抽象: 入站调度默认实现, 出站投递由各端实现."""
+    """渠道抽象: 入站调度默认实现, 出站投递由各端实现.
 
-    name: str = "base"
+    排队语义: 同一渠道同一时刻只跑一个 agent.run; agent 忙时后续消息按
+    先来先服务(FIFO)排队等待, 排到即执行, 不丢不撞车.
+    """
+
+    name = "base"
+    max_queue: int = 64  # 等待中的消息上限, 超出快速拒绝不无脑堆积
 
     def __init__(self, agent: Any = None):
         self.agent = agent
         self.inbound = 0
         self.errors = 0
+        self.queued_total = 0
+        self.rejected = 0
+        self._cv = threading.Condition()
+        self._active = False
+        self._active_thread: Optional[int] = None
+        self._waiters = 0
 
     def attach(self, agent: Any) -> None:
         self.agent = agent
@@ -63,6 +75,60 @@ class Channel(ABC):
     @abstractmethod
     def sink(self, event: ChannelEvent, message: ChannelMessage) -> None:
         """投递单个事件(各端实现: WS 发送 / reply_text / 终端打印)."""
+
+    def queue_depth(self) -> int:
+        """当前排队等待中的消息数(不含正在执行的那条)."""
+        with self._cv:
+            return self._waiters
+
+    def _take_ticket(self) -> bool:
+        """排队等令牌; 返回 False 表示快速拒绝(同线程重入或队列已满).
+
+        FIFO 说明: 等待方在同一 Condition 上等唤醒, 先到先等(近似先到先跑);
+        渠道级串行的关键是"不并发、不丢", 严格逐条顺序由到达顺序近似保证.
+        """
+        ident = threading.get_ident()
+        with self._cv:
+            # 同线程重入(run 流程内部触发 handle_inbound): 回队即死锁, 快速拒绝
+            if self._active and self._active_thread == ident:
+                return False
+            if self._active and self._waiters >= self.max_queue:
+                return False
+            if self._active:
+                self._waiters += 1
+                while self._active:
+                    self._cv.wait()
+                self._waiters -= 1
+            self._active = True
+            self._active_thread = ident
+        return True
+
+    def _release_ticket(self) -> None:
+        """交出令牌并唤醒下一个等待者."""
+        with self._cv:
+            if self._active_thread == threading.get_ident():
+                self._active = False
+                self._active_thread = None
+                self._cv.notify_all()
+
+    @staticmethod
+    def _busy_result(reason: str) -> Dict[str, Any]:
+        return {"success": False, "final_answer": f"消息排队失败: {reason}",
+                "actions": [], "metadata": {"queued": False, "reason": reason}}
+
+    def handle_inbound(self, message: ChannelMessage,
+                       extra_callbacks: Optional[List[Callable[[ChannelEvent], None]]] = None) -> Dict[str, Any]:
+        """入站入口: 先排队(FIFO), 轮到再调度; 忙则等待而非失败."""
+        self.queued_total += 1
+        if not self._take_ticket():
+            self.rejected += 1
+            if self._active and self._active_thread == threading.get_ident():
+                return self._busy_result("同线程正在处理中(禁止重入)")
+            return self._busy_result(f"队列已满({self.max_queue}), 稍后再试")
+        try:
+            return self.run_agent(message, extra_callbacks=extra_callbacks)
+        finally:
+            self._release_ticket()
 
     def run_agent(self, message: ChannelMessage,
                   extra_callbacks: Optional[List[Callable[[ChannelEvent], None]]] = None) -> Dict[str, Any]:
@@ -95,12 +161,10 @@ class Channel(ABC):
                       "actions": [], "metadata": {}}
         return result
 
-    def handle_inbound(self, message: ChannelMessage) -> Dict[str, Any]:
-        """入站入口(默认 = 调度; 需要鉴权/排队的端可重写前置)."""
-        return self.run_agent(message)
-
     def stats(self) -> Dict[str, Any]:
-        return {"channel": self.name, "inbound": self.inbound, "errors": self.errors}
+        return {"channel": self.name, "inbound": self.inbound, "errors": self.errors,
+                "queued_total": self.queued_total, "queue_depth": self.queue_depth(),
+                "rejected": self.rejected}
 
 
 class LocalChannel(Channel):
@@ -135,7 +199,8 @@ class Gateway:
         if ch is None:
             raise KeyError(f"unknown channel: {message.channel}")
         self.sessions_seen[message.session_key] = self.sessions_seen.get(message.session_key, 0) + 1
-        return ch.run_agent(message, extra_callbacks=extra_callbacks)
+        # 走 handle_inbound 获得排队语义(agent 忙则 FIFO 等待); 直连 run_agent 无排队
+        return ch.handle_inbound(message, extra_callbacks=extra_callbacks)
 
     def stats(self) -> Dict[str, Any]:
         return {"channels": sorted(self.channels),
