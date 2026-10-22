@@ -77,10 +77,32 @@ class AgentWorker:
             item = self._queue.get()
             if item is None:
                 return
-            text, out = item
+            text, out, on_event = (item + (None,))[:3]
             try:
                 agent = self._ensure_agent()
-                result = agent.run(text, code_mode=False)
+
+                def _stream_cb(kind: str, text: str, _on_event=on_event):
+                    # IM 渠道保险丝: 过滤噪声与 [TOOL: 前缀内容, 只透传可读过程.
+                    # content 不透传(答案完成时整条回复), 避免半成品刷屏.
+                    if not _on_event or not text:
+                        return
+                    if kind not in ("status", "tool_call", "reasoning"):
+                        return
+                    cleaned = text.strip()
+                    if not cleaned or cleaned.startswith("[TOOL:"):
+                        return
+                    try:
+                        _on_event(kind, cleaned)
+                    except Exception as exc:  # noqa: BLE001
+                        import logging
+
+                        logging.getLogger(__name__).debug(f"im progress callback error: {exc}")
+
+                result = agent.run(
+                    text,
+                    code_mode=False,
+                    stream_callback=_stream_cb if on_event else None,
+                )
                 answer = ""
                 if isinstance(result, dict):
                     answer = str(
@@ -107,11 +129,18 @@ class AgentWorker:
                 self._queue.task_done()
 
     def ask(self, text: str, timeout: float = 900.0) -> str:
+        return self._submit(text, None, timeout)
+
+    def ask_stream(self, text: str, on_event, timeout: float = 900.0) -> str:
+        """与 ask 相同, 但 on_event(kind, text) 实时收到思考过程(status/tool_call/reasoning)."""
+        return self._submit(text, on_event, timeout)
+
+    def _submit(self, text: str, on_event, timeout: float) -> str:
         text = (text or "").strip()
         if not text:
             return ""
         out: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=1)
-        self._queue.put((text, out))
+        self._queue.put((text, out, on_event))
         try:
             status, answer = out.get(timeout=timeout)
         except queue.Empty:

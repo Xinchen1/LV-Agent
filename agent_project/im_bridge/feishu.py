@@ -145,6 +145,136 @@ class FeishuBridge:
                 log(f"feishu reply failed: code={resp.code} msg={resp.msg}")
                 return
 
+    def _send_message(self, chat_id: str, text: str) -> str:
+        """发送文本消息并返回 message_id(失败返回 '')."""
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        body = (
+            CreateMessageRequestBody.builder()
+            .receive_id(chat_id)
+            .msg_type("text")
+            .content(json.dumps({"text": text[:3800]}, ensure_ascii=False))
+            .build()
+        )
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(body)
+            .build()
+        )
+        resp = self.client.im.v1.message.create(req)
+        if not resp.success():
+            log(f"feishu progress create failed: code={resp.code} msg={resp.msg}")
+            return ""
+        return str(getattr(resp.data, "message_id", "") or "")
+
+    def _update_message(self, message_id: str, text: str) -> None:
+        """编辑既有文本消息(思考过程实时刷新用), 失败静默. 消息初次发出后仍会保留占位文本."""
+        if not message_id:
+            return
+        from lark_oapi.api.im.v1 import UpdateMessageRequest, UpdateMessageRequestBody
+
+        try:
+            body = (
+                UpdateMessageRequestBody.builder()
+                .msg_type("text")
+                .content(json.dumps({"text": text[:3800]}, ensure_ascii=False))
+                .build()
+            )
+            req = (
+                UpdateMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(body)
+                .build()
+            )
+            resp = self.client.im.v1.message.update(req)
+            if not resp.success():
+                log(f"feishu progress update failed: code={resp.code} msg={resp.msg}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"feishu update error: {exc}")
+
+    class _ThinkingProgress:
+        """把 agent 思考过程(status/tool_call/reasoning)聚合成一条飞书消息并节流刷新."""
+
+        MAX_OPS = 24
+        MAX_REASON = 1400
+        MIN_INTERVAL = 2.0
+
+        def __init__(self, bot, chat_id: str) -> None:
+            self._bot = bot
+            self._chat_id = chat_id
+            self._message_id = ""
+            self._ops: list[str] = []
+            self._reasoning = ""
+            self._last_flush = 0.0
+            self._last_body = ""
+            self._lock = threading.Lock()
+            self._done = False
+
+        def on_event(self, kind: str, text: str) -> None:
+            with self._lock:
+                if self._done:
+                    return
+                snippet = text.splitlines()[0][:160] if text else ""
+                if not snippet:
+                    return
+                if kind == "tool_call":
+                    self._ops.append(f"🔧 {snippet}")
+                elif kind == "status":
+                    if snippet == "thinking":
+                        return
+                    self._ops.append(f"· {snippet}")
+                elif kind == "reasoning":
+                    self._reasoning = (self._reasoning + text)[-self.MAX_REASON :]
+                else:
+                    return
+                if len(self._ops) > self.MAX_OPS:
+                    self._ops = self._ops[-self.MAX_OPS :]
+                self._flush(force=not self._message_id)
+
+        def finish(self) -> None:
+            with self._lock:
+                self._done = True
+                if not self._message_id:
+                    return
+                body = self._render().replace("💭 思考中", "💭 思考过程 ✅")
+                if body != self._last_body:
+                    self._bot._update_message(self._message_id, body)
+
+        def _flush(self, force: bool = False) -> None:
+            now = time.time()
+            if not force and now - self._last_flush < self.MIN_INTERVAL:
+                return
+            self._last_flush = now
+            body = self._render()
+            if body == self._last_body:
+                return
+            if not self._message_id:
+                self._message_id = self._bot._send_message(self._chat_id, body)
+                self._last_body = body
+                return
+            self._bot._update_message(self._message_id, body)
+            self._last_body = body
+
+        def _render(self) -> str:
+            parts = ["💭 思考中"]
+            if self._ops:
+                parts.append("步骤:\n" + "\n".join(self._ops))
+            if self._reasoning.strip():
+                parts.append("思考:\n" + self._reasoning.strip())
+            body = "\n\n".join(parts)
+            # 飞书单条文本 ~4000 字节, 超限精简
+            while len(body.encode("utf-8")) > 3600:
+                if self._ops:
+                    self._ops = self._ops[-10:]
+                    parts = parts[:2]
+                else:
+                    self._reasoning = self._reasoning[-800:]
+                body = "\n\n".join(["💭 思考中"] + (["步骤:\n" + "\n".join(self._ops)] if self._ops else []) + (["思考:\n" + self._reasoning.strip()] if self._reasoning.strip() else []))
+                if len(self._ops) <= 10 and len(self._reasoning) <= 800:
+                    break
+            return body
+
     def _on_message(self, data: Any) -> None:
         try:
             event = data.event
@@ -164,7 +294,9 @@ class FeishuBridge:
             sender_id = getattr(sender, "sender_id", None)
             open_id = getattr(sender_id, "open_id", "") if sender_id else ""
             emit("message", platform="feishu", from_user=open_id, text=text[:200])
-            answer = self.worker.ask(text)
+            progress = self._ThinkingProgress(self, getattr(message, "chat_id", ""))
+            answer = self.worker.ask_stream(text, progress.on_event)
+            progress.finish()
             self._reply(getattr(message, "chat_id", ""), answer)
         except Exception as exc:  # noqa: BLE001
             log(f"feishu handler error: {exc}")
