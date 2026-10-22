@@ -63,9 +63,9 @@ def main():
   bot = create_telegram_bot(
     token=token,
     agent=agent,
-    allowed_user_ids=allowed_user_ids,
+    allowed_users=allowed_user_ids,
     webhook_url=webhook_url,
-    data_path=data_path,
+    config_path=data_path,
   )
 
   # Run the bot

@@ -1,10 +1,14 @@
-"""IM 渠道思考过程流: AgentWorker.ask_stream + 飞书 _ThinkingProgress 聚合刷新."""
+"""IM 渠道思考过程流: AgentWorker.ask_stream + ThinkingProgress + 各平台接线."""
+import asyncio
 import queue
 import threading
 import time
 import unittest
+from pathlib import Path
 
-from agent_project.im_bridge.base import AgentWorker
+from agent_project.im_bridge.base import AgentWorker, ThinkingProgress
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class FakeAgent:
@@ -123,6 +127,104 @@ class ThinkingProgressTest(unittest.TestCase):
     bot, prog = self._bot_and_progress()
     prog.on_event('status', 'thinking')
     self.assertEqual(0, bot.sent)  # 'thinking' 泛提示不触发首条消息
+
+
+class GenericProgressTest(unittest.TestCase):
+  """base.ThinkingProgress: 收集器形态(dingtalk/wechat 用) + 编辑形态(telegram 用)."""
+
+  def test_collector_summary_after_collect(self):
+    prog = ThinkingProgress()
+    for kind, text in [('status', 's1'), ('tool_call', 'tool A'),
+                       ('reasoning', '推理中'), ('content', '不收集 content')]:
+      prog.on_event(kind, text)
+    s = prog.summary()
+    self.assertIn('💭 思考过程:', s)
+    self.assertIn('🔧 tool A', s)
+    self.assertIn('推理中', s)
+    self.assertNotIn('不收集', s)
+
+  def test_summary_empty_when_no_thought(self):
+    self.assertEqual('', ThinkingProgress().summary())
+
+  def test_summary_caps_reason(self):
+    prog = ThinkingProgress()
+    prog.on_event('reasoning', 'x' * 2000)
+    s = prog.summary(max_reason=100)
+    self.assertIn('…', s)
+    self.assertLessEqual(len(s), 600)
+
+  def test_live_edit_mode_send_and_throttle(self):
+    created = []
+    edits = []
+    def send(body):
+      created.append(body)
+      return 'mid1'
+    def update(mid, body):
+      edits.append(body)
+    prog = ThinkingProgress(send=send, update=update, interval=0.05)
+    prog.on_event('tool_call', 'tool A')
+    prog.on_event('tool_call', 'tool B')
+    time.sleep(0.08)
+    prog.on_event('status', 'step 2')
+    status, mid, rendered = prog.finish()
+    self.assertEqual(1, len(created))  # 首条消息只发一次
+    self.assertEqual('mid1', prog.message_id)
+    self.assertEqual('mid1', mid)
+    self.assertGreaterEqual(len(edits), 1)  # 节流窗口过了至少编辑一次
+    self.assertIn('✅', rendered)
+    self.assertTrue(status)
+
+  def test_finish_no_message_id_is_noop(self):
+    prog = ThinkingProgress()
+    status, mid, _ = prog.finish()
+    self.assertFalse(status)
+    self.assertIsNone(mid)
+
+  def test_dispatched_event_uses_real_time(self):
+    prog = ThinkingProgress(send=lambda b: 'm')
+    prog.on_event('reasoning', 'a')
+    self.assertEqual('m', prog.message_id)
+
+
+class TelegramWiringTest(unittest.TestCase):
+  """create_telegram_bot(agent=...) 自动包装 callback; 钉钉/微信走 ask_stream 折叠总结."""
+
+  def test_factory_wraps_agent(self):
+    from agent_project.tools.telegram_bot import create_telegram_bot, _make_agent_callback
+    cb = _make_agent_callback(FakeAgent([('status', 's1'), ('reasoning', '推理')]))
+    self.assertTrue(asyncio.iscoroutinefunction(cb))
+    import inspect
+    params = list(inspect.signature(cb).parameters)
+    self.assertIn('on_event', params)
+
+  def test_agent_callback_runs_agent_with_stream(self):
+    from agent_project.tools.telegram_bot import _make_agent_callback
+    from agent_project.tools.telegram_bot import TelegramMessage
+    events = [('tool_call', 'file_ops')]
+    fake = FakeAgent(events)
+    cb = _make_agent_callback(fake)
+    msg = TelegramMessage(message_id=1, chat_id=2, text='任务', user_id=3,
+                          username='t', timestamp=None, message_type='text')
+    got = []
+    result = asyncio.run(cb(msg, None, on_event=lambda k, w: got.append((k, w))))
+    self.assertEqual('最终答案', result)
+    self.assertEqual([('tool_call', 'file_ops')], got)
+
+  def test_dingtalk_uses_ask_stream_for_thinking(self):
+    src = (ROOT / 'agent_project/im_bridge/dingtalk.py').read_text(encoding='utf-8')
+    self.assertIn('ask_stream', src)
+    self.assertIn('ThinkingProgress()', src)
+    self.assertIn('collector.summary()', src)
+
+  def test_wechat_uses_ask_stream_for_thinking(self):
+    src = (ROOT / 'agent_project/im_bridge/wechat.py').read_text(encoding='utf-8')
+    self.assertIn('ask_stream', src)
+    self.assertIn('collector.summary()', src)
+
+  def test_start_telegram_uses_factory_kwargs(self):
+    src = (ROOT / 'start_telegram.py').read_text(encoding='utf-8')
+    self.assertIn('agent=agent', src)
+    self.assertIn('allowed_users=allowed_user_ids', src)
 
 
 if __name__ == '__main__':

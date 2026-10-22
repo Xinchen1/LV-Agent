@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Set
 
-from .base import AgentWorker, emit, log, require, split_text
+from .base import AgentWorker, ThinkingProgress, emit, log, require, split_text
 
 
 class WeChatBridge:
@@ -89,7 +89,12 @@ class WeChatBridge:
             if is_group:
                 text = text.split("\u2005", 1)[-1].strip()
             emit("message", platform="wechat", from_user=user, text=text[:200])
-            answer = self.worker.ask(text)
+            # 思考过程: 收集后折叠进最终回复(网页版消息不可编辑)
+            collector = ThinkingProgress()
+            answer = self.worker.ask_stream(text, collector.on_event)
+            thinking = collector.summary()
+            if thinking:
+                answer = thinking + "\n\n———\n\n" + answer
             for chunk in split_text(answer):
                 msg.user.send(chunk)
         except Exception as exc:  # noqa: BLE001

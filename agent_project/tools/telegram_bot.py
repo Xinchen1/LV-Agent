@@ -6,8 +6,10 @@ Allows the agent to interact with users via Telegram messenger
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,7 @@ from datetime import datetime
 
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 from ..terminal import style as _style
+from ..im_bridge import ThinkingProgress
 
 # Optional dependency (lazy: telegram 是重依赖, 进程冷启动时只探测不加载;
 # 真正 start/send 时才 import, 未安装则快速降级)
@@ -390,11 +393,33 @@ _Updated: {datetime.now().strftime('%H:%M:%S')}_"""
         # Process with agent (if callback set)
         if self.agent_callback:
             try:
-                # This is where the Agent processes the message
-                response = await self.agent_callback(tg_msg, context)
+                # 思考过程: 占位 "💭 思考中" 消息, on_event 从 agent 线程节流编辑刷回
+                loop = asyncio.get_running_loop()
+                loop_thread = threading.get_ident()
+                placeholder = await update.message.reply_text("💭 思考中…")
+
+                def _edit(body: str) -> str:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._safe_edit(placeholder, body), loop)
+                    if threading.get_ident() != loop_thread:
+                        try:
+                            fut.result(timeout=15)
+                        except Exception as edit_err:  # noqa: BLE001 — 思考进度编辑失败不影响最终回复
+                            logger.debug("telegram progress edit failed: %s", edit_err)
+                    return str(placeholder.message_id)
+
+                progress = ThinkingProgress(send=_edit, update=_edit, interval=2.5)
+                reply_kwargs = {}
+                if self._callback_takes_on_event():
+                    reply_kwargs = {"on_event": progress.on_event}
+                response = await self.agent_callback(tg_msg, context, **reply_kwargs)
                 if response:
+                    # 标记思考过程完成并附最终答案
+                    progress.finish()
                     await update.message.reply_text(response, parse_mode=ParseMode.HTML)
                     self.messages_sent += 1
+                else:
+                    await self._safe_edit(placeholder, "💭 思考过程 ✅ (无回复)")
             except Exception as e:
                 self.logger.error(f"Agent callback error: {e}")
                 await update.message.reply_text(
@@ -521,6 +546,23 @@ _Updated: {datetime.now().strftime('%H:%M:%S')}_"""
                     await query.edit_message_text(text=response, parse_mode=ParseMode.HTML)
             except Exception as e:
                 self.logger.error(f"Callback error: {e}")
+
+    async def _safe_edit(self, message, text: str) -> None:
+        """编辑消息(思考过程刷新用); 失败只记 debug, 不打断主流程."""
+        try:
+            await message.edit_text(text)
+        except Exception as e:  # noqa: BLE001 — Telegram 偶发编辑冲突/无限流
+            self.logger.debug(f"progress edit skipped: {e}")
+
+    def _callback_takes_on_event(self) -> bool:
+        """agent_callback 是否支持 on_event 进度钩子(旧签名向后兼容)."""
+        try:
+            for p in inspect.signature(self.agent_callback).parameters.values():
+                if p.kind == p.VAR_KEYWORD or p.name in ("on_event", "progress_cb"):
+                    return True
+        except (TypeError, ValueError):
+            return False
+        return False
 
     def _send_message_sync(
         self,
@@ -792,9 +834,18 @@ def create_telegram_bot(
     allowed_users: List[int] = None,
     polling: bool = True,
     webhook_url: str = None,
-    config_path: str = "./data/telegram"
+    config_path: str = "./data/telegram",
+    agent = None,
 ) -> TelegramBotTool:
-    """Create and configure Telegram bot tool"""
+    """Create and configure Telegram bot tool.
+
+    Args:
+        agent: 直接传 OpenMythosAgent 实例(start_telegram.py 用法), 自动包装成 callback.
+            回调带 on_event 进度钩子, 消息处理中会实时编辑"💭 思考中"消息展示过程.
+        agent_callback: 已有的自定义回调(优先于 agent).
+    """
+    if agent is not None and agent_callback is None:
+        agent_callback = _make_agent_callback(agent)
     bot = TelegramBotTool(
         token=token,
         allowed_user_ids=allowed_users,
@@ -804,6 +855,44 @@ def create_telegram_bot(
         config_path=config_path
     )
     return bot
+
+
+def _make_agent_callback(agent):
+    """把 agent 实例包装成异步 agent_callback(tg_msg, context, on_event=None)."""
+    import asyncio as _asyncio
+    import inspect as _inspect
+
+    def _supports_on_event(cb) -> bool:
+        try:
+            for p in _inspect.signature(cb).parameters.values():
+                if p.kind == p.VAR_KEYWORD or p.name in ("on_event", "progress_cb"):
+                    return True
+        except (TypeError, ValueError):
+            return False
+        return False
+
+    async def _agent_cb(tg_msg, context, on_event=None):
+        def _run():
+            kwargs = {}
+            if on_event is not None:
+                kwargs["stream_callback"] = on_event
+            result = agent.run(tg_msg.text, code_mode=False, **kwargs)
+            if isinstance(result, dict):
+                answer = str(result.get("final_answer")
+                             or result.get("answer")
+                             or result.get("response") or "")
+                try:
+                    from ..response_filter import strip_tool_tags
+
+                    answer = strip_tool_tags(answer)
+                except Exception:  # noqa: BLE001
+                    pass
+                return answer
+            return "" if result is None else str(result)
+
+        return await _asyncio.to_thread(_run)
+
+    return _agent_cb
 
 
 # Register the tool

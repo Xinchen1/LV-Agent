@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Set
 
-from .base import AgentWorker, emit, log, require, split_text
+from .base import AgentWorker, ThinkingProgress, emit, log, require, split_text
 
 _DEFAULT_BASE = "https://oapi.dingtalk.com"
 _DEFAULT_SOURCE = "DING_DWS_CLAW"
@@ -151,7 +151,12 @@ class DingTalkBridge:
                     if not text:
                         return sdk.AckMessage.STATUS_OK, "OK"
                     emit("message", platform="dingtalk", from_user=user_id, text=text[:200])
-                    answer = bridge.worker.ask(text)
+                    # 思考过程: 收集后在最终回复前折叠一份(钉钉机器人消息不支持编辑刷新)
+                    collector = ThinkingProgress()
+                    answer = bridge.worker.ask_stream(text, collector.on_event)
+                    thinking = collector.summary()
+                    if thinking:
+                        answer = thinking + "\n\n———\n\n" + answer
                     for chunk in split_text(answer):
                         self.reply_text(chunk, incoming)
                 except Exception as exc:  # noqa: BLE001
