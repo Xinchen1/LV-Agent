@@ -17,14 +17,38 @@ from datetime import datetime
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 from ..terminal import style as _style
 
-# Optional dependency
-try:
-    from telegram import Update, Bot, InlineKeyboardMarkup, InlineKeyboardButton
-    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-    from telegram.constants import ParseMode
-    _HAS_TELEGRAM = True
-except ImportError:
-    _HAS_TELEGRAM = False
+# Optional dependency (lazy: telegram 是重依赖, 进程冷启动时只探测不加载;
+# 真正 start/send 时才 import, 未安装则快速降级)
+import importlib.util as _ils
+import importlib as _il
+_HAS_TELEGRAM = _ils.find_spec("telegram") is not None
+
+
+def _tg() -> bool:
+    """Lazily import telegram; populates module globals on first success."""
+    if globals().get("_TG_OK"):
+        return True
+    try:
+        tg = _il.import_module("telegram")
+        tg_ext = _il.import_module("telegram.ext")
+        tg_const = _il.import_module("telegram.constants")
+        globals().update(
+            Update=tg.Update,
+            Bot=tg.Bot,
+            InlineKeyboardMarkup=tg.InlineKeyboardMarkup,
+            InlineKeyboardButton=tg.InlineKeyboardButton,
+            Application=tg_ext.Application,
+            CommandHandler=tg_ext.CommandHandler,
+            MessageHandler=tg_ext.MessageHandler,
+            CallbackQueryHandler=tg_ext.CallbackQueryHandler,
+            ContextTypes=tg_ext.ContextTypes,
+            filters=tg_ext.filters,
+            ParseMode=tg_const.ParseMode,
+        )
+        globals()["_TG_OK"] = True
+        return True
+    except ImportError:
+        return False
 
 
 @dataclass
@@ -168,6 +192,12 @@ class TelegramBotTool(BaseTool):
         Note: Most actions are async but this is sync wrapper
         """
         try:
+            if not _tg():
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="python-telegram-bot is not installed. `pip install python-telegram-bot` and retry."
+                )
             if not self.token:
                 return ToolResult(
                     success=False,
@@ -278,8 +308,6 @@ class TelegramBotTool(BaseTool):
     def _register_handlers(self):
         """Register message and command handlers"""
         # Command handlers
-        from telegram.ext import CommandHandler
-
         self.application.add_handler(CommandHandler("start", self._cmd_start))
         self.application.add_handler(CommandHandler("help", self._cmd_help))
         self.application.add_handler(CommandHandler("status", self._cmd_status))

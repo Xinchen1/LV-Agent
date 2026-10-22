@@ -182,6 +182,16 @@ TASK_TOOL_HINTS = [
     (("进程", "process", "后台任务"), {"process_manager"}),
     (("mcp",), {"mcp_setup"}),
     (("图灵", "turing"), {"turing_machine"}),
+
+    # Personal Assistant tools
+    (("日程", "日历", "会议", "安排", "schedule", "calendar", "会议"), {"calendar"}),
+    (("任务", "待办", "todo", "任务列表", "项目", "tasks"), {"tasks"}),
+    (("笔记", "备忘", "记录", "知识", "notes"), {"notes"}),
+    (("提醒", "闹钟", "定时", "remind", "alarm", "提醒我"), {"reminders"}),
+    (("联系人", "通讯录", "电话", "邮箱", "contacts"), {"contacts"}),
+    (("记账", "账本", "花费", "收入", "预算", "finance", "expense", "钱"), {"finance"}),
+    (("旅行", "出差", "行程", "打包", "订票", "travel", "trip"), {"travel"}),
+    (("健康", "运动", "锻炼", "饮食", "睡眠", "体重", "health", "fitness"), {"health"}),
 ]
 
 
@@ -259,13 +269,22 @@ def register_builtin_tools() -> None:
     from .git_ops import GitTool
     from .database import DatabaseTool
     from .github_search import GitHubSearchTool
-    from .telegram_bot import TelegramBotTool, create_telegram_bot
     from .bash_exec import BashExecTool
     from .grep_tool import GrepTool, GlobTool  # noqa: F401
     from .project_context import ProjectContextTool  # noqa: F401
     from .weather import WeatherTool  # noqa: F401
     from .web_fetcher import ReadWebTool  # noqa: F401
     from .pdf_tool import PdfTool  # noqa: F401
+    from .calendar_tool import CalendarTool  # noqa: F401
+    from .task_tool import TaskTool  # noqa: F401
+    from .notes_tool import NotesTool  # noqa: F401
+    from .reminders_tool import RemindersTool  # noqa: F401
+    from .contacts_tool import ContactsTool  # noqa: F401
+    from .finance_tool import FinanceTool  # noqa: F401
+    from .travel_tool import TravelTool  # noqa: F401
+    from .health_tool import HealthTool  # noqa: F401
+    from .daily_briefing_tool import DailyBriefingTool  # noqa: F401
+    from .automation_hooks import enable_automation_for_all_tools  # noqa: F401
 
     _defaults = [
         WebSearchTool(),
@@ -284,6 +303,15 @@ def register_builtin_tools() -> None:
         GitHubSearchTool(),
         ReadWebTool(),
         PdfTool(),
+        CalendarTool(),
+        TaskTool(),
+        NotesTool(),
+        RemindersTool(),
+        ContactsTool(),
+        FinanceTool(),
+        TravelTool(),
+        HealthTool(),
+        DailyBriefingTool(),
     ]
     for t in _defaults:
         if t.name not in TOOLS_REGISTRY._tools:
@@ -302,13 +330,22 @@ from .playwright_browser import PlaywrightBrowserTool  # noqa: E402
 from .git_ops import GitTool  # noqa: E402
 from .database import DatabaseTool  # noqa: E402
 from .github_search import GitHubSearchTool  # noqa: E402
-from .telegram_bot import TelegramBotTool, create_telegram_bot  # noqa: E402
 from .bash_exec import BashExecTool  # noqa: E402
 from .grep_tool import GrepTool, GlobTool  # noqa: E402,F401
 from .weather import WeatherTool  # noqa: E402,F401
 from .web_fetcher import ReadWebTool  # noqa: E402,F401
 from .mcp_setup import McpConfiguratorTool  # noqa: E402,F401
 from .discovery import auto_register_tools  # noqa: E402
+from .calendar_tool import CalendarTool  # noqa: E402
+from .task_tool import TaskTool  # noqa: E402
+from .notes_tool import NotesTool  # noqa: E402
+from .reminders_tool import RemindersTool  # noqa: E402
+from .contacts_tool import ContactsTool  # noqa: E402
+from .finance_tool import FinanceTool  # noqa: E402
+from .travel_tool import TravelTool  # noqa: E402
+from .health_tool import HealthTool  # noqa: E402
+from .daily_briefing_tool import DailyBriefingTool  # noqa: E402
+from .automation_hooks import get_automation_engine, trigger_automation, enable_automation_for_all_tools  # noqa: E402
 
 # Discover and register any BaseTool subclasses not in the explicit list above.
 try:
@@ -339,4 +376,21 @@ __all__ = [
     "GrepTool",
     "GlobTool",
     "WeatherTool",
-    ]
+    "CalendarTool",
+    "TaskTool",
+    "NotesTool",
+    "RemindersTool",
+    "ContactsTool",
+    "FinanceTool",
+    "TravelTool",
+    "HealthTool",
+    "DailyBriefingTool",
+]
+
+
+def __getattr__(name: str):
+    # PEP 562: telegram 依赖重 (telegram + requests + httpx ~160ms), 改为按需懒加载。
+    if name in ("TelegramBotTool", "create_telegram_bot"):
+        from . import telegram_bot as _tb
+        return getattr(_tb, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

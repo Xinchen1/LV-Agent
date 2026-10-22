@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import anyio
@@ -77,6 +78,31 @@ AGENT_TOOL_DESC: Dict[str, Any] = {
 
 _AGENT_SINGLETON: Dict[str, Any] = {}
 _AGENT_LOCK = threading.Lock()
+
+# 调用观测: 判断「对面到底有没有在用」的唯一硬证据, /healthz 直接可读。
+_CALL_STATS: Dict[str, Any] = {"calls": 0, "errors": 0, "last_tool": None, "last_call_at": None}
+_STATS_LOCK = threading.Lock()
+
+
+def _record_call(name: str, is_error: bool) -> None:
+    with _STATS_LOCK:
+        _CALL_STATS["calls"] += 1
+        if is_error:
+            _CALL_STATS["errors"] += 1
+        _CALL_STATS["last_tool"] = name
+        _CALL_STATS["last_call_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def call_stats() -> Dict[str, Any]:
+    with _STATS_LOCK:
+        return dict(_CALL_STATS)
+
+
+def _fingerprint(value: str) -> str:
+    """token 指纹: 够用来判断「客户端带的是不是同一把」, 又不至于泄密。"""
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 # ============ Schema 适配 ============
@@ -242,10 +268,19 @@ def build_server(
 
     async def on_call_tool(_context: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         # 工具执行是阻塞 IO(搜索/子进程/文件), 必须丢线程池, 否则会把事件循环卡死。
+        started = time.perf_counter()
         text, is_error = await anyio.to_thread.run_sync(
             lambda: dispatch_tool_call(
                 registry, descriptors, params.name, params.arguments, agent_factory=agent_factory
             )
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _record_call(params.name, is_error)
+        preview = ", ".join(
+            f"{key}={str(value)[:60]!r}" for key, value in list((params.arguments or {}).items())[:4]
+        )
+        logger.info(
+            "mcp tool call: %s (%.0fms, is_error=%s) %s", params.name, elapsed_ms, is_error, preview
         )
         return types.CallToolResult(content=[types.TextContent(type="text", text=text)], isError=is_error)
 
@@ -264,10 +299,15 @@ def build_server(
 # ============ HTTP 层 ============
 
 class BearerTokenMiddleware:
-    """只保护 MCP 路径的 `Authorization: Bearer <token>` 校验(常数时间比较)。
+    """只保护 MCP 路径的 token 校验(常数时间比较)。
 
     裸 ASGI 中间件而非 Starlette BaseHTTPMiddleware: 后者会吃掉 SSE 流式响应。
+
+    不同 MCP 客户端递 token 的写法不统一(Authorization: Bearer x / Authorization: x /
+    x-api-key: x), 这里都收, 否则会出现「网络通但恒 401」的死局 —— 面板侧看不到原因。
     """
+
+    AUTH_HEADERS = ("authorization", "x-api-key", "api-key", "mcp-bearer-token")
 
     def __init__(self, app: Any, token: str, protected_paths: Sequence[str] = (DEFAULT_PATH,)) -> None:
         self.app = app
@@ -277,13 +317,34 @@ class BearerTokenMiddleware:
     def _needs_auth(self, path: str) -> bool:
         return any(path == p or path.startswith(p.rstrip("/") + "/") for p in self.protected_paths)
 
+    @classmethod
+    def _presented_token(cls, headers: Dict[str, str]) -> Tuple[Optional[str], List[str]]:
+        """返回 (候选 token, 出现过的鉴权头名列表)。"""
+        present = [name for name in cls.AUTH_HEADERS if headers.get(name)]
+        for name in cls.AUTH_HEADERS:
+            raw = (headers.get(name) or "").strip()
+            if not raw:
+                continue
+            if raw.lower().startswith("bearer "):
+                raw = raw[len("bearer "):].strip()
+            return raw, present
+        return None, present
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not self._needs_auth(scope.get("path", "")):
             await self.app(scope, receive, send)
             return
 
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        if not hmac.compare_digest(headers.get("authorization", ""), f"Bearer {self.token}"):
+        presented, present = self._presented_token(headers)
+        if presented is None or not hmac.compare_digest(presented, self.token):
+            # 只记指纹不记明文: 日志会外流, token 不能落盘。
+            logger.warning(
+                "mcp auth failed from %s: headers=%s presented=%s",
+                scope.get("client", ("?",))[0],
+                present or "none",
+                f"len={len(presented)} sha256={_fingerprint(presented)}" if presented else "absent",
+            )
             response = JSONResponse(
                 {"error": "unauthorized", "hint": "send 'Authorization: Bearer <token>'"},
                 status_code=401,
@@ -333,6 +394,7 @@ def create_app(
             "tools": tool_count,
             "auth": "bearer" if token else "none",
         }
+        payload.update(call_stats())
         return JSONResponse(payload)
 
     app = server.streamable_http_app(
@@ -362,7 +424,22 @@ def _env_list(name: str) -> Optional[List[str]]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _configure_logging() -> None:
+    """给模块 logger 挂一个 handler。
+
+    uvicorn 只配置自己那三个 logger, root 没有 handler, 于是本模块的 logger.info
+    会被静默丢弃 —— 明明打了调用日志却什么都看不到。
+    """
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [mcp] %(message)s", datefmt="%H:%M:%S"))
+        logger.addHandler(handler)
+        logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _configure_logging()
     parser = argparse.ArgumentParser(
         prog="python -m agent_project.mcp_server",
         description="Serve LV Agent tools over MCP (Streamable HTTP).",

@@ -301,7 +301,8 @@ def _render_portrait(width_chars: Optional[int] = None) -> str:
 
 class SuperAgentCLI:
   def __init__(self):
-    self.config_path = Path(__file__).parent / 'config.yaml'
+    env_config = os.environ.get('LV_AGENT_CONFIG', '').strip()
+    self.config_path = Path(env_config).expanduser() if env_config else Path(__file__).parent / 'config.yaml'
     self.config = None
     self.agent = None
     self._tg_process = None

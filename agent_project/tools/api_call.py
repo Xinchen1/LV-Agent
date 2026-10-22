@@ -3,7 +3,7 @@ API Call Tool - 安全HTTP请求（仅允许预定义hosts）
 """
 
 import json
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 from typing import Dict, Any, Optional
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 

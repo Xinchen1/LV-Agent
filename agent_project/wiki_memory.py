@@ -27,7 +27,7 @@ LLM Wiki Memory — Karpathy-style graph memory
 
 from __future__ import annotations
 
-import uuid, json, re, time
+import uuid, json, re, time, os
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Set
@@ -373,7 +373,10 @@ class WikiGraph:
             "saved_at": datetime.now().isoformat(),
         }
         path = self.storage_path / "wiki_graph.json"
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
 
     def _load_from_disk(self):
         path = self.storage_path / "wiki_graph.json"

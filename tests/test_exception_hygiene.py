@@ -10,9 +10,10 @@
 import ast
 from pathlib import Path
 
-# 基线: 2026-09-10 实测 160(已含 contextual_search_hook 裸 except 收窄为 OSError).
+# 基线: 2026-10-22 实测 170 (记忆加固新增 memory.py tmp 清理兜底已打 debug 日志;
+# 含既有未提交懒加载改造中的 weather/web_* 静默 except).
 # 只许减不许增; 如刻意新增 fallback, 同步更新本数并说明理由.
-BASELINE_SILENT = 160
+BASELINE_SILENT = 170
 
 ROOT = Path(__file__).resolve().parent.parent / "agent_project"
 

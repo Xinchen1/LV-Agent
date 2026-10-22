@@ -17,7 +17,7 @@ import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 
 # Optional async HTTP
 try:
@@ -99,14 +99,8 @@ class WebSearchTool(BaseTool):
         self.domain_trust = self.cfg.get("domain_trust", {})
 
         # 共享 Session + 大连接池: 并发搜索时避免 urllib3 全局池满丢连接
-        self._session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=50, pool_maxsize=50, max_retries=0,
-            pool_block=False,
-        )
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
-
+        # (懒建: 首次网络调用才落 requests/urllib3 import, 消掉冷启动 ~50ms)
+        self._session = None
         self.cache = SearchCache(ttl=self.cache_ttl, disk_path="./data/search_cache")
         self.unshortener = URLUnshortener()
         self.scorer = SearchScorer(domain_trust=self.domain_trust, quality_threshold=self.quality_threshold)
@@ -116,6 +110,17 @@ class WebSearchTool(BaseTool):
 
         # 内存级缓存：热查询零网络/磁盘/解析
         self._mem_cache = {}
+
+    def _get_session(self):
+        if self._session is None:
+            self._session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=50, pool_maxsize=50, max_retries=0,
+                pool_block=False,
+            )
+            self._session.mount("https://", adapter)
+            self._session.mount("http://", adapter)
+        return self._session
 
     @staticmethod
     def _detect_search_need(query: str) -> Dict[str, Any]:
@@ -602,7 +607,7 @@ class WebSearchTool(BaseTool):
 
         for attempt in range(2):
             try:
-                response = self._session.post(
+                response = self._get_session().post(
                     url,
                     data={"q": query},
                     headers=headers,
@@ -665,7 +670,7 @@ class WebSearchTool(BaseTool):
 
         for attempt in range(2):
             try:
-                response = self._session.get(
+                response = self._get_session().get(
                     url,
                     params={"q": query},
                     headers=headers,
@@ -864,7 +869,7 @@ class WebSearchTool(BaseTool):
         last_exception = None
         for attempt in range(2):
             try:
-                response = self._session.get(
+                response = self._get_session().get(
                     url, params={"q": query}, headers=headers, timeout=5
                 )
                 response.raise_for_status()
@@ -903,7 +908,7 @@ class WebSearchTool(BaseTool):
         last_exception = None
         for attempt in range(2):
             try:
-                response = self._session.get(
+                response = self._get_session().get(
                     url, params={"q": query, "num": max_results}, headers=headers, timeout=5
                 )
                 response.raise_for_status()

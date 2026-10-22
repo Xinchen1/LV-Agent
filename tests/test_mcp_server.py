@@ -198,6 +198,36 @@ def test_bearer_middleware_allows_health_but_guards_mcp():
     assert inner_gut == [HEALTH_PATH, "/mcp"]
 
 
+def test_auth_accepts_common_token_header_variants():
+    """不同 MCP 客户端递 token 的写法不一, 全都要认, 否则面板侧只看到恒 401。"""
+
+    async def probe(auth_value, header="authorization"):
+        async def inner(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        app = BearerTokenMiddleware(inner, token="tok123")
+        headers = [(header.encode(), auth_value.encode())]
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request"}
+
+        await app({"type": "http", "path": "/mcp", "headers": headers, "method": "POST"}, receive, send)
+        return sent[0]["status"]
+
+    assert anyio.run(probe, "Bearer tok123") == 200
+    assert anyio.run(probe, "bearer tok123") == 200
+    assert anyio.run(probe, "tok123") == 200, "裸 token(无 Bearer 前缀)也要认"
+    assert anyio.run(probe, "tok123", "x-api-key") == 200
+    assert anyio.run(probe, "tok123", "api-key") == 200
+    assert anyio.run(probe, "Bearer wrong") == 401
+    assert anyio.run(probe, "") == 401
+
+
 def test_custom_mcp_path_is_the_only_protected_one():
     async def inner(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -238,6 +268,33 @@ def test_health_endpoint_reports_tools_and_auth():
     status, body = anyio.run(hit)
     assert status == 200
     assert body["status"] == "ok" and body["tools"] == 3 and body["auth"] == "none"
+    assert "calls" in body, "健康检查要能回答「对面到底调过没有」"
+
+
+def test_call_stats_record_tool_calls():
+    from agent_project.mcp_server import call_stats
+
+    before = call_stats()["calls"]
+    reg = make_registry()
+    app = create_app(reg, host="0.0.0.0")
+
+    async def flow():
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8788") as client:
+                async with streamable_http_client("http://127.0.0.1:8788/mcp", http_client=client) as streams:
+                    async with ClientSession(streams[0], streams[1]) as session:
+                        await session.initialize()
+                        await session.call_tool("echo", {"payload": "x"})
+                        await session.call_tool("echo", {})
+
+    anyio.run(flow)
+    after = call_stats()
+    assert after["calls"] == before + 2
+    assert after["errors"] == 1
+    assert after["last_tool"] == "echo"
 
 
 def test_real_mcp_handshake_lists_and_calls_tools():

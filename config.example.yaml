@@ -1,67 +1,294 @@
-# Contributing to LV Agent
+# LV Agent configuration example (no secrets).
+# Real config lives at ~/Library/Application Support/lv-agent-desktop/config.yaml
+# or is created on first launch.
 
-Thanks for your interest in contributing to LV Agent! This project is
-open-source under the AGPL-3.0-only license, and we welcome all forms of contribution:
-bug reports, feature ideas, documentation, and code.
-
-## Ground Rules
-
-1. **By submitting a pull request, you agree** that your contribution is
-   licensed under the AGPL-3.0-only license (same as the rest of the project).
-2. **You certify that you have the right** to submit the code (you wrote it,
-   or you have permission from the original author).
-3. **Do not include** real API keys, tokens, passwords, or personal data
-   in code, configs, or commit messages.
-4. **Respect the trademarks**: do not use "LV Agent", "Lux Vita", or the
-   cleveris research name/logo on derivative works without permission.
-
-## How to Contribute
-
-### Reporting Issues
-- Search existing issues first to avoid duplicates
-- Use a clear, descriptive title
-- Include: steps to reproduce, expected vs actual behavior, and your
-  environment (OS, Python version, backend in use)
-
-### Submitting Code
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/your-feature`
-3. Make your changes, keeping them focused
-4. Add tests if you change behavior (`python -m pytest tests/ -v`)
-5. Commit with a clear message (see style below)
-6. Push and open a Pull Request
-
-### Commit Message Style
-We use conventional commits:
-
-```
-type: short description
-
-Optional detailed explanation (why the change, what it affects)
-```
-
-Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `security`
-
-Example:
-```
-fix: resolve Enter key non-response in interactive prompt
-
-The raw input reader conflicted with readline's bracketed paste mode.
-Disabled readline so termios+cbreak handles input directly.
-```
-
-## Development Setup
-
-```bash
-git clone https://github.com/Xinchen1/LV-Agent.git
-cd LV-Agent
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-python -m pytest tests/ -v
-```
-
-## Code of Conduct
-
-Be respectful and constructive. Harassment, trolling, and personal attacks
-are not tolerated. We're building something together — help make it
-welcoming for everyone.
+act_threshold: 0.7
+agent:
+  openai:
+    api_key: ${OPENAI_API_KEY:-}
+    base_url: https://integrate.api.nvidia.com/v1
+    model: nvidia/nemotron-3.5-lightning-30b-a3b
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    timeout: 120
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY:-}
+    base_url: https://api.anthropic.com/v1
+    max_tokens: 4096
+    model: claude-sonnet-4-20250514
+    temperature: 0.7
+    timeout: 120
+  backend: openai
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY:-}
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    temperature: 0.0
+    top_p: 0.9
+    max_tokens: 4096
+    timeout: 120
+deepseek:
+  api_key: ${DEEPSEEK_API_KEY:-}
+  base_url: https://deepseek.com
+  max_tokens: 4096
+  model: deepseek-chat
+  temperature: 0.7
+  top_p: 0.9
+default_thinking_loops: 2
+display: {}
+execution:
+  default_strategy: react
+experience:
+  auto_save: true
+  max_episodes: 10000
+  save_interval: 10
+  storage_type: memory
+  vector_db_path: ./data/experience_store
+fast_mode: true
+harness:
+  allowlist_path: ./data/harness_allowlist.txt
+  audit_log: true
+  converge_on_stable: true
+  enabled: true
+  max_model_retries: 3
+  max_seconds: 600.0
+  max_tokens: null
+  max_tool_calls: null
+  max_turns: 12
+  max_verification_rounds: 2
+  policy: safe
+  prompt_injection_scan: true
+  verify_final_answer: true
+  workspace_root: null
+health:
+  print_status_on_startup: true
+  show_install_hints: true
+logging:
+  console: false
+  default_loops: 4
+  file: ./logs/agent.log
+  level: INFO
+  max_loops: 16
+max_outer_loops: 2
+max_thinking_loops: 8
+mcp:
+  enabled: true
+  servers:
+    filesystem:
+      args:
+      - -y
+      - '@modelcontextprotocol/server-filesystem'
+      - ${HOME}/Desktop
+      command: npx
+      enabled: true
+      env: {}
+      init_timeout: 120
+      timeout: 60
+memory:
+  auto_extract_entities: true
+  compression_max_tokens: 512
+  context_compression: true
+  enabled: true
+  episodic_storage_path: ./data/episodic_store
+  file_memory_path: ./data/memory.md
+  importance_threshold: 0.45
+  kg_storage_path: ./data/kg_store
+  max_episodes: 10000
+  max_facts_per_turn: 5
+  sqlite_session_path: ./data/sessions.db
+  user_memory_path: ./data/user.md
+model:
+  attention_type: mla
+  dim: 256
+  expert_dim: 64
+  max_loop_iters: 16
+  model_path: null
+  n_experts: 8
+  n_experts_per_tok: 2
+  n_heads: 8
+  n_shared_experts: 1
+  use_local: true
+  vocab_size: 32000
+model_registry_path: agent_project/config/models.yaml
+openai:
+  api_key: ${OPENAI_API_KEY:-}
+  base_url: http://localhost:11434/v1
+  max_tokens: 4096
+  model: qwen2.5-coder:7b
+  temperature: 0.7
+  timeout: 120
+  top_p: 0.9
+openmythos:
+  act_threshold: 0.95
+  attn_type: gqa
+  coda_layers: 2
+  device: cpu
+  dim: 256
+  dropout: 0.0
+  expert_dim: 64
+  lora_rank: 8
+  max_loops: 8
+  max_seq_len: 4096
+  model_path: null
+  n_experts: 8
+  n_experts_per_tok: 2
+  n_heads: 8
+  n_kv_heads: 2
+  n_shared_experts: 1
+  prelude_layers: 2
+  rope_theta: 500000.0
+openrouter:
+  api_key: ${OPENROUTER_API_KEY:-}
+  base_url: https://openrouter.ai/api/v1
+  max_tokens: 4096
+  model: anthropic/claude-sonnet-4
+  temperature: 0.7
+  timeout: 120
+  top_p: 0.9
+planning:
+  default_strategy: adaptive
+  enabled: true
+  max_subtasks: 10
+  optimize_plans: true
+reasoning:
+  default_strategy: react
+  enabled: true
+  loop_controller_default_loops: 2
+  loop_controller_max_loops: 16
+  loop_controller_min_loops: 2
+reflection:
+  enabled: true
+  frequency: 5
+  min_failures_threshold: 3
+  reflections_path: ./data/reflections
+  save_reflections: true
+  thinking_loops_for_reflection: 16
+research:
+  enable_follow_up_search: true
+  enable_latent_space: false
+  enabled: true
+  iterative_rounds: 4
+  max_claims_to_verify: 8
+  max_followup_queries: 4
+  max_search_queries: 12
+  max_search_results_per_query: 30
+  max_sources_for_gap_analysis: 20
+  max_sources_for_report: 50
+  max_thinking_steps: 32
+  max_total_search_results: 200
+  max_urls_to_fetch: 50
+  min_new_sources_per_round: 3
+  min_support_for_high_confidence: 3
+report_formats:
+- md
+- html
+require_citations: true
+verification_rounds: 2
+self_correction:
+  auto_retraining_threshold: 0.6
+  enabled: true
+  high_error_threshold: 0.3
+  inefficiency_threshold: 0.4
+  intervention_window: 10
+  low_confidence_threshold: 0.6
+self_improvement:
+  auto_training: true
+  enabled: true
+  training:
+    batch_size: 2
+    dataset_dir: ./data/train
+    gradient_accumulation_steps: 4
+    learning_rate: 1.0e-05
+    min_episodes: 20
+    model: ''
+    retraining_frequency: 10
+    sft_epochs: 1
+    train_mode: export
+strategies:
+  db_path: ./data/strategies
+  enabled: true
+  max_strategies_per_type: 50
+  min_success_rate: 0.7
+temperature: 0.7
+thinking:
+  default_loops: 4
+  max_loops: 16
+  min_loops: 2
+  thinking_loops_for_reflection: 16
+tools:
+  api_call:
+    allowed_hosts: []
+    enabled: false
+    timeout: 30
+  bash_exec:
+    default_cwd: ''
+    enabled: true
+    max_timeout: 600
+    timeout: 120
+  browser:
+    enabled: false
+  calculator:
+    enabled: true
+  code_exec:
+    enabled: true
+    timeout: 30
+    max_timeout: 120
+  database:
+    enabled: false
+  enabled: []
+  file_ops:
+    allowed_dirs:
+    - ./data
+    - ./workspace
+    - /tmp
+    enabled: true
+    max_file_size: 10485760
+  git:
+    enabled: false
+  glob:
+    enabled: true
+  project_context:
+    enabled: true
+    max_depth: 3
+    max_files: 100
+  search_files:
+    enabled: true
+  telegram:
+    allowed_user_ids: []
+    bot_token: null
+    config_path: ./data/telegram
+    enabled: false
+    polling: true
+    webhook_url: ''
+  web_search:
+    cache_ttl: 300
+    domain_trust:
+      36kr.com: 0.75
+      baike.baidu.com: 0.8
+      github.com: 0.95
+      news.qq.com: 0.8
+      news.sina.com.cn: 0.8
+      techcrunch.com: 0.75
+      wikipedia.org: 1.0
+      zhihu.com: 0.85
+    enabled: true
+    max_fetch_urls: 3
+    max_results: 5
+    provider: duckduckgo
+    providers:
+    - duckduckgo
+    - '360'
+    quality_threshold: 0.3
+    sequential_fallback: true
+    use_playwright: false
+    query_optimizer:
+      enabled: true
+      backend: openai
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      timeout: 10
+      max_tokens: 64
+      temperature: 0.0
+top_k: 50

@@ -1,0 +1,11 @@
+# IM bridge dependencies (Feishu / DingTalk / personal WeChat)
+lark-oapi>=1.7,<2
+dingtalk-stream>=0.24,<1
+itchat>=1.3.10
+pycryptodome
+aiohttp
+pyqrcode
+pypng
+httpx>=0.24,<1
+requests_toolbelt>=0.9
+websockets>=11,<16

@@ -35,6 +35,8 @@ cp "$PROJECT_DIR/config.yaml" "$RESOURCES/"
 cp "$PROJECT_DIR/config.example.yaml" "$RESOURCES/"
 cp "$PROJECT_DIR/requirements-core.txt" "$RESOURCES/"
 cp "$PROJECT_DIR/requirements-minimal.txt" "$RESOURCES/" 2>/dev/null || true
+cp "$PROJECT_DIR/requirements-im.txt" "$RESOURCES/" 2>/dev/null || true
+cp "$PROJECT_DIR/start_im.py" "$RESOURCES/" 2>/dev/null || true
 
 # Copy agent_project package
 rsync -a --exclude='__pycache__' --exclude='.pytest_cache' \
@@ -74,6 +76,9 @@ PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
 "$VENV_PYTHON" -m pip install -r "$RESOURCES/requirements-core.txt" $PIP_MIRROR --quiet
 "$VENV_PYTHON" -m pip install pillow --quiet
+if [ -f "$RESOURCES/requirements-im.txt" ]; then
+  "$VENV_PYTHON" -m pip install -r "$RESOURCES/requirements-im.txt" $PIP_MIRROR --quiet || true
+fi
 
 # ── 3. Create the launcher script ──
 echo "[3/5] Creating launcher script..."

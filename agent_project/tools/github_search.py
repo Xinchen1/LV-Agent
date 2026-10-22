@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 
 

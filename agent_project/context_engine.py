@@ -242,10 +242,9 @@ class UserProfileMemory:
 
     def _save(self):
         try:
-            self.storage_path.write_text(
-                json.dumps(self._profile, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            from .memory import _atomic_write_text
+            payload = json.dumps(self._profile, indent=2, ensure_ascii=False)
+            _atomic_write_text(self.storage_path, payload)
         except Exception:
             pass
 
@@ -426,10 +425,17 @@ class MemoryConsolidator:
             if fact and fact not in facts:
                 facts.append(f"偏好: {fact}")
 
-        # 事实类: "X是/叫/位于/成立于/发布/融资了 Y"
-        for m in re.finditer(r'([\u4e00-\u9fffA-Za-z][\u4e00-\u9fff\w\- ]{1,40})\s*(?:是|叫|位于|成立于|属于)\s*([\u4e00-\u9fffA-Za-z0-9][\u4e00-\u9fff\w\- ]{1,40})', a):
-            if m.group(1).strip() and m.group(2).strip():
-                facts.append(f"事实: {m.group(1).strip()} 是 {m.group(2).strip()}")
+        # 事实类: "X是/叫/位于/成立于/属于 Y" (从回答先提取, 任务原文补充, 覆盖"我是X"类自我介绍)
+        fact_pattern = re.compile(
+            r'([\u4e00-\u9fffA-Za-z][\u4e00-\u9fff\w\- ]{1,40})\s*(?:是|叫|位于|成立于|属于)\s*'
+            r'([\u4e00-\u9fffA-Za-z0-9][\u4e00-\u9fff\w\- ]{1,40})'
+        )
+        for source_text in (a, t):
+            for m in fact_pattern.finditer(source_text):
+                if m.group(1).strip() and m.group(2).strip():
+                    fact = f"事实: {m.group(1).strip()} 是 {m.group(2).strip()}"
+                    if fact not in facts:
+                        facts.append(fact)
 
         # 关键数字事实: 融资额/价格/版本/比例 (支持 "融资7500万" 和 "完成7500万融资" 两种语序)
         for m in re.finditer(r'([\u4e00-\u9fffA-Za-z][\u4e00-\u9fff\w\-]{1,30})[^\d]{0,6}(?:完成|获得|拿到)?[^\d]{0,6}(\d+[.\d]*)\s*([%万美元亿元倍MBGB]+)', a):

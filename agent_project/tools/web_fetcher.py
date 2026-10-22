@@ -11,7 +11,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 
 from . import BaseTool
 from . import ToolResult as _ToolResult
@@ -33,16 +33,15 @@ class WebContentFetcher:
         self.max_text_length = max_text_length
         self.use_playwright = use_playwright
         self.polite_delay = polite_delay
-        self._session = requests.Session()
-        self._session.headers.update(
-            {
+        self._session = None
+        self._session_configured = False
+        self._default_headers = {
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 ),
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            }
-        )
+        }
 
     def fetch(self, url: str) -> Optional[str]:
         """Return cleaned text from *url*, or None if unsuitable."""
@@ -106,7 +105,7 @@ class WebContentFetcher:
             resp = requests.get(
                 url,
                 timeout=self.timeout,
-                headers=self._session.headers,
+                headers=self._default_headers,
                 stream=False,
             )
             if resp.status_code != 200:

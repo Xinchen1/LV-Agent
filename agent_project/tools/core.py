@@ -12,7 +12,7 @@ import subprocess
 import hashlib
 import threading
 import time
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass

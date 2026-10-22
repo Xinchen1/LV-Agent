@@ -4,25 +4,24 @@ Weather tool - fetch current weather and forecast via Open-Meteo (no API key nee
 from __future__ import annotations
 
 import json
-import ssl
-import urllib.request
-import urllib.parse
 from typing import Any, Dict, Optional
 
 from . import BaseTool, ToolResult
 
-# Prefer requests/certifi if available for better SSL handling on macOS.
-try:
-    import requests
-    _HAS_REQUESTS = True
-except Exception:
-    _HAS_REQUESTS = False
 
-try:
-    import certifi
-    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-except Exception:
-    _SSL_CONTEXT = ssl.create_default_context()
+def _ssl_context():
+    """Lazy TLS context: certifi/urllib.request 在 import 期合计 ~100ms(mac _scproxy), 推迟到首次调用。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        import ssl
+        try:
+            import certifi
+            _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
+
+_SSL_CONTEXT = None
 
 
 # WMO Weather interpretation codes (simplified)
@@ -63,26 +62,37 @@ def _wmo_description(code: int) -> str:
 
 
 def _http_get_json(url: str, timeout: int = 20) -> Dict[str, Any]:
-    if _HAS_REQUESTS:
-        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "OpenMythosAgent/1.0"})
+    try:
+        from .lazy_http import requests as _lreq
+        resp = _lreq.get(url, timeout=timeout, headers={"User-Agent": "OpenMythosAgent/1.0"})
         resp.raise_for_status()
         return resp.json()
+    except ImportError:
+        pass
 
-    req = urllib.request.Request(url, headers={"User-Agent": "OpenMythosAgent/1.0"})
+    import urllib.request as _ureq
+    import urllib.error as _uerr
+    import ssl as _ssl
+    req = _ureq.Request(url, headers={"User-Agent": "OpenMythosAgent/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
+        with _ureq.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except ssl.SSLCertVerificationError:
+    except _ssl.SSLCertVerificationError:
         # Fallback: retry without certificate verification
-        ctx = ssl.create_default_context()
+        ctx = _ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        ctx.verify_mode = _ssl.CERT_NONE
+        with _ureq.urlopen(req, timeout=timeout, context=ctx) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+
+def _urlencode(params: dict) -> str:
+    import urllib.parse as _uparse
+    return _uparse.urlencode(params)
 
 
 def _geocode(location: str) -> Optional[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"name": location, "count": 1, "language": "en", "format": "json"})
+    query = _urlencode({"name": location, "count": 1, "language": "en", "format": "json"})
     url = f"https://geocoding-api.open-meteo.com/v1/search?{query}"
     data = _http_get_json(url)
     results = data.get("results") or []
@@ -98,7 +108,7 @@ def _fetch_weather(lat: float, lon: float, days: int = 3) -> Dict[str, Any]:
         "timezone": "auto",
         "forecast_days": max(1, min(7, days)),
     }
-    query = urllib.parse.urlencode(params)
+    query = _urlencode(params)
     url = f"https://api.open-meteo.com/v1/forecast?{query}"
     return _http_get_json(url)
 

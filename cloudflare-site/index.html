@@ -64,16 +64,10 @@
     <nav class="topnav">
       <a href="#features">特点</a>
       <a href="#smarter">更智能</a>
-      <a href="#tools">工具</a>
-      <a href="#commands">命令</a>
-      <a href="#web">网页版</a>
-      <a href="#quickstart">快速开始</a>
-      <a href="#faq">常见问题</a>
       <a href="#download">下载</a>
       <a href="#colophon">版志</a>
     </nav>
-    <span class="topbar-meta">V1.1.0 · macOS · Cleveris Research</span>
-    <a class="lang-btn" href="index.en.html">EN</a>
+    <span class="topbar-meta">V1.1.0 · macOS / Windows · Cleveris Research</span>
   </header>
 
   <!-- Banner -->
@@ -91,7 +85,7 @@
       </h1>
       <p class="banner-sub">LV Agent — 一个终端原生代理框架，具备多轮推理、19+ 工具和长距离记忆。Cleveris Research 的作品。</p>
       <div class="banner-cta">
-        <a class="btn btn-primary" href="#download">下载 macOS 版</a>
+        <a class="btn btn-primary" href="#download">下载 v1.1.0</a>
         <a class="btn btn-ghost" href="https://lv-agent-web.onrender.com/" rel="noopener">尝试网页版 ↗</a>
       </div>
     </div>
@@ -235,4 +229,94 @@
       </article>
       <article class="feature reveal">
         <div class="feat-body">
-          <span class="fig-tag">NEW</span
+          <span class="fig-tag">NEW</span>
+          <h3>更快收敛</h3>
+          <p>重复观察折叠为单一锚点，工具失败时自动换道。减少无效轮次，让复杂任务更早给出可验证结论。</p>
+          <ul class="feat-points">
+            <li>失败工具自动回退</li>
+            <li>重复结果去重与折叠</li>
+            <li>预算感知的提前收敛</li>
+          </ul>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Download -->
+  <section class="download reveal" id="download">
+    <div class="download-veil"></div>
+    <div class="section-head reveal">
+      <span class="section-num">§ 04</span>
+      <span class="section-label">下载</span>
+      <span class="section-tail">v1.1.0 · macOS / Windows</span>
+    </div>
+    <div class="dl-grid">
+      <a class="dl-card" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.1.0/LV.Agent-1.1.0-arm64.dmg">
+        <div class="dl-head"><span class="dl-tag">推荐</span><span class="dl-arch">arm64</span></div>
+        <h3>macOS</h3>
+        <div class="dl-meta">Apple Silicon · DMG · 97 MB</div>
+        <div class="dl-cta">下载 DMG →</div>
+      </a>
+      <a class="dl-card alt" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.1.0/LV.Agent-1.1.0-arm64-mac.zip">
+        <div class="dl-head"><span class="dl-tag ghost">便携</span><span class="dl-arch">arm64</span></div>
+        <h3>macOS ZIP</h3>
+        <div class="dl-meta">Apple Silicon · ZIP · 92 MB</div>
+        <div class="dl-cta">下载 ZIP →</div>
+      </a>
+      <a class="dl-card" href="https://github.com/Xinchen1/LV-Agent/releases/download/v1.1.0/LV.Agent-1.1.0-win.zip">
+        <div class="dl-head"><span class="dl-tag">免安装</span><span class="dl-arch">x64</span></div>
+        <h3>Windows</h3>
+        <div class="dl-meta">Windows 10/11 · ZIP · 107 MB</div>
+        <div class="dl-cta">下载 ZIP →</div>
+      </a>
+      <a class="dl-card alt" href="https://github.com/Xinchen1/LV-Agent/releases/tag/v1.1.0">
+        <div class="dl-head"><span class="dl-tag ghost">全部</span><span class="dl-arch">GitHub</span></div>
+        <h3>Releases</h3>
+        <div class="dl-meta">历史版本 · 源码 · 校验文件</div>
+        <div class="dl-cta">查看全部 →</div>
+      </a>
+    </div>
+    <p class="dl-note">
+      当前构建未签名。macOS 首次打开如被拦截，请在“系统设置 → 隐私与安全性”中允许；Windows 解压后运行 <code>LV Agent.exe</code>。使用机器人/工具功能需要本机已安装 Python 3 及对应依赖。
+    </p>
+  </section>
+
+  <!-- Colophon -->
+  <footer class="colophon" id="colophon">
+    <div class="colo-top">
+      <div class="colo-mark">
+        <span class="wm-mark big">LV</span>
+        <div>
+          <div class="colo-name">LV Agent</div>
+          <div class="colo-sub">Cleveris Research</div>
+        </div>
+      </div>
+      <div class="colo-cols">
+        <div class="colo-col">
+          <span class="colo-h">产品</span>
+          <a href="#features">特点</a>
+          <a href="#smarter">更智能</a>
+          <a href="#download">下载</a>
+        </div>
+        <div class="colo-col">
+          <span class="colo-h">资源</span>
+          <a href="https://github.com/Xinchen1/LV-Agent" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/Xinchen1/LV-Agent/releases" target="_blank" rel="noopener">Releases</a>
+        </div>
+        <div class="colo-col">
+          <span class="colo-h">版本</span>
+          <span>v1.1.0</span>
+          <span>macOS / Windows</span>
+        </div>
+      </div>
+    </div>
+    <div class="colo-rule"></div>
+    <div class="colo-bottom">
+      <span>© 2026 Cleveris Research</span>
+      <span class="signature">终端原生智能 · 深度思考，真实工具。</span>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

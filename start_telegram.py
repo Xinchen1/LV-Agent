@@ -28,9 +28,13 @@ logger = get_logger(__name__)
 
 
 def main():
-  config_path = Path(__file__).parent / 'config.json'
-  if not config_path.exists():
-    config_path = Path(__file__).parent / 'config.yaml'
+  env_cfg = os.getenv('LV_AGENT_CONFIG')
+  if env_cfg and Path(env_cfg).exists():
+    config_path = Path(env_cfg)
+  else:
+    config_path = Path(__file__).parent / 'config.json'
+    if not config_path.exists():
+      config_path = Path(__file__).parent / 'config.yaml'
   
   config = load_config(str(config_path))
   

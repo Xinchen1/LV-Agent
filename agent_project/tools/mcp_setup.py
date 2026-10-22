@@ -13,8 +13,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
-
 from . import BaseTool, TOOLS_REGISTRY, ToolResult
 from .mcp_client import McpManager, McpServerConnection, register_mcp_tools
 
@@ -241,6 +239,7 @@ class McpAutoConfigurator:
             conn.disconnect()
 
     def save_config(self, config_path: str, name: str, config: Dict[str, Any]):
+        import yaml  # lazy: yaml ~35ms 冷启动, 只在写 MCP 配置时才需要
         path = Path(config_path)
         if path.exists():
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

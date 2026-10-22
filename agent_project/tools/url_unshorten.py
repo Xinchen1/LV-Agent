@@ -12,7 +12,7 @@ import time
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-import requests
+from .lazy_http import requests  # noqa: E402  (lazy: ~50ms 冷启动)
 
 
 class URLUnshortener:
@@ -22,22 +22,29 @@ class URLUnshortener:
         self.timeout = timeout
         self.max_redirects = max_redirects
         self.delay = delay
-        self._session = requests.Session()
-        # 连接池加大: resolve_many 会并行对多个 URL 发 HEAD, 默认池(10)易满导致丢连接
-        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=0)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
-        self._session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            }
-        )
+        self._adapter_pool_maxsize = 50
+        self._session = None
+        self._default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
         self._cache: dict[str, str] = {}
+
+    def _get_session(self):
+        if self._session is None:
+            self._session = requests.Session()
+            # 连接池加大: resolve_many 会并行对多个 URL 发 HEAD, 默认池(10)易满导致丢连接
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=50, pool_maxsize=self._adapter_pool_maxsize, max_retries=0
+            )
+            self._session.mount("https://", adapter)
+            self._session.mount("http://", adapter)
+            self._session.headers.update(self._default_headers)
+        return self._session
 
     @staticmethod
     def _looks_direct(url: str) -> bool:
@@ -89,7 +96,7 @@ class URLUnshortener:
 
         # Network path: follow redirects
         try:
-            resp = self._session.head(
+            resp = self._get_session().head(
                 url,
                 timeout=self.timeout,
                 allow_redirects=False,
@@ -106,7 +113,7 @@ class URLUnshortener:
 
         # Fallback: GET the page and look for meta refresh / JS location
         try:
-            resp = self._session.get(url, timeout=self.timeout, allow_redirects=False)
+            resp = self._get_session().get(url, timeout=self.timeout, allow_redirects=False)
             body = resp.text[:12000]
             real = self._extract_meta_refresh(body) or self._extract_js_redirect(body)
             if real:
