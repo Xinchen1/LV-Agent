@@ -197,6 +197,31 @@ TASK_TOOL_HINTS = [
     (("偏好", "设置", "个人资料", "profile", "时区", "语言", "货币", "起床", "睡觉",
       "focus_minutes", "briefing", "favorite"), {"personal_profile"}),
     (("出门", "睡前", "专注", "约会", "一键", "今日", "quick", "quick_action"), {"quick_action"}),
+
+    # Journal / habits / goals
+    (("日记", "心情", "情绪", "感恩", "journal", "diary", "mood"), {"journal"}),
+    (("习惯", "打卡", "连续", "habit", "streak"), {"habits"}),
+    (("目标", "里程碑", "进度", "goal", "milestone"), {"goals"}),
+    (("闪卡", "背单词", "复习", "记忆卡", "flashcard", "spaced"), {"flashcards"}),
+
+    # Collections and planning
+    (("书签", "稍后读", "收藏", "书签", "bookmark", "read later"), {"bookmarks"}),
+    (("购物", "买菜", "清单", "超市", "shopping", "grocery"), {"shopping"}),
+    (("订阅", "续费", "会员", "月费", "subscription", "billing"), {"subscriptions"}),
+    (("菜谱", "做饭", "食谱", "餐计划", "recipe", "meal plan"), {"meals"}),
+
+    # Local utilities
+    (("转码", "编码", "哈希", "base64", "sha256", "md5", "slug", "正则", "regex",
+      "json格式化", "文本处理"), {"text_transform"}),
+    (("压缩", "解压", "打包", "zip", "tar", "gz", "archive"), {"archive"}),
+    (("通知", "剪贴板", "截图", "音量", "打开应用", "desktop", "clipboard", "screenshot",
+      "notify", "volume"), {"desktop"}),
+    (("时间", "时区", "时差", "倒计时", "工作日", "clock", "timezone", "countdown"), {"clock"}),
+    (("磁盘", "内存", "cpu", "电量", "电池", "进程", "系统信息", "disk", "memory",
+      "battery", "system info"), {"system_info"}),
+    (("单位换算", "换算", "厘米", "英寸", "公斤", "磅", "摄氏", "华氏", "convert unit",
+      "unit", "celsius", "fahrenheit"), {"unit_convert"}),
+    (("密码", "口令", "强密码", "随机", "uuid", "token", "password", "passphrase"), {"password_gen"}),
 ]
 
 
