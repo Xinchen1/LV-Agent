@@ -175,6 +175,12 @@ class MemoryConfig(BaseModel):
     sqlite_session_path: str = "./data/sessions.db"
     importance_threshold: float = 0.45  # 记忆整合: 低于此重要性的交互不进长期记忆
     max_facts_per_turn: int = 5         # 每轮最多提取写入长期记忆的关键事实数
+    # 向量语义召回: 任一 OpenAI-compatible /v1/embeddings 端点(Ollama 即可),
+    # 失败自动熔断退回词面匹配, 不阻塞主流程。
+    embedding_enabled: bool = True
+    embedding_base_url: str = "http://localhost:11434/v1"
+    embedding_model: str = "nomic-embed-text"   # ollama pull nomic-embed-text
+    embedding_timeout_s: float = 4.0
 
 
 class SelfCorrectionConfig(BaseModel):

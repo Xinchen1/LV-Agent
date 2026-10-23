@@ -21,6 +21,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from .embeddings import cosine_similarity, vector_score
 from .terminal import style as _style
 
 _log = logging.getLogger("MemorySystem")
@@ -151,7 +152,8 @@ class KnowledgeGraph:
 
     def __init__(
         self,
-        storage_path: str = "./data/kg_store"
+        storage_path: str = "./data/kg_store",
+        embedding_client: Optional[Any] = None,
     ):
         self.storage_path = storage_path
         self.nodes: Dict[str, MemoryNode] = {}
@@ -160,9 +162,25 @@ class KnowledgeGraph:
         self.edge_index: Dict[Tuple[str, str], Set[str]] = defaultdict(set)  # (relation, source) -> edge IDs
         self._mode: str = "memory"
         self._lock = threading.RLock()
+        self.embedding_client = embedding_client
+
+    def _node_text(self, node: MemoryNode) -> str:
+        name = node.properties.get("name", "") if node.properties else ""
+        return f"{node.label} {name}".strip()
+
+    def _embed(self, text: str) -> Optional[List[float]]:
+        if self.embedding_client is None or not text:
+            return None
+        try:
+            return self.embedding_client.embed(text)
+        except Exception as e:
+            _log.debug("KG embedding failed: %s", e)
+            return None
 
     def add_node(self, node: MemoryNode) -> str:
         """Add a node to the graph"""
+        if node.embedding is None:
+            node.embedding = self._embed(self._node_text(node))
         with self._lock:
             self.nodes[node.id] = node
 
@@ -193,10 +211,18 @@ class KnowledgeGraph:
         query: Optional[str] = None,
         label: Optional[str] = None,
         k: int = 10,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.5,
+        vector_threshold: float = 0.5
     ) -> List[Tuple[MemoryNode, float]]:
-        """Find nodes by keyword/label matching."""
+        """Find nodes by keyword/label matching, boosted by embedding cosine."""
         query_lower = query.lower() if query else ""
+        qvec: Optional[List[float]] = None
+        if query and self.embedding_client is not None:
+            with self._lock:
+                any_embedding = any(n.embedding for n in self.nodes.values())
+            if any_embedding:
+                qvec = self._embed(query)
+
         candidates = []
         with self._lock:
             for node in self.nodes.values():
@@ -206,6 +232,10 @@ class KnowledgeGraph:
                     text = f"{node.label} {json.dumps(node.properties)}".lower()
                     if query_lower in text:
                         candidates.append((node, 0.8))
+                    elif qvec is not None and node.embedding:
+                        score = vector_score(cosine_similarity(qvec, node.embedding))
+                        if score >= vector_threshold:
+                            candidates.append((node, score))
                 else:
                     candidates.append((node, 1.0))
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -306,13 +336,15 @@ class EpisodicMemory:
     def __init__(
         self,
         storage_path: str = "./data/episodic_store",
-        max_episodes: int = 10000
+        max_episodes: int = 10000,
+        embedding_client: Optional[Any] = None,
     ):
         self.storage_path = storage_path
         self.max_episodes = max_episodes
         self.episodes: Dict[str, MemoryRecord] = {}
         self._mode: str = "memory"
         self._lock = threading.RLock()
+        self.embedding_client = embedding_client
         # content fingerprint -> episode id (dedup index)
         self._content_index: Dict[str, str] = {}
 
@@ -332,7 +364,13 @@ class EpisodicMemory:
         Deduplicated: identical (or near-identical) content does not create a
         duplicate episode; instead the existing episode's importance is raised
         to the new value and its duplicate counter is incremented.
+
+        Network calls (embedding) stay OUTSIDE the lock so concurrent readers
+        never stall behind an embedding request; the client's internal cache
+        makes duplicate-content re-embeds free.
         """
+        emb = self._embed_text(content)
+
         with self._lock:
             existing_id = self._find_duplicate(content, task_type)
             if existing_id:
@@ -349,7 +387,8 @@ class EpisodicMemory:
                 task_type=task_type,
                 nodes=linked_nodes or [],
                 importance=importance,
-                metadata=metadata or {}
+                metadata=metadata or {},
+                embedding=emb,
             )
 
             self.episodes[record.id] = record
@@ -360,7 +399,40 @@ class EpisodicMemory:
                 self._prune_old()
 
             self.save()
-            return record.id
+            new_id = record.id
+
+        # 顺手补齐旧记忆的向量(每次最多2条, 摊薄成本; 锁外网络调用)
+        self._backfill_embeddings()
+        return new_id
+
+    def _embed_text(self, text: str) -> Optional[List[float]]:
+        """Best-effort embedding; None → recall falls back to lexical only."""
+        if self.embedding_client is None or not text:
+            return None
+        try:
+            return self.embedding_client.embed(text)
+        except Exception as e:  # pragma: no cover - client already contains failures
+            _log.debug("embedding store failed: %s", e)
+            return None
+
+    def _backfill_embeddings(self, limit: int = 2) -> None:
+        """Embed a few legacy episodes per store call (amortized so existing
+        stores gain vector recall without a one-shot migration). No lock held
+        during network calls so parallel readers never stall."""
+        if self.embedding_client is None:
+            return
+        with self._lock:
+            candidates = [
+                ep for ep in self.episodes.values()
+                if not ep.embedding and ep.content
+            ][:limit]
+        for ep in candidates:
+            vec = self._embed_text(ep.content)
+            if not vec:
+                return  # service down → stop backfilling this round
+            with self._lock:
+                ep.embedding = vec
+                self.save()
 
     def _find_duplicate(self, content: str, task_type: str, max_scan: int = 500) -> Optional[str]:
         """Exact fingerprint match first, then near-duplicate heuristic scan."""
@@ -397,9 +469,25 @@ class EpisodicMemory:
         k: int = 10,
         min_similarity: float = 0.6
     ) -> List[Tuple[MemoryRecord, float]]:
-        """Retrieve similar episodes (token-overlap scoring)."""
+        """Retrieve similar episodes.
+
+        Score = max(lexical token-coverage, embedding cosine). Embedding is
+        skipped entirely when no stored episode carries a vector or the
+        embedding service is unavailable → identical behavior to before.
+        """
         query_lower = (query or '').lower()
         query_tokens = _text_tokens(query)
+
+        qvec: Optional[List[float]] = None
+        if self.embedding_client is not None:
+            with self._lock:
+                any_embedding = any(ep.embedding for ep in self.episodes.values())
+            if any_embedding and query:
+                qvec = self._embed_text(query)
+                if qvec is None:
+                    # 服务不可用(熔断/超时) → 本次纯词面退回
+                    _log.debug("query embedding unavailable, lexical-only recall")
+
         with self._lock:
             results = []
             for ep in self.episodes.values():
@@ -409,6 +497,9 @@ class EpisodicMemory:
                     _coverage_similarity(query_tokens, ep.summary),
                     _coverage_similarity(query_tokens, ep.content),
                 )
+                if qvec is not None and ep.embedding:
+                    cos = cosine_similarity(qvec, ep.embedding)
+                    score = max(score, vector_score(cos))
                 if query_lower and (query_lower in ep.summary.lower() or query_lower in ep.content.lower()):
                     score = max(score, 0.8)
                 if score >= min_similarity:
@@ -576,9 +667,13 @@ class MemoryManager:
         user_memory_path: str = "./data/user.md",
         sqlite_session_path: str = "./data/sessions.db",
         project_root: Optional[str] = None,
+        embedding_client: Optional[Any] = None,
     ):
-        self.kg = KnowledgeGraph(storage_path=kg_storage)
-        self.episodic = EpisodicMemory(storage_path=episodic_storage)
+        self.kg = KnowledgeGraph(storage_path=kg_storage, embedding_client=embedding_client)
+        self.episodic = EpisodicMemory(
+            storage_path=episodic_storage,
+            embedding_client=embedding_client,
+        )
         self.compressor = ContextCompressor()
         self.logger = logging.getLogger("MemoryManager")
 
@@ -923,6 +1018,7 @@ def create_memory_manager(
     user_memory_path: str = "./data/user.md",
     sqlite_session_path: str = "./data/sessions.db",
     project_root: Optional[str] = None,
+    embedding_client: Optional[Any] = None,
 ) -> MemoryManager:
     """Create memory manager with custom settings"""
     return MemoryManager(
@@ -932,6 +1028,7 @@ def create_memory_manager(
         user_memory_path=user_memory_path,
         sqlite_session_path=sqlite_session_path,
         project_root=project_root,
+        embedding_client=embedding_client,
     )
 
 

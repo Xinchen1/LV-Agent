@@ -368,6 +368,24 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
             # Raw memory manager always has file + session memory layers.
             try:
                 from .memory import MemoryManager
+
+                # 语义向量召回: Ollama /v1/embeddings(失败自动熔断退回词面匹配)
+                embedding_client = None
+                if self.config.memory.embedding_enabled:
+                    try:
+                        from .embeddings import EmbeddingClient
+                        embedding_client = EmbeddingClient(
+                            base_url=self.config.memory.embedding_base_url,
+                            model=self.config.memory.embedding_model,
+                            timeout=self.config.memory.embedding_timeout_s,
+                        )
+                        # 后台探活: 服务不可用尽早熔断, 不拖慢首个召回
+                        threading.Thread(
+                            target=embedding_client.warmup, daemon=True
+                        ).start()
+                    except Exception:
+                        embedding_client = None
+
                 raw_mm = MemoryManager(
                     kg_storage=self.config.memory.kg_storage_path,
                     episodic_storage=self.config.memory.episodic_storage_path,
@@ -375,6 +393,7 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
                     user_memory_path=self.config.memory.user_memory_path,
                     sqlite_session_path=self.config.memory.sqlite_session_path,
                     project_root=str(Path(__file__).resolve().parent.parent),
+                    embedding_client=embedding_client,
                 )
                 self._raw_memory_manager = raw_mm
                 self.memory_manager = raw_mm

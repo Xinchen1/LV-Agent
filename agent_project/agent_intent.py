@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .pure_utils import edit_distance
@@ -261,6 +262,41 @@ class AgentIntentMixin:
             name = name.strip(' 的，。！？!?、')
             if name and len(name) <= 40:
                 return ("file_ops", {"action": "list", "path": name}, 0.85, "detected folder-analysis intent")
+
+        # -0.9) Personal Assistant intent 零LLM直达: 笔记/任务/提醒/记账/日历/简报。
+        #     放在搜索/代码规则之前, 避免"记下买牛奶""花了38元"被误判为 web_search/calculator。
+        _personal_money = re.search(r'(花了|花|付了|支出|消费)\s*(\d+(?:\.\d+)?)', tl)
+        if _personal_money:
+            amount = float(_personal_money.group(2))
+            rest = t[_personal_money.end():].strip(' 元块￥$，,。.!！ ')
+            return ("finance", {"action": "create", "type": "expense", "amount": amount,
+                                "category": "其他", "description": rest or "消费"}, 0.93,
+                    "personal: quick expense")
+
+        if re.search(r'(记下|记笔记|写笔记|备忘|记录一下)', tl) and not any(k in tl for k in ("搜索", "查一下", "查下")):
+            m = re.search(r'(?:记下|记笔记|写笔记|备忘|记录一下)\s*(.+)', t)
+            content = (m.group(1).strip() if m else t).strip(' 记下记笔记写笔记备忘记录一下：：，。')
+            if content:
+                return ("notes", {"action": "create", "title": content[:40], "content": content,
+                                  "category": "Quick"}, 0.92, "personal: quick note")
+
+        if any(k in tl for k in ("加任务", "新建任务", "建任务", "待办", "todo", "新增任务", "创建任务")):
+            return ("tasks", {"action": "create", "title": t, "status": "pending", "priority": 3}, 0.9,
+                    "personal: quick task")
+
+        if any(k in tl for k in ("提醒我", "闹钟", "定时提醒", "remind", "设个提醒", "提醒")):
+            return ("reminders", {"action": "create", "title": t}, 0.9, "personal: quick reminder")
+
+        if re.search(r'(今天|明天|明日|本周|日程|会议|安排)', tl) and any(k in tl for k in ("看", "查", "有什么", "有哪些", "list", "列出", "安排")):
+            target = date.today().isoformat()
+            if "明天" in tl or "明日" in tl:
+                target = (date.today() + timedelta(days=1)).isoformat()
+            return ("calendar", {"action": "list", "date_from": target, "date_to": target, "limit": 20}, 0.88,
+                    "personal: calendar list")
+
+        if any(k in tl for k in ("简报", "briefing", "早安", "今日概要", "概览", "早上好")):
+            return ("daily_briefing", {"action": "morning", "target_date": date.today().isoformat(),
+                                       "format": "markdown"}, 0.9, "personal: daily briefing")
 
         # 0) 先判断代码执行/命令意图, 避免 "print(1+1)" 这类被算术规则误判为 calculator
         # 守卫: 显式搜索动词优先(如"搜索一下Python 3.14发布时间"里的 python 只是关键词, 真实意图是搜索)

@@ -192,6 +192,11 @@ TASK_TOOL_HINTS = [
     (("记账", "账本", "花费", "收入", "预算", "finance", "expense", "钱"), {"finance"}),
     (("旅行", "出差", "行程", "打包", "订票", "travel", "trip"), {"travel"}),
     (("健康", "运动", "锻炼", "饮食", "睡眠", "体重", "health", "fitness"), {"health"}),
+
+    # Personal profile / quick-action tools
+    (("偏好", "设置", "个人资料", "profile", "时区", "语言", "货币", "起床", "睡觉",
+      "focus_minutes", "briefing", "favorite"), {"personal_profile"}),
+    (("出门", "睡前", "专注", "约会", "一键", "今日", "quick", "quick_action"), {"quick_action"}),
 ]
 
 
