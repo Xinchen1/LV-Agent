@@ -705,7 +705,8 @@ class MemoryManager:
         entities: List[str] = None
     ):
         """Store an agent interaction as episodic memory"""
-        content = json.dumps(trajectory, indent=2)
+        # ensure_ascii=False: 转义的 \uXXXX 序列会显著污染嵌入与检索评分
+        content = json.dumps(trajectory, indent=2, ensure_ascii=False)
         summary = f"Task: {task[:100]}... Outcome: {outcome[:100]} Success: {success}"
 
         self.episodic.store(
