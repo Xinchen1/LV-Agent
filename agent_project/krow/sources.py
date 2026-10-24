@@ -63,6 +63,7 @@ from .items import (
     mail_key,
     owner_key,
 )
+from .tools import is_unknown_tool_error as _is_unknown_tool
 
 logger = logging.getLogger("krow.sources")
 
@@ -684,6 +685,9 @@ class McpHallSource:
         self._cursor_set = cursor_set or (lambda _n, _v: None)
         self.last_error: str = ""
         self.calls = 0
+        # 服务器没有 ``hall_channels``（agent-hub 只给 krow_inbox / krow_hall_read / krow_hall_post …）时，
+        # 频道扫描这条 v1 路径永久关掉，点名改由收件箱系统信 + 守候循环承担；只提示一次，不每拍刷警告。
+        self.hall_disabled_reason: str = ""
 
     def _tool(self, name: str, args: Dict[str, Any]) -> str:
         self.calls += 1
@@ -691,12 +695,16 @@ class McpHallSource:
 
     def fetch(self, *, hall: bool = True, leader: bool = True, owner: bool = True) -> List[InjectItem]:
         out: List[InjectItem] = []
-        if hall:
+        if hall and not self.hall_disabled_reason:
             try:
                 out.extend(self._fetch_hall())
             except Exception as e:  # noqa: BLE001 — 轮询失败只少听一拍
-                self.last_error = f"hall: {type(e).__name__}: {e}"[:200]
-                logger.warning("krow mcp hall poll failed: %s", self.last_error)
+                if _is_unknown_tool(e):
+                    self.hall_disabled_reason = f"{type(e).__name__}: {e}"[:200]
+                    logger.info("krow mcp: 服务器没有 hall_channels 工具，停用频道扫描，点名由收件箱系统信承担 (%s)", self.hall_disabled_reason)
+                else:
+                    self.last_error = f"hall: {type(e).__name__}: {e}"[:200]
+                    logger.warning("krow mcp hall poll failed: %s", self.last_error)
         if self.inbox and owner:
             try:
                 out.extend(self._fetch_inbox())

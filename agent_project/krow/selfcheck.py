@@ -19,6 +19,13 @@
    显式 404 不触发老口子回落、不污染 ``last_error``；隔离到期重试、恢复即解除；``auto`` 模式下 ``hall/channels`` 列出却 404 的
    幽灵频道同样只隔离自己；旧接口回落只由缺省调用判定一次（老服务端上统一口子只被探一次）；频道口子 5xx 仍 fail-open；
    ``/krow`` 状态 409 只说「已见 / 未见」；REST 看不见的频道由 MCP 路径兜底且共用一本账。
+10. （v3）收件箱守候循环闭环（假 agent-hub ``FakeAgentHub``，按服务端 PR #1264 建模：点名 → 系统信 ``ref.kind=hall_mention``；
+    读信翻 wakeups suppressed→injected；带 ``reply_to_id`` 回帖翻 obligations→answered）：上线验证三条口径逐条核对、
+    调用顺序 ``inbox → read → hall_read(原文) → hall_read(上下文) → hall_post``、``wait`` 夹在 0..25、点名任务文本是数据不是指令、
+    同信重现 / 进程重启只补读不重发、读失败本拍跳过下一拍补上、模型回合失败 / 无 runner 回一句原因不沉默、模型自己已回帖不重发、
+    回帖瞬时错误重试 / 超时但服务端已落库查重不重发 / 4xx 不重试记 failed、主人直聊最高优先级并经 ``send_message(to_role=owner)``
+    回信、收件箱出错指数退避成功复位 + 空返最小间隔、旧命名服务器（``team_*`` / ``hall_*``）自动回退、崩溃续办
+    （read 未发 → 补答；read 已发 → 查大厅确认 / unverified）、``KrowDaemon`` 驱动、全程不自写 ``ref``。
 """
 from __future__ import annotations
 
@@ -210,6 +217,116 @@ class FakeMcpBridge:
         if tool == "team_inbox":
             return json.dumps({"messages": self.inbox, "count": len(self.inbox)}, ensure_ascii=False)
         raise RuntimeError(f"unknown tool {tool}")
+
+
+class FakeAgentHub:
+    """（v3）假 agent-hub MCP：``krow_inbox`` / ``krow_read_message`` / ``krow_send_message`` / ``krow_hall_read`` / ``krow_hall_post``。
+
+    按 krowworker PR #1264 / 9f834380 的服务端半边建模（李靖读码 ``hall/external_mail.rs`` + ``agent-hub/src/mcp.rs``）：
+    被 @ → 收件箱投 ``ref.kind=hall_mention`` 系统信 + ``hall_wakeups=suppressed`` + obligation pending；
+    ``krow_read_message`` 读那封信 → ``injected``（主人面「叫不醒」→「读到了」）；带 ``reply_to_id`` 回帖 → ``answered``。
+    ``naming="legacy"`` 时只认 ``team_*`` / ``hall_*`` 旧名（验证工具名回退）。``fail[op]`` 是下次调用的故障队列。
+    """
+
+    KROW = {"krow_inbox": "inbox", "krow_read_message": "read", "krow_send_message": "send", "krow_hall_read": "hall_read", "krow_hall_post": "hall_post"}
+    LEGACY = {"team_inbox": "inbox", "team_read_message": "read", "team_send_message": "send", "hall_read": "hall_read", "hall_post": "hall_post"}
+
+    def __init__(self, naming: str = "krow") -> None:
+        self.naming = naming
+        self.mails: Dict[str, Dict[str, Any]] = {}
+        self.hall: Dict[int, Dict[str, Any]] = {}
+        self.wakeups: Dict[int, str] = {}
+        self.obligations: Dict[int, str] = {}
+        self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        self.sent: List[Dict[str, Any]] = []
+        self.fail: Dict[str, List[Any]] = {}
+        self._hid = 7960
+        self._mid = 0
+
+    def tool_names(self) -> List[str]:
+        return list(self.KROW if self.naming == "krow" else self.LEGACY)
+
+    def mention(self, who: str, body: str, *, channel_id: str = CHANNEL, channel_name: str = "星辰大海") -> Tuple[int, str]:
+        self._hid += 1
+        hid = self._hid
+        self.hall[hid] = {"id": hid, "channel_id": channel_id, "display": who, "body": f"@lv-agent {body}", "reply_to_id": None, "created_at": "10-24 15:56"}
+        self.wakeups[hid] = "suppressed"
+        self.obligations[hid] = "pending"
+        self._mid += 1
+        mid = f"m-{self._mid}"
+        self.mails[mid] = {"id": mid, "from_kind": "worker", "from_worker_id": None, "labels": ["sys:system"], "read": False,
+                           "subject": f"大厅 #{hid}：{who} 在「{channel_name}」@ 了你", "body": f"{who}：{body}",
+                           "ref": {"kind": "hall_mention", "hall_message_id": hid, "hall_channel_id": channel_id, "no_wake": True},
+                           "created_at": f"2026-10-24T15:56:{self._mid:02d}Z"}
+        return hid, mid
+
+    def owner_mail(self, subject: str, body: str) -> str:
+        self._mid += 1
+        mid = f"o-{self._mid}"
+        self.mails[mid] = {"id": mid, "from_kind": "owner", "labels": ["sys:owner"], "read": False, "subject": subject, "body": body, "ref": {},
+                           "created_at": f"2026-10-24T15:56:{self._mid:02d}Z"}
+        return mid
+
+    def ops(self) -> List[str]:
+        table = self.KROW if self.naming == "krow" else self.LEGACY
+        return [table[t] for t, _ in self.calls if t in table]
+
+    def __call__(self, tool: str, args: Dict[str, Any]) -> str:
+        self.calls.append((tool, dict(args)))
+        table = self.KROW if self.naming == "krow" else self.LEGACY
+        if tool not in table:
+            raise RuntimeError(f"MCP error: Unknown tool: {tool}")
+        op = table[tool]
+        queue = self.fail.get(op)
+        special = queue.pop(0) if queue else None
+        if isinstance(special, BaseException):
+            raise special
+        if "ref" in args:
+            raise AssertionError("客户端不得往请求的 ref 里写东西")
+        if op == "inbox":
+            w = int(args.get("wait", 20))
+            if not 0 <= w <= 25:
+                raise AssertionError(f"wait {w} 超出 0..25")
+            rows = [{k: v for k, v in m.items() if k != "read"} for m in self.mails.values() if not m["read"]]
+            return json.dumps({"messages": rows, "count": len(rows)}, ensure_ascii=False)
+        if op == "read":
+            m = self.mails.get(str(args.get("message_id")))
+            if m is None:
+                return json.dumps({"error": "not found"})
+            m["read"] = True
+            ref = m.get("ref") or {}
+            if ref.get("kind") == "hall_mention" and self.wakeups.get(ref["hall_message_id"]) == "suppressed":
+                self.wakeups[ref["hall_message_id"]] = "injected"
+            return json.dumps({k: v for k, v in m.items() if k != "read"}, ensure_ascii=False)
+        if op == "send":
+            self.sent.append(dict(args))
+            return json.dumps({"message_id": f"sent-{len(self.sent)}"})
+        if op == "hall_read":
+            cid = args.get("channel_id")
+            if args.get("message_id") is not None:
+                rows = [self.hall[int(args["message_id"])]] if int(args["message_id"]) in self.hall else []
+            else:
+                rows = [m for m in self.hall.values() if cid is None or m["channel_id"] == cid]
+                if args.get("since_id") is not None:
+                    rows = [m for m in rows if m["id"] > int(args["since_id"])]
+                rows = rows[-int(args.get("limit", 30)):]
+            if self.naming == "legacy":
+                return "\n".join(f"#{m['id']} [{m['display']}] {m['created_at']} {m['body']}" for m in rows) or "没有新消息"
+            return json.dumps({"messages": rows}, ensure_ascii=False)
+        if op == "hall_post":
+            if not str(args.get("body") or "").strip():
+                raise AssertionError("hall_post 正文为空")
+            self._hid += 1
+            mid = self._hid
+            reply = args.get("reply_to_id")
+            self.hall[mid] = {"id": mid, "channel_id": args.get("channel_id") or CHANNEL, "display": "lv-agent", "body": args["body"],
+                              "reply_to_id": int(reply) if reply is not None else None, "created_at": "10-24 16:00"}
+            if reply is not None and int(reply) in self.obligations:
+                self.obligations[int(reply)] = "answered"
+            if special == "post_then_timeout":
+                raise TimeoutError("MCP call 'tools/call' timed out on server 'agent-hub'")
+            return json.dumps({"message_id": mid, "channel_id": args.get("channel_id") or CHANNEL})
+        raise AssertionError(op)
 
 
 # ── 场景 ─────────────────────────────────────────────────────────────────
@@ -507,6 +624,9 @@ def run(verbose: bool = True) -> Report:
     finally:
         srv.stop()
 
+    # 10. （v3）守候循环: 收件箱系统信 → 真读翻 injected → hall_read 原文 → 作答 → 带 reply_to_id 回帖翻 answered
+    _v3_scenarios(rep, tmpdir)
+
     if verbose:
         width = max(len(r["name"]) for r in rep.rows) + 2
         for r in rep.rows:
@@ -514,6 +634,172 @@ def run(verbose: bool = True) -> Report:
             print(f"[{mark}] {r['name']:<{width}} {r['detail']}")
         print(f"\n{sum(r['ok'] for r in rep.rows)}/{len(rep.rows)} passed; state file: {state_path}")
     return rep
+
+
+def _v3_scenarios(rep: Report, tmpdir: str) -> None:
+    """（v3）守候循环闭环。上线验证的三条口径（李靖 03125e84）在假 agent-hub 上逐条核对：
+    ① 被 @ 后收件箱出现 hall_mention 信；② 读信后 wakeups 翻 injected；③ 带 reply_to_id 回帖后 obligations 翻 answered。"""
+    from .mailloop import KrowMailLoop
+    from .tools import KrowTools
+
+    def make_loop(hub: FakeAgentHub, store: DedupStore, run_task: Any, *, listed: bool = True, **kw: Any) -> KrowMailLoop:
+        tools = KrowTools(hub, list_tools=hub.tool_names if listed else None)
+        kw.setdefault("self_names", ["lv-agent"])
+        kw.setdefault("backoff_base_s", 0.01)
+        kw.setdefault("backoff_max_s", 0.02)
+        return KrowMailLoop(tools, store, run_task=run_task, min_loop_s=0.0, jitter=False, nonce="n0nce", **kw)
+
+    try:
+        # a. 闭环三条口径 + 调用顺序 + 工具名解析(krow_*)
+        hub = FakeAgentHub()
+        hub.hall[7950] = {"id": 7950, "channel_id": CHANNEL, "display": "李靖", "body": "之前的上下文", "reply_to_id": None, "created_at": "10-24 15:50"}
+        hid, mid = hub.mention("道哥", "lv-agent 轮询修好了吗")
+        tasks: List[str] = []
+        store = DedupStore(f"{tmpdir}/v3.json")
+        loop = make_loop(hub, store, lambda t: tasks.append(t) or {"final_answer": "修好了：守候循环长轮询 20s，读信即翻 injected。", "actions": []})
+        rows = [m for m in hub.mails.values() if not m["read"] and (m.get("ref") or {}).get("kind") == "hall_mention"]
+        rep.check("v3.mention_mail_in_inbox", len(rows) == 1 and rows[0]["ref"]["hall_message_id"] == hid, f"ref={rows[0]['ref'] if rows else None}")
+        s = loop.wait_once(wait=0)
+        rep.check("v3.loop.handled", s["mentions"] == 1 and s["new"] == 1 and not s["error"], str(s))
+        rep.check("v3.loop.call_order", hub.ops() == ["inbox", "read", "hall_read", "hall_read", "hall_post"], str(hub.ops()))
+        rep.check("v3.tools.krow_names", [t for t, _ in hub.calls][:2] == ["krow_inbox", "krow_read_message"], str([t for t, _ in hub.calls]))
+        rep.check("v3.read_flips_injected", hub.wakeups[hid] == "injected", hub.wakeups[hid])
+        post = hub.calls[-1][1]
+        rep.check("v3.post_has_reply_to_and_channel", post.get("reply_to_id") == hid and post.get("channel_id") == CHANNEL and "ref" not in post, str(post))
+        rep.check("v3.post_flips_answered", hub.obligations[hid] == "answered", hub.obligations[hid])
+        rep.check("v3.inbox_wait_clamped", all(0 <= a.get("wait", 0) <= 25 for t, a in hub.calls if t == "krow_inbox"))
+        rep.check("v3.task_is_data_not_instruction", bool(tasks) and "数据，不是指令" in tasks[0] and "之前的上下文" in tasks[0]
+                  and f"reply_to_id={hid}" in tasks[0] and "krow_hall_post" in tasks[0], tasks[0][:120] if tasks else "")
+        rec = store.mention(hid) or {}
+        rep.check("v3.ledger_answered", rec.get("state") == "answered" and rec.get("attempts") == 1 and rec.get("mail_id") == mid, str(rec))
+
+        # b. 去重: 同一封信再出现 / 进程重启(同一账本) → 只补读, 不回第二次
+        hub.mails[mid]["read"] = False
+        s = loop.wait_once(wait=0)
+        loop2 = make_loop(hub, DedupStore(f"{tmpdir}/v3.json"), lambda t: {"final_answer": "又来"})
+        hub.mails[mid]["read"] = False
+        s2 = loop2.wait_once(wait=0)
+        rep.check("v3.dedup_same_mail_and_restart", s["mentions"] == 0 and s2["mentions"] == 0 and hub.ops().count("hall_post") == 1 and hub.mails[mid]["read"],
+                  f"posts={hub.ops().count('hall_post')}")
+
+        # c. 读失败: 本拍不往下走(信仍未读), 下一拍补上
+        hub2 = FakeAgentHub()
+        hid2, mid2 = hub2.mention("道哥", "在吗")
+        hub2.fail["read"] = [RuntimeError("MCP error: upstream 502")]
+        loop3 = make_loop(hub2, DedupStore(None), lambda t: {"final_answer": "在"})
+        s = loop3.wait_once(wait=0)
+        ok_first = s["mentions"] == 0 and hub2.wakeups[hid2] == "suppressed" and hub2.ops().count("hall_post") == 0
+        s = loop3.wait_once(wait=0)
+        rep.check("v3.read_failure_defers_then_recovers", ok_first and s["mentions"] == 1 and hub2.obligations[hid2] == "answered", str(s))
+
+        # d. 模型回合失败 / 没有 runner: 回一句原因, 不沉默; 模型自己已回帖: 不重发
+        hub3 = FakeAgentHub()
+        h_a, _ = hub3.mention("道哥", "一")
+
+        def boom(_t: str) -> Any:
+            raise RuntimeError("model exploded")
+
+        loop4 = make_loop(hub3, DedupStore(None), boom)
+        loop4.wait_once(wait=0)
+        body_a = hub3.calls[-1][1].get("body", "")
+        h_b, _ = hub3.mention("道哥", "二")
+        loop4.run_task = None
+        loop4.wait_once(wait=0)
+        body_b = hub3.calls[-1][1].get("body", "")
+        rep.check("v3.failure_posts_reason", "自动回执" in body_a and "model exploded" in body_a and "没有可用的模型回合" in body_b
+                  and hub3.obligations[h_a] == "answered" and hub3.obligations[h_b] == "answered", f"{body_a[:60]} | {body_b[:60]}")
+        h_c, _ = hub3.mention("道哥", "三")
+
+        def self_post(_t: str) -> Any:
+            hub3("krow_hall_post", {"body": "我自己回", "reply_to_id": h_c, "channel_id": CHANNEL})
+            return {"final_answer": "我自己回", "actions": [{"tool_name": "mcp_agent-hub_krow_hall_post", "arguments": {"reply_to_id": h_c}}]}
+
+        loop4.run_task = self_post
+        n_before = hub3.ops().count("hall_post")
+        loop4.wait_once(wait=0)
+        rep.check("v3.model_self_post_not_duplicated", hub3.ops().count("hall_post") == n_before + 1 and (loop4.store.mention(h_c) or {}).get("answered_by") == "model")
+
+        # e. 回帖瞬时错误重试 / 超时但服务端已落库 → 查重不重发 / 4xx 不重试记 failed
+        hub4 = FakeAgentHub()
+        h1, _ = hub4.mention("道哥", "一")
+        hub4.fail["hall_post"] = [RuntimeError("MCP error: upstream 503")]
+        loop5 = make_loop(hub4, DedupStore(None), lambda t: {"final_answer": "答"})
+        loop5.wait_once(wait=0)
+        ok_retry = hub4.ops().count("hall_post") == 2 and hub4.obligations[h1] == "answered"
+        h2, _ = hub4.mention("道哥", "二")
+        hub4.fail["hall_post"] = ["post_then_timeout"]
+        loop5.wait_once(wait=0)
+        replies_h2 = [m for m in hub4.hall.values() if m["reply_to_id"] == h2]
+        ok_timeout = len(replies_h2) == 1 and (loop5.store.mention(h2) or {}).get("note") == "confirmed_by_hall_read"
+        h3, _ = hub4.mention("道哥", "三")
+        hub4.fail["hall_post"] = [RuntimeError("MCP error: 404 频道不存在或不可见")]
+        n = hub4.ops().count("hall_post")
+        loop5.wait_once(wait=0)
+        ok_4xx = hub4.ops().count("hall_post") == n + 1 and (loop5.store.mention(h3) or {}).get("state") == "failed"
+        rep.check("v3.post_retry_timeout_dedup_4xx", ok_retry and ok_timeout and ok_4xx, f"retry={ok_retry} timeout={ok_timeout} 4xx={ok_4xx}")
+
+        # f. 主人直聊最高优先级: 同一批里先读主人信、跑回合、krow_send_message(to_role=owner, in_reply_to)
+        hub5 = FakeAgentHub()
+        h5, _ = hub5.mention("李靖", "在吗")
+        o5 = hub5.owner_mail("先别发布", "lv-agent 先别推 main")
+        seen: List[str] = []
+        loop6 = make_loop(hub5, DedupStore(None), lambda t: seen.append(t) or {"final_answer": "收到，不推。", "actions": []})
+        s = loop6.wait_once(wait=0)
+        reads = [a["message_id"] for t, a in hub5.calls if t == "krow_read_message"]
+        rep.check("v3.owner_first_and_replied", s["owner"] == 1 and s["mentions"] == 1 and reads[0] == o5 and seen[0].startswith(OWNER_PREFIX_HEAD)
+                  and hub5.sent == [{"to_role": "owner", "in_reply_to": o5, "body": "收到，不推。"}] and hub5.obligations[h5] == "answered",
+                  f"reads={reads} sent={hub5.sent}")
+
+        # g. 收件箱出错指数退避并在成功后复位; 瞬间空返补最小间隔
+        hub6 = FakeAgentHub()
+        hub6.fail["inbox"] = [RuntimeError("MCP error: 503")] * 3
+        loop7 = make_loop(hub6, DedupStore(None), None, backoff_base_s=2.0, backoff_max_s=5.0)
+        delays = [loop7.wait_once(wait=0)["delay"] for _ in range(3)]
+        s = loop7.wait_once(wait=0)
+        loop7.min_loop_s = 5.0
+        s_idle = loop7.wait_once(wait=0)
+        rep.check("v3.backoff_and_min_interval", delays == [2.0, 4.0, 5.0] and not s["error"] and loop7.status()["consecutive_errors"] == 0 and s_idle["delay"] == 5.0,
+                  f"delays={delays} idle_delay={s_idle['delay']}")
+
+        # h. 旧命名服务器: krow_* 被拒后回退 team_* / hall_*, 闭环照样成立; hall_read 文本解析
+        hub7 = FakeAgentHub(naming="legacy")
+        h7, _ = hub7.mention("道哥", "在吗")
+        loop8 = make_loop(hub7, DedupStore(None), lambda t: {"final_answer": "在"}, listed=False)
+        s = loop8.wait_once(wait=0)
+        rep.check("v3.legacy_names_fallback", s["mentions"] == 1 and hub7.obligations[h7] == "answered" and hub7.ops() == ["inbox", "read", "hall_read", "hall_read", "hall_post"]
+                  and loop8.tool_names()["hall_post"] == "hall_post", f"ops={hub7.ops()} tools={loop8.tool_names()}")
+
+        # i. 崩溃续办: read 且未发 → 重新作答回帖; read 且发过 → 查大厅确认 / unverified
+        hub8 = FakeAgentHub()
+        h8a, m8a = hub8.mention("道哥", "一")
+        h8b, m8b = hub8.mention("道哥", "二")
+        st8 = DedupStore(f"{tmpdir}/v3-resume.json")
+        hub8("krow_read_message", {"message_id": m8a})
+        st8.set_mention(h8a, state="read", mail_id=m8a, channel_id=CHANNEL, attempts=0)
+        st8.set_mention(h8b, state="read", mail_id=m8b, channel_id=CHANNEL, attempts=1)
+        loop9 = make_loop(hub8, DedupStore(f"{tmpdir}/v3-resume.json"), lambda t: {"final_answer": "补回"})
+        out = loop9.resume_pending()
+        rep.check("v3.resume_pending", out == {"resumed": 1, "settled": 1} and hub8.obligations[h8a] == "answered"
+                  and (loop9.store.mention(h8b) or {}).get("state") == "unverified" and hub8.ops().count("hall_post") == 1, f"{out}")
+
+        # j. 守护驱动: KrowDaemon.run_once 先跑守候循环一拍再 poll; 空转时不固定睡(长轮询即等待)
+        hub9 = FakeAgentHub()
+        h9, _ = hub9.mention("道哥", "在吗")
+        tools9 = KrowTools(hub9, list_tools=hub9.tool_names)
+        st9 = DedupStore(None)
+        cfg9 = KrowConfig({"enabled": True, "self_names": ["lv-agent"], "poll_interval_s": 5})
+        br9 = KrowBridge(cfg9, store=st9, sources=[McpHallSource(tools9.call, self_names=["lv-agent"], inbox=False)])
+        br9.tools = tools9
+        br9.attach_mail_loop(KrowMailLoop(tools9, st9, backoff_base_s=0.01, backoff_max_s=0.02, min_loop_s=0.0, jitter=False, self_names=["lv-agent"]))
+        d9 = KrowDaemon(br9, lambda t: {"final_answer": "在"}, interval_s=5, wait_s=0)
+        out1 = d9.run_once()
+        out2 = d9.run_once()
+        rep.check("v3.daemon_drives_loop", out1["status"] == "woken" and out1["mail"]["mentions"] == 1 and hub9.obligations[h9] == "answered"
+                  and out2["status"] == "idle" and out2["mail"]["delay"] == 0.0 and not br9.busy, f"{out1['status']}/{out2['status']}")
+        # 没有任何请求带 ref(hall_mention 是服务端保留值)
+        rep.check("v3.never_writes_ref", all("ref" not in a for h in (hub, hub2, hub3, hub4, hub5, hub6, hub7, hub8, hub9) for _, a in h.calls))
+    except Exception as e:  # noqa: BLE001 — 自检要把失败写进报告
+        rep.check("v3.scenarios", False, f"{type(e).__name__}: {e}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
