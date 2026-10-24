@@ -365,7 +365,7 @@ class SuperAgentCLI:
   _COMMANDS = [
     "/deep", "/research", "/deep_research", "/model", "/models", "/config", "/theme", "/code", "/status",
     "/tools", "/sessions", "/dashboard", "/drafts", "/compress", "/strategy", "/mcp", "/tg",
-    "/learn", "/memskill", "/help", "/exit",
+    "/learn", "/memskill", "/krow", "/help", "/exit",
   ]
 
   def _setup_command_completion(self):
@@ -1112,6 +1112,7 @@ class SuperAgentCLI:
       # Prime adapter so user sees immediate feedback even before first token.
       adapter.emit_status("thinking")
       self._running = True
+      self._krow_set_busy(True)
       self._last_activity = time.time()
       # 重置中断标志(上一轮可能残留)
       self._interrupt_event.clear()
@@ -1173,6 +1174,7 @@ class SuperAgentCLI:
       raise
     finally:
       self._running = False
+      self._krow_set_busy(False)
       self._last_activity = time.time()
       # 深度研究面板: 正常完成时停止 Live 并打印最终统计
       if live is not None:
@@ -1231,6 +1233,125 @@ class SuperAgentCLI:
           pass
 
     threading.Thread(target=_watch, daemon=True, name="idle-watchdog").start()
+
+  # ------------------------------------------------------------------
+  # krow 平台接入: 空闲轮询唤醒 / 守护模式 / /krow 命令
+  # ------------------------------------------------------------------
+  @property
+  def _krow(self):
+    return getattr(self.agent, "krow", None) if self.agent is not None else None
+
+  def _krow_set_busy(self, flag: bool) -> None:
+    bridge = self._krow
+    if bridge is not None:
+      try:
+        bridge.set_busy(flag)
+      except Exception:
+        pass
+
+  def _krow_tool_prefix(self) -> str:
+    """LV-Agent 给 MCP 工具加的注册名前缀(mcp_<server>_), 写进唤醒提示让模型按注册名调用."""
+    bridge = self._krow
+    if bridge is None:
+      return ""
+    try:
+      from agent_project.krow import find_krow_server
+      server = find_krow_server(getattr(self.agent, "mcp_manager", None), bridge.cfg.mcp_server)
+      return f"mcp_{server}_" if server else ""
+    except Exception:
+      return ""
+
+  def _start_krow_idle_poller(self) -> None:
+    """REPL 空闲时轮询平台: 有点名就放进待唤醒队列, 由输入循环在用户没在打字时取走变成一次回合."""
+    bridge = self._krow
+    if bridge is None or not bridge.enabled or not bridge.cfg.idle_wake:
+      return
+    if getattr(self, "_krow_poller_started", False):
+      return
+    self._krow_poller_started = True
+    self._krow_wake_pending = threading.Event()
+
+    def _on_items(items):
+      self._krow_wake_pending.set()
+
+    bridge.start_idle_poller(_on_items, is_idle=lambda: not self._running)
+    print(terminal.style(f" krow: idle poll every {int(bridge.cfg.poll_interval_s)}s · /krow for status", "2"))
+
+  def _krow_wake_ready(self) -> bool:
+    ev = getattr(self, "_krow_wake_pending", None)
+    return bool(ev is not None and ev.is_set() and not self._running)
+
+  def _run_krow_wake(self) -> int:
+    """把待送的平台消息变成一次 agent 回合(回帖 / 读信由模型经 MCP 工具完成)."""
+    bridge = self._krow
+    ev = getattr(self, "_krow_wake_pending", None)
+    if ev is not None:
+      ev.clear()
+    if bridge is None:
+      return 0
+    items = bridge.poll()
+    if not items:
+      return 0
+    from agent_project.krow import build_wake_task
+    task = build_wake_task(items, nonce=bridge.nonce, tool_prefix=self._krow_tool_prefix())
+    bridge.mark_delivered(items)  # 先记账再跑: 一条点名最多触发一次回合
+    print(terminal.style(f" krow: {len(items)} 条平台消息 → 唤醒回合", "2"))
+    return self.run_single_task(task)
+
+  def _krow_command(self, rest: str) -> None:
+    """/krow [status|poll|wake]"""
+    bridge = self._krow
+    sub = (rest or "status").strip().lower()
+    if bridge is None:
+      print(" krow: 未启用。config.yaml 加 `krow: {enabled: true}`, 并配置 krow MCP 服务器或 KW_API_ENDPOINT/KW_WORKER_TOKEN。")
+      return
+    if sub in ("poll", "wake", "now"):
+      items = bridge.poll()
+      if not items:
+        print(" krow: 没有新消息")
+        return
+      if sub == "poll":
+        for it in items:
+          print(f"  · [{it.kind}] {it.text[:160]}")
+        print(" krow: 以上为待送项(未记已送达); /krow wake 让 agent 处理")
+        return
+      self._run_krow_wake()
+      return
+    import json as _json
+    print(_json.dumps(bridge.status(), ensure_ascii=False, indent=2, default=str))
+
+  def run_krow_daemon(self) -> int:
+    """常驻模式: 不进 REPL, 轮询平台 → 被点名就跑一回合 → 继续轮询(Ctrl+C 退出)."""
+    bridge = self._krow
+    if bridge is None:
+      print(terminal.style(" krow daemon: 未启用(config.krow.enabled=false 或没有可用取数源)", "31"))
+      return 1
+    from agent_project.krow import KrowDaemon
+
+    def _run(task: str):
+      return self._run_with_progress(
+        self._select_runner(), task,
+        code_mode=getattr(self, 'code_mode', False),
+        mode=getattr(self, 'output_mode', None),
+      )
+
+    def _on_cycle(items, result, error):
+      ts = time.strftime('%H:%M:%S')
+      if error is not None:
+        print(terminal.style(f" [{ts}] krow: 回合失败 {type(error).__name__}: {error}", "31"))
+      else:
+        preview = str((result or {}).get('final_answer', '') if isinstance(result, dict) else result or '')[:120]
+        print(terminal.style(f" [{ts}] krow: 处理 {len(items)} 条 · {preview}", "2"))
+
+    daemon = KrowDaemon(bridge, _run, tool_prefix=self._krow_tool_prefix(), on_cycle=_on_cycle)
+    print(terminal.style(
+      f" krow daemon: sources={bridge.status().get('sources')} interval={int(daemon.interval_s)}s (Ctrl+C to stop)", "2"))
+    try:
+      daemon.run_forever()
+    except KeyboardInterrupt:
+      daemon.stop()
+      print(terminal.style(" krow daemon stopped", "2"))
+    return 0
 
   def _maybe_auto_compress(self) -> None:
     """上下文达到 80% 阈值时自动压缩(替代用户手动 /compress).
@@ -1387,6 +1508,9 @@ class SuperAgentCLI:
       while True:
         r, _, _ = select.select([fd], [], [], 0.2)
         if not r:
+          # krow 空闲唤醒: 用户没在打字(缓冲区为空)且后台轮询到点名 → 交回主循环跑一回合
+          if not buf and not in_paste and self._krow_wake_ready():
+            return "\x1cKROW_WAKE"
           continue
         chunk = os.read(fd, 4096)
         if not chunk:
@@ -1757,6 +1881,8 @@ class SuperAgentCLI:
     if not self._watchdog_started:
       self._watchdog_started = True
       self._start_idle_watchdog()
+    # krow 空闲轮询(config.krow.enabled 且 idle_wake 时才起线程)
+    self._start_krow_idle_poller()
 
     while True:
       try:
@@ -1770,6 +1896,18 @@ class SuperAgentCLI:
       # Ctrl+\ Dashboard 快捷键(设计文档)
       if user_input == "\x1cDASHBOARD":
         self._show_dashboard()
+        continue
+
+      # krow 空闲唤醒: 输入循环在用户没打字时发现有点名 → 跑一回合再回到提示符
+      if user_input == "\x1cKROW_WAKE":
+        try:
+          self._run_krow_wake()
+        except Exception as e:
+          print(terminal.style(f" krow wake failed: {e}", "31"))
+        continue
+
+      if user_input.lower().startswith('/krow'):
+        self._krow_command(user_input[5:].strip())
         continue
 
       # 记录输入历史(供上下箭头翻页), 排除空/重复
@@ -2360,6 +2498,10 @@ class SuperAgentCLI:
       return 0
 
     self.show_status()
+
+    if '--krow-daemon' in argv:
+      # 常驻外部工作台: 轮询 krow 平台, 被点名就跑一回合(不进 REPL)
+      return self.run_krow_daemon()
 
     if task:
       return self.run_single_task(task)
