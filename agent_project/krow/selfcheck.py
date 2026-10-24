@@ -45,10 +45,13 @@ class FakeKrowServer:
 
     def __init__(self, token: str) -> None:
         self.token = token
-        self.mode = "unified"  # unified | legacy404 | down503
+        self.mode = "unified"  # unified | legacy404 | down503 | binding409
         self.owner_queue: List[str] = []
         self.leader_queue: List[Dict[str, Any]] = []
         self.hall_queue: List[Dict[str, Any]] = []
+        # D11 建模: 项目频道里给外部工作台的点名 = suppressed(not_wakeable) 行, 缺省调用(跨频道只捎 pending 行)取不到,
+        # 只有带 channel_id=<该频道> 的调用(按时间线读, 不看唤醒行状态)才给出并翻 injected.
+        self.channel_queues: Dict[str, List[Dict[str, Any]]] = {}
         self.requests: List[Tuple[str, Dict[str, str]]] = []
         self._lock = threading.Lock()
         server_ref = self
@@ -93,9 +96,16 @@ class FakeKrowServer:
             if self.mode == "down503":
                 return self._send(h, 503, {"error": "rolling"})
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if url.path == "/agent/v1/hall/channels":
+                chans = [{"id": "general", "name": "大厅", "kind": "general", "unread_count": len(self.hall_queue), "mention_count": len(self.hall_queue)}]
+                for cid, q in self.channel_queues.items():
+                    chans.append({"id": cid, "name": "星辰大海", "kind": "project", "unread_count": len(q), "mention_count": sum(1 for m in q if m.get("mentions_me"))})
+                return self._send(h, 200, {"channels": chans})
             if url.path == "/agent/v1/inject":
                 if self.mode == "legacy404":
                     return self._send(h, 404, {"error": "not found"})
+                if self.mode == "binding409":
+                    return self._send(h, 409, {"error": "job_binding_required", "message": "request requires an active job binding"})
                 max_owner = int(qs.get("max_owner", 3))
                 max_hall = int(qs.get("max_hall", 5))
                 want_hall = qs.get("hall") != "0"
@@ -107,14 +117,22 @@ class FakeKrowServer:
                     items, self.leader_queue = self.leader_queue[:n], self.leader_queue[n:]
                     payload["leader"] = {"items": items}
                 if want_hall:
-                    msgs, self.hall_queue = self.hall_queue[:max_hall], self.hall_queue[max_hall:]
+                    msgs = self._take_hall(qs.get("channel_id"), max_hall)
                     payload["hall"] = {"text": self._render_hall(msgs), "remaining": len(self.hall_queue)}
                 return self._send(h, 200, payload)
             if url.path == "/agent/v1/hall/inject":
-                n = int(qs.get("max", 5))
-                msgs, self.hall_queue = self.hall_queue[:n], self.hall_queue[n:]
+                msgs = self._take_hall(qs.get("channel_id"), int(qs.get("max", 5)))
                 return self._send(h, 200, {"items": msgs, "remaining": len(self.hall_queue), "last_read_id": max([m["id"] for m in msgs] or [0])})
             return self._send(h, 404, {"error": "no route"})
+
+    def _take_hall(self, channel_id: Optional[str], n: int) -> List[Dict[str, Any]]:
+        """缺省(general) = 本频道 + 跨频道 pending 捎带(hall_queue); 带 channel_id = 只读该频道时间线(含 suppressed 行)."""
+        if channel_id and channel_id != "general":
+            q = self.channel_queues.setdefault(channel_id, [])
+            msgs, self.channel_queues[channel_id] = q[:n], q[n:]
+            return msgs
+        msgs, self.hall_queue = self.hall_queue[:n], self.hall_queue[n:]
+        return msgs
 
     @staticmethod
     def _send(h: BaseHTTPRequestHandler, code: int, body: Dict[str, Any]) -> None:
@@ -227,6 +245,44 @@ def run(verbose: bool = True) -> Report:
         rep.check("rest.503.cooldown", rest.cooling_down() and len(srv.requests) == n_before + 1, f"requests during cooldown: {len(srv.requests) - n_before}")
         srv.mode = "unified"
         rest._down_until = 0.0  # 自检不等 30 秒
+
+        # 3b. D11: 项目频道里的 suppressed 行只有带 channel_id 轮询才取得到
+        def _paths(since: int) -> List[str]:
+            return [p for p, _h in srv.requests[since:]]
+
+        srv.channel_queues[CHANNEL] = [{"id": 7510, "display": "道哥", "body": "lv-agent 在吗，报下版本", "mentions_me": True}]
+        rest_off = RestInjectSource(srv.api, token, channels="off")
+        got_off = rest_off.fetch()
+        rep.check("rest.d11.default_call_misses_suppressed", got_off == [] and len(srv.channel_queues[CHANNEL]) == 1,
+                  "channels=off 只打缺省 general → 项目频道点名取不到(这就是外部工作台被叫不醒的那一环)")
+        n0 = len(srv.requests)
+        rest_ch = RestInjectSource(srv.api, token, channels="auto", channel_scan_interval=60)
+        got = rest_ch.fetch()
+        ok = ([i.key for i in got] == ["hall:7510"] and got[0].channel_id == CHANNEL and f"channel_id={CHANNEL}" in got[0].text
+              and any(p.startswith("/agent/v1/hall/channels") for p in _paths(n0))
+              and any(p.startswith("/agent/v1/inject?") and f"channel_id={CHANNEL}" in p for p in _paths(n0)))
+        rep.check("rest.d11.per_channel_delivers", ok, f"keys={[i.key for i in got]} paths={_paths(n0)}")
+        n1 = len(srv.requests)
+        rest_ch.fetch()
+        rep.check("rest.d11.scan_throttled", not any("channel" in p for p in _paths(n1)), f"second fetch within interval: {_paths(n1)}")
+        n2 = len(srv.requests)
+        srv.channel_queues[CHANNEL].append({"id": 7512, "display": "道哥", "body": "固定频道列表也要能取", "mentions_me": True})
+        rest_fixed = RestInjectSource(srv.api, token, channels=[CHANNEL])
+        got_fixed = rest_fixed.fetch()
+        rep.check("rest.d11.fixed_channel_list", [i.key for i in got_fixed] == ["hall:7512"] and not any(p.startswith("/agent/v1/hall/channels") for p in _paths(n2)),
+                  f"keys={[i.key for i in got_fixed]} (不打 hall/channels)")
+        srv.mode = "legacy404"
+        n3 = len(srv.requests)
+        srv.channel_queues[CHANNEL].append({"id": 7511, "display": "道哥", "body": "老服务端也要带 channel_id", "mentions_me": True})
+        got_legacy = RestInjectSource(srv.api, token, channels="auto").fetch()
+        rep.check("rest.d11.legacy_channel_param", [i.key for i in got_legacy] == ["hall:7511"] and got_legacy[0].channel_id == CHANNEL
+                  and any(p.startswith("/agent/v1/hall/inject?") and f"channel_id={CHANNEL}" in p for p in _paths(n3)), f"paths={_paths(n3)}")
+        srv.mode = "binding409"
+        rest_409 = RestInjectSource(srv.api, token)
+        got_409 = rest_409.fetch()
+        rep.check("rest.409.binding_flag", got_409 == [] and rest_409.binding_required and rest_409.cooling_down() and "mcp_pull" in rest_409.last_error,
+                  rest_409.last_error)
+        srv.mode = "unified"
 
         # 4. MCP 轮询
         mcp = FakeMcpBridge()
