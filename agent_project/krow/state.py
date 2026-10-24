@@ -14,7 +14,14 @@
     {"version": 1,
      "seen": {"hall:7360": 1761290000.1, ...},      # 去重键 → 送达时间；超过 max_seen 条按时间淘汰最老的
      "pending": [ {InjectItem.to_dict()}, ... ],     # 已取到、还没送进模型
-     "cursors": {"hall:<channel_id>": 7360, ...}}    # 各取数源自己的读取游标（MCP 路径用）
+     "cursors": {"hall:<channel_id>": 7360, ...},    # 各取数源自己的读取游标（MCP 路径用）
+     "mentions": {"7965": {"state": "answered", "mail_id": "…", "channel_id": "…", "post_message_id": 7970,
+                           "attempts": 1, "updated_at": 1761290000.1}, ...},   # 大厅点名闭环账（v3 守候循环）
+     "owner_replies": {"<mail_id>": {"state": "answered", "updated_at": …}, ...}}  # 主人直聊回信账（v3）
+
+``mentions`` 以 ``hall_message_id`` 为键：``read`` = 已真读（服务端已翻 injected）还没回帖；``answered`` = 已带 reply_to_id 回帖；
+``failed`` = 回帖失败且不再自动重试；``unverified`` = 上次进程在回帖途中死掉、又认不出自己的发言，宁可不重发也不刷屏。
+重启后未读信再次出现在 ``unread_only`` 里，先查这本账：``answered`` 的只补读信不再回。
 
 写盘用「临时文件 + os.replace」原子替换；``path=None`` 时只在内存里记（测试 / 一次性用）。
 线程安全：所有公开方法持同一把 RLock。
@@ -38,16 +45,22 @@ __all__ = ["DedupStore", "DEFAULT_STATE_PATH"]
 #: 缺省落盘位置（与 ``super_agent._version_beacon`` 的 ``~/.lv_agent`` 同一目录）。
 DEFAULT_STATE_PATH = os.path.join("~", ".lv_agent", "krow_state.json")
 _VERSION = 1
+#: 点名账 / 主人回信账各自最多保留多少条（按 updated_at 淘汰最老的）。
+MAX_RECORDS = 2000
 
 
 class DedupStore:
-    def __init__(self, path: Optional[str] = DEFAULT_STATE_PATH, *, max_seen: int = 5000) -> None:
+    def __init__(self, path: Optional[str] = DEFAULT_STATE_PATH, *, max_seen: int = 5000, max_records: int = MAX_RECORDS) -> None:
         self.path = os.path.expanduser(path) if path else None
         self.max_seen = max(100, int(max_seen))
+        self.max_records = max(50, int(max_records))
         self._lock = threading.RLock()
         self._seen: Dict[str, float] = {}
         self._pending: List[InjectItem] = []
         self._cursors: Dict[str, Any] = {}
+        # v3 守候循环的两本账: 大厅点名(hall_message_id → 记录) / 主人直聊回信(mail_id → 记录)
+        self._mentions: Dict[str, Dict[str, Any]] = {}
+        self._owner_replies: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     # ── 持久化 ─────────────────────────────────────────────────────────
@@ -72,6 +85,10 @@ class DedupStore:
         cursors = raw.get("cursors")
         if isinstance(cursors, dict):
             self._cursors = dict(cursors)
+        for attr, key in (("_mentions", "mentions"), ("_owner_replies", "owner_replies")):
+            table = raw.get(key)
+            if isinstance(table, dict):
+                setattr(self, attr, {str(k): dict(v) for k, v in table.items() if isinstance(v, dict)})
 
     def _save(self) -> None:
         if not self.path:
@@ -81,6 +98,8 @@ class DedupStore:
             "seen": self._seen,
             "pending": [p.to_dict() for p in self._pending],
             "cursors": self._cursors,
+            "mentions": self._mentions,
+            "owner_replies": self._owner_replies,
         }
         directory = os.path.dirname(self.path) or "."
         try:
@@ -166,13 +185,81 @@ class DedupStore:
             self._cursors[name] = value
             self._save()
 
+    # ── 大厅点名闭环账 / 主人直聊回信账（v3 守候循环） ──────────────────────
+
+    @staticmethod
+    def _key(value: Any) -> str:
+        return str(value).strip()
+
+    def mention(self, hall_message_id: Any) -> Optional[Dict[str, Any]]:
+        """某条大厅消息的闭环记录（没有返回 None）。"""
+        with self._lock:
+            rec = self._mentions.get(self._key(hall_message_id))
+            return dict(rec) if rec else None
+
+    def set_mention(self, hall_message_id: Any, **fields: Any) -> Dict[str, Any]:
+        """合并写入（``state`` / ``mail_id`` / ``channel_id`` / ``post_message_id`` / ``attempts`` / ``error`` …），自动盖 ``updated_at``。"""
+        with self._lock:
+            key = self._key(hall_message_id)
+            rec = dict(self._mentions.get(key) or {})
+            rec.update({k: v for k, v in fields.items() if v is not None})
+            rec["updated_at"] = time.time()
+            self._mentions[key] = rec
+            self._trim_records(self._mentions)
+            self._save()
+            return dict(rec)
+
+    def bump_mention_attempts(self, hall_message_id: Any) -> int:
+        """回帖前先 +1 并落盘：进程若死在回帖途中，重启后能看出「发过没发完」。"""
+        with self._lock:
+            key = self._key(hall_message_id)
+            rec = dict(self._mentions.get(key) or {})
+            rec["attempts"] = int(rec.get("attempts") or 0) + 1
+            rec["updated_at"] = time.time()
+            self._mentions[key] = rec
+            self._save()
+            return rec["attempts"]
+
+    def mentions(self, state: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._mentions.items() if state is None or v.get("state") == state}
+
+    def owner_reply(self, mail_id: Any) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            rec = self._owner_replies.get(self._key(mail_id))
+            return dict(rec) if rec else None
+
+    def set_owner_reply(self, mail_id: Any, **fields: Any) -> Dict[str, Any]:
+        with self._lock:
+            key = self._key(mail_id)
+            rec = dict(self._owner_replies.get(key) or {})
+            rec.update({k: v for k, v in fields.items() if v is not None})
+            rec["updated_at"] = time.time()
+            self._owner_replies[key] = rec
+            self._trim_records(self._owner_replies)
+            self._save()
+            return dict(rec)
+
+    def _trim_records(self, table: Dict[str, Dict[str, Any]]) -> None:
+        if len(table) <= self.max_records:
+            return
+        ordered = sorted(table.items(), key=lambda kv: float(kv[1].get("updated_at") or 0.0))
+        for k, _ in ordered[: len(table) - self.max_records]:
+            table.pop(k, None)
+
     # ── 观测 ───────────────────────────────────────────────────────────
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
+            by_state: Dict[str, int] = {}
+            for rec in self._mentions.values():
+                st = str(rec.get("state") or "?")
+                by_state[st] = by_state.get(st, 0) + 1
             return {
                 "path": self.path,
                 "seen": len(self._seen),
                 "pending": len(self._pending),
                 "cursors": dict(self._cursors),
+                "mentions": by_state,
+                "owner_replies": len(self._owner_replies),
             }

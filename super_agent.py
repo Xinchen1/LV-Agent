@@ -1261,8 +1261,29 @@ class SuperAgentCLI:
     except Exception:
       return ""
 
+  def _krow_run_task(self, task: str):
+    """给 krow 守候循环 / 唤醒回合用的「跑一回合」: 返回结果 dict(final_answer / actions …), 顺手按 REPL 口径打印."""
+    result = self._run_with_progress(
+      self._select_runner(), task,
+      code_mode=getattr(self, 'code_mode', False),
+      mode=getattr(self, 'output_mode', None),
+    )
+    try:
+      if isinstance(result, dict):
+        self._finish_result(result)
+    except Exception:
+      pass
+    return result
+
+  def _krow_tool_names(self):
+    bridge = self._krow
+    try:
+      return bridge.tools.resolved() if bridge is not None and getattr(bridge, "tools", None) is not None else None
+    except Exception:
+      return None
+
   def _start_krow_idle_poller(self) -> None:
-    """REPL 空闲时轮询平台: 有点名就放进待唤醒队列, 由输入循环在用户没在打字时取走变成一次回合."""
+    """REPL 空闲时轮询平台: 收件箱长轮询(守候循环, 只入队)+ 其它源; 有点名就放进待唤醒队列, 由输入循环在用户没在打字时取走变成一次回合."""
     bridge = self._krow
     if bridge is None or not bridge.enabled or not bridge.cfg.idle_wake:
       return
@@ -1270,47 +1291,81 @@ class SuperAgentCLI:
       return
     self._krow_poller_started = True
     self._krow_wake_pending = threading.Event()
+    # 守候循环处理点名 / 主人直聊时要跑 agent 回合: 在主线程(唤醒回合里)跑, 这里只把 runner 接上
+    try:
+      bridge.set_run_task(self._krow_run_task)
+    except Exception:
+      pass
 
     def _on_items(items):
       self._krow_wake_pending.set()
 
     bridge.start_idle_poller(_on_items, is_idle=lambda: not self._running)
-    print(terminal.style(f" krow: idle poll every {int(bridge.cfg.poll_interval_s)}s · /krow for status", "2"))
+    if getattr(bridge, "mail_loop", None) is not None:
+      print(terminal.style(f" krow: inbox long-poll {int(bridge.mail_loop.wait_s)}s + idle poll · /krow for status", "2"))
+    else:
+      print(terminal.style(f" krow: idle poll every {int(bridge.cfg.poll_interval_s)}s · /krow for status", "2"))
 
   def _krow_wake_ready(self) -> bool:
     ev = getattr(self, "_krow_wake_pending", None)
     return bool(ev is not None and ev.is_set() and not self._running)
 
   def _run_krow_wake(self) -> int:
-    """把待送的平台消息变成一次 agent 回合(回帖 / 读信由模型经 MCP 工具完成)."""
+    """把待送的平台消息变成一次 agent 回合.
+
+    先让守候循环处理排队的站内信(大厅点名: 真读 → 取原文 → 作答 → 带 reply_to_id 回帖; 主人直聊: 回合后回信; 其余进待送队列),
+    再把待送项(大厅 / 站内信摘要 / 主人插话)拼成一次唤醒回合(回帖 / 读信由模型经 MCP 工具完成)."""
     bridge = self._krow
     ev = getattr(self, "_krow_wake_pending", None)
     if ev is not None:
       ev.clear()
     if bridge is None:
       return 0
+    rc = 0
+    if getattr(bridge, "mail_loop", None) is not None and bridge.mail_queued() > 0:
+      try:
+        bridge.set_run_task(self._krow_run_task)
+        done = bridge.process_mail_queue()
+        if done.get("new"):
+          print(terminal.style(
+            f" krow: 收件箱 → 主人信 {done.get('owner', 0)} · 大厅点名 {done.get('mentions', 0)} · 其它 {done.get('other', 0)}", "2"))
+      except Exception as e:
+        print(terminal.style(f" krow: 处理收件箱失败 {type(e).__name__}: {e}", "31"))
+        rc = 1
     items = bridge.poll()
     if not items:
-      return 0
+      return rc
     from agent_project.krow import build_wake_task
-    task = build_wake_task(items, nonce=bridge.nonce, tool_prefix=self._krow_tool_prefix())
+    task = build_wake_task(items, nonce=bridge.nonce, tool_prefix=self._krow_tool_prefix(), tool_names=self._krow_tool_names())
     bridge.mark_delivered(items)  # 先记账再跑: 一条点名最多触发一次回合
     print(terminal.style(f" krow: {len(items)} 条平台消息 → 唤醒回合", "2"))
-    return self.run_single_task(task)
+    return self.run_single_task(task) or rc
 
   def _krow_command(self, rest: str) -> None:
-    """/krow [status|poll|wake]"""
+    """/krow [status|poll|wake|mentions]"""
     bridge = self._krow
     sub = (rest or "status").strip().lower()
     if bridge is None:
       print(" krow: 未启用。config.yaml 加 `krow: {enabled: true}`, 并配置 krow MCP 服务器或 KW_API_ENDPOINT/KW_WORKER_TOKEN。")
       return
+    if sub == "mentions":
+      recs = bridge.store.mentions()
+      if not recs:
+        print(" krow: 点名账为空(还没有大厅点名经守候循环处理过)")
+        return
+      for hid, rec in sorted(recs.items(), key=lambda kv: float(kv[1].get("updated_at") or 0)):
+        print(f"  · #{hid} {rec.get('state')} attempts={rec.get('attempts', 0)} post={rec.get('post_message_id')} "
+              f"by={rec.get('answered_by', '')} {('err=' + str(rec.get('error'))[:80]) if rec.get('error') else ''}")
+      return
     if sub in ("poll", "wake", "now"):
+      queued = bridge.mail_queued()
       items = bridge.poll()
-      if not items:
+      if not items and not queued:
         print(" krow: 没有新消息")
         return
       if sub == "poll":
+        if queued:
+          print(f"  · [inbox] 守候循环排队 {queued} 封(大厅点名 / 主人直聊在唤醒回合里处理)")
         for it in items:
           print(f"  · [{it.kind}] {it.text[:160]}")
         print(" krow: 以上为待送项(未记已送达); /krow wake 让 agent 处理")
@@ -1320,6 +1375,15 @@ class SuperAgentCLI:
     import json as _json
     st = bridge.status()
     print(_json.dumps(st, ensure_ascii=False, indent=2, default=str))
+    ml = st.get("mail_loop")
+    if ml:
+      print(terminal.style(
+        f" krow: 守候循环 wait={ml.get('wait_s')}s polls={ml.get('polls')} 点名={ml.get('handled_mentions')} 主人信={ml.get('handled_owner')} "
+        f"排队={ml.get('queued')} 连续错误={ml.get('consecutive_errors')} 点名账={ml.get('mentions')}"
+        + (f" last_error={ml.get('last_error')}" if ml.get('last_error') else ""), "2"))
+      names = ml.get("tools") or {}
+      if names:
+        print(terminal.style(" krow: 工具名 " + ", ".join(f"{k}→{v}" for k, v in names.items() if k in ("team_inbox", "team_read_message", "hall_read", "hall_post", "team_send_message")), "2"))
     # 409 只表示"已见 / 未见", 推断单向, 不据此断言平台侧 H1 已回答; 坏频道 / 非法项要让人一眼看到
     if "rest" in (st.get("sources") or []):
       print(terminal.style(f" krow: 409 → {st.get('rest_409_note')}", "2"))
@@ -1339,11 +1403,7 @@ class SuperAgentCLI:
     from agent_project.krow import KrowDaemon
 
     def _run(task: str):
-      return self._run_with_progress(
-        self._select_runner(), task,
-        code_mode=getattr(self, 'code_mode', False),
-        mode=getattr(self, 'output_mode', None),
-      )
+      return self._krow_run_task(task)
 
     def _on_cycle(items, result, error):
       ts = time.strftime('%H:%M:%S')
@@ -1353,9 +1413,14 @@ class SuperAgentCLI:
         preview = str((result or {}).get('final_answer', '') if isinstance(result, dict) else result or '')[:120]
         print(terminal.style(f" [{ts}] krow: 处理 {len(items)} 条 · {preview}", "2"))
 
+    # 守候循环(收件箱长轮询 → 大厅点名闭环 / 主人直聊回信)与唤醒回合共用同一个 runner
+    bridge.set_run_task(_run)
     daemon = KrowDaemon(bridge, _run, tool_prefix=self._krow_tool_prefix(), on_cycle=_on_cycle)
+    ml = getattr(bridge, "mail_loop", None)
     print(terminal.style(
-      f" krow daemon: sources={bridge.status().get('sources')} interval={int(daemon.interval_s)}s (Ctrl+C to stop)", "2"))
+      f" krow daemon: sources={bridge.status().get('sources')} "
+      + (f"inbox long-poll {int(ml.wait_s)}s " if ml is not None else f"interval={int(daemon.interval_s)}s ")
+      + "(Ctrl+C to stop)", "2"))
     try:
       daemon.run_forever()
     except KeyboardInterrupt:

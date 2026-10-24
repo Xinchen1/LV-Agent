@@ -30,10 +30,19 @@
       channels: auto                # REST 逐频道轮询: auto | off | [channel_id(UUID), ...]; 非 UUID 项忽略、不中断其余频道
       channel_scan_interval_s: 10   # 频道扫描节流
       bad_channel_backoff_s: 300    # 显式 channel_id 回 400/404 后该频道隔离多久再试; 其余频道不受影响
+      # ── v3 守候循环(收件箱长轮询 → 大厅点名闭环 / 主人直聊) ──
+      mail_loop: true               # 常驻 krow_inbox(wait=20, unread_only=true); 关掉就退回 v1 的"每拍 team_inbox(wait=0)"
+      mail_wait_s: 20               # 长轮询秒数, 夹到 0..25
+      mail_backoff_max_s: 60        # 收件箱出错时指数退避上限(2s 起)
+      mention_context: 20           # 点名时另取多少条频道上下文给模型(0 = 不取)
+      reply_max_chars: 1800         # 回帖 / 回信正文上限
+      post_retries: 2               # 回帖 / 回信瞬时错误重试次数(4xx 不重试)
+      owner_reply: true             # 主人直聊(from_kind=owner)跑完回合后用 krow_send_message(to_role=owner, in_reply_to) 回信
+      tools: {}                     # 工具注册名覆盖, 如 {team_inbox: krow_inbox}; 缺省按服务器工具列表探测(krow_* 优先)
 
 ``status()`` 里 REST 相关字段：``rest_channels`` / ``rest_invalid_channels`` / ``rest_bad_channels`` / ``rest_legacy_mode`` /
 ``rest_409_seen`` + ``rest_409_note``（409 只表示已见 / 未见：有 409 ⇒ 令牌非 mcp_pull 为单向推断，未见 409 不等于 mcp_pull 已确认，
-不据此断言平台侧 H1 已回答）。
+不据此断言平台侧 H1 已回答）；``mail_loop``（守候循环：拍数 / 已处理点名与主人信 / 连续错误 / 点名账各状态条数）；``tools``（逻辑名 → 注册名）。
 """
 from __future__ import annotations
 
@@ -44,15 +53,18 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from .items import InjectItem, contract_text, make_nonce, render_items
+from .mailloop import KrowMailLoop, clamp_wait
 from .sources import McpHallSource, RestInjectSource, resolve_rest_env
 from .state import DEFAULT_STATE_PATH, DedupStore
+from .tools import KrowTools
 
 logger = logging.getLogger("krow.bridge")
 
-__all__ = ["KrowBridge", "KrowConfig", "build_bridge", "find_krow_server"]
+__all__ = ["KrowBridge", "KrowConfig", "build_bridge", "find_krow_server", "list_server_tools"]
 
-_SERVER_NAME_CANDIDATES = ("krow-platform", "krow_platform", "krow")
-_PROBE_TOOL = "hall_read"
+_SERVER_NAME_CANDIDATES = ("krow-platform", "krow_platform", "krow", "agent-hub", "agent_hub", "krow-agent-hub")
+#: 探测"哪台 MCP 服务器是 krow 桥": 有这些工具之一就是(agent-hub 叫 krow_*, 平台 kit 桥叫 hall_* / team_*)
+_PROBE_TOOLS = ("krow_hall_read", "krow_inbox", "hall_read", "team_inbox")
 
 
 class KrowConfig:
@@ -88,10 +100,42 @@ class KrowConfig:
         self.channel_scan_interval_s = max(0.0, float(d.get("channel_scan_interval_s", 10) or 0))
         # 显式 channel_id 回 400/404 等频道级错误后该频道隔离多久(秒); 其余频道不受影响(v2 坏频道隔离)
         self.bad_channel_backoff_s = max(0.0, float(d.get("bad_channel_backoff_s", 300) or 0))
+        # v3 守候循环: 收件箱长轮询 → 大厅点名闭环 / 主人直聊
+        self.mail_loop = bool(d.get("mail_loop", True))
+        self.mail_wait_s = clamp_wait(d.get("mail_wait_s", 20))
+        self.mail_backoff_max_s = max(2.0, float(d.get("mail_backoff_max_s", 60) or 60))
+        self.mention_context = max(0, min(100, int(d.get("mention_context", 20) or 0)))
+        self.reply_max_chars = max(80, int(d.get("reply_max_chars", 1800) or 1800))
+        self.post_retries = max(0, int(d.get("post_retries", 2) or 0))
+        self.owner_reply = bool(d.get("owner_reply", True))
+        tools = d.get("tools")
+        self.tools: Dict[str, str] = {str(k): str(v) for k, v in tools.items() if k and v} if isinstance(tools, Mapping) else {}
+
+
+def list_server_tools(mcp_manager: Any, server: str) -> List[str]:
+    """某台 MCP 服务器当前的工具名（纯 Python 连接读 ``conn.tools``；Rust 桥问 ``list_tools``）。拿不到 / 还没就绪返回空。"""
+    if mcp_manager is None or not server:
+        return []
+    servers = getattr(mcp_manager, "servers", None) or {}
+    conn = servers.get(server)
+    if conn is not None:
+        ready = getattr(conn, "_ready", None)
+        if ready is not None and hasattr(ready, "is_set") and not ready.is_set():
+            return []
+        return [str(t.get("name")) for t in (getattr(conn, "tools", None) or []) if isinstance(t, dict) and t.get("name")]
+    bridge = getattr(mcp_manager, "_bridge", None)
+    if bridge is not None and server in (getattr(mcp_manager, "_bridge_configs", None) or {}):
+        try:
+            resp = bridge.list_tools(server, timeout=10)
+            tools = (resp.get("metadata") or {}).get("tools", []) if isinstance(resp, dict) and resp.get("success") else []
+            return [str(t.get("name")) for t in tools if isinstance(t, dict) and t.get("name")]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("krow: rust bridge list_tools(%s) failed: %s", server, e)
+    return []
 
 
 def find_krow_server(mcp_manager: Any, preferred: Optional[str] = None) -> Optional[str]:
-    """在 ``McpManager`` 里找 krow 桥：先按名字，再按「哪台服务器有 ``hall_read`` 工具」。找不到 / 还没就绪返回 None。"""
+    """在 ``McpManager`` 里找 krow 桥：先按名字，再按「哪台服务器有 krow 工具（``krow_hall_read`` / ``hall_read`` …）」。找不到 / 还没就绪返回 None。"""
     if mcp_manager is None:
         return None
     servers = getattr(mcp_manager, "servers", None) or {}
@@ -100,13 +144,9 @@ def find_krow_server(mcp_manager: Any, preferred: Optional[str] = None) -> Optio
     for name in ([preferred] if preferred else []) + list(_SERVER_NAME_CANDIDATES):
         if name and name in known:
             return name
-    # 按工具名探测（纯 Python stdio 连接：conn.tools 在 _ready 后可用）
-    for name, conn in servers.items():
-        ready = getattr(conn, "_ready", None)
-        if ready is not None and hasattr(ready, "is_set") and not ready.is_set():
-            continue
-        tools = getattr(conn, "tools", None) or []
-        if any(isinstance(t, dict) and t.get("name") == _PROBE_TOOL for t in tools):
+    # 按工具名探测（纯 Python stdio 连接：conn.tools 在 _ready 后可用；Rust 桥问 list_tools）
+    for name in known:
+        if any(t in _PROBE_TOOLS for t in list_server_tools(mcp_manager, name)):
             return name
     return None
 
@@ -134,12 +174,37 @@ class KrowBridge:
         self.last_new: int = 0
         self.polls: int = 0
         self.delivered: int = 0
+        # v3: 收件箱守候循环(长轮询 → 大厅点名闭环 / 主人直聊); build_bridge 装配, 宿主再 set_run_task 接上模型回合
+        self.mail_loop: Optional[KrowMailLoop] = None
+        self.tools: Optional[KrowTools] = None
 
     # ── 状态 ───────────────────────────────────────────────────────────
 
     @property
     def enabled(self) -> bool:
-        return bool(self.cfg.enabled and self.sources)
+        return bool(self.cfg.enabled and (self.sources or self.mail_loop is not None))
+
+    def attach_mail_loop(self, loop: KrowMailLoop) -> None:
+        loop.nonce = loop.nonce or self.nonce
+        self.mail_loop = loop
+
+    def set_run_task(self, run_task: Optional[Callable[[str], Any]]) -> None:
+        """宿主把「跑一回合」的函数接进来（守护模式 / REPL 都要：点名作答、主人直聊回信都靠它）。"""
+        if self.mail_loop is not None:
+            self.mail_loop.run_task = run_task
+
+    def process_mail_queue(self) -> Dict[str, Any]:
+        """REPL 主线程：处理空闲线程排进来的信（大厅点名读→答→回帖、主人直聊回信、其余进待送队列）。"""
+        if self.mail_loop is None:
+            return {"owner": 0, "mentions": 0, "other": 0, "new": 0}
+        self.set_busy(True)
+        try:
+            return self.mail_loop.process_queued()
+        finally:
+            self.set_busy(False)
+
+    def mail_queued(self) -> int:
+        return self.mail_loop.queued() if self.mail_loop is not None else 0
 
     @property
     def busy(self) -> bool:
@@ -177,6 +242,9 @@ class KrowBridge:
             "busy": self.busy,
             "poller_alive": bool(self._poller and self._poller.is_alive()),
             "store": self.store.stats(),
+            # v3 守候循环 / 工具名解析
+            "mail_loop": self.mail_loop.status() if self.mail_loop is not None else None,
+            "tools": self.tools.resolved() if self.tools is not None else {},
         }
 
     # ── 取数 ───────────────────────────────────────────────────────────
@@ -249,8 +317,11 @@ class KrowBridge:
         interval_s: Optional[float] = None,
         name: str = "krow-idle-poller",
     ) -> Optional[threading.Thread]:
-        """后台线程：``interval_s`` 一拍；只在 ``is_idle()`` 为真且 bridge 不忙时拉；有待送项就交 ``on_items``。
+        """后台线程：只在 ``is_idle()`` 为真且 bridge 不忙时拉；有待送项就交 ``on_items``。
 
+        没有守候循环时 ``interval_s`` 一拍 ``poll()``（v1）。有守候循环时每拍先 ``mail_loop.wait_once(handle=False)`` 长轮询收件箱
+        （长轮询本身就是等待；入队不处理——agent 回合要在主线程跑），再 ``poll()`` 其它源；队列里有东西或有待送项就叫 ``on_items``，
+        队列没被主线程取走前不再打收件箱（未读信会原样再回来）。
         ``on_items`` 拿到的是待送项（没出队）：由它决定怎么送、送完 :meth:`mark_delivered`。重复起线程是 no-op。
         """
         if not self.enabled:
@@ -259,8 +330,11 @@ class KrowBridge:
             return self._poller
         interval = float(interval_s or self.cfg.poll_interval_s)
         self._stop.clear()
+        loop = self.mail_loop
+        if loop is not None:
+            loop.reset_stop()
 
-        def _loop() -> None:
+        def _loop_v1() -> None:
             while not self._stop.wait(interval):
                 try:
                     if self.busy or not is_idle():
@@ -271,12 +345,37 @@ class KrowBridge:
                 except Exception as e:  # noqa: BLE001 — 轮询线程绝不因一次失败退出
                     logger.warning("krow idle poller: %s", e)
 
-        self._poller = threading.Thread(target=_loop, daemon=True, name=name)
+        def _loop_v3() -> None:
+            assert loop is not None
+            while not self._stop.is_set():
+                try:
+                    if self.busy or not is_idle():
+                        self._stop.wait(1.0)
+                        continue
+                    if loop.queued() > 0:
+                        # 主线程还没取走上一批: 不再打收件箱(未读信会原样再回来), 只按间隔看别的源
+                        on_items(self.poll())
+                        self._stop.wait(min(interval, 5.0))
+                        continue
+                    summary = loop.wait_once(wait=min(loop.wait_s, int(interval)), handle=False)
+                    items = self.poll()
+                    if items or summary.get("queued"):
+                        on_items(items)
+                    delay = float(summary.get("delay") or 0.0)
+                    if delay > 0:
+                        self._stop.wait(delay)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("krow idle poller: %s", e)
+                    self._stop.wait(2.0)
+
+        self._poller = threading.Thread(target=_loop_v3 if loop is not None else _loop_v1, daemon=True, name=name)
         self._poller.start()
         return self._poller
 
     def stop(self) -> None:
         self._stop.set()
+        if self.mail_loop is not None:
+            self.mail_loop.stop()
 
 
 # ── 装配 ──────────────────────────────────────────────────────────────────
@@ -293,7 +392,19 @@ def _mcp_call_factory(mcp_manager: Any, preferred: Optional[str]) -> Callable[[s
             raise RuntimeError("krow MCP server not found/ready (set krow.mcp_server or wait for MCP startup)")
         return mcp_manager.call_tool(state["server"], tool, args)
 
+    _call.state = state  # type: ignore[attr-defined] — list_tools 共用解析结果
     return _call
+
+
+def _mcp_tools(mcp_manager: Any, cfg: KrowConfig) -> KrowTools:
+    """装 :class:`KrowTools`：原始调用绑到 McpManager，工具列表按解析出的服务器懒取（没就绪返回空 → 先用 krow_* 候选、失败再换）。"""
+    call = _mcp_call_factory(mcp_manager, cfg.mcp_server)
+
+    def _list() -> List[str]:
+        server = call.state.get("server") or find_krow_server(mcp_manager, cfg.mcp_server)  # type: ignore[attr-defined]
+        return list_server_tools(mcp_manager, server) if server else []
+
+    return KrowTools(call, list_tools=_list, overrides=cfg.tools)
 
 
 def build_bridge(
@@ -335,25 +446,45 @@ def build_bridge(
 
     mcp_cfg = getattr(config, "mcp", None)
     mcp_enabled = bool(isinstance(mcp_cfg, Mapping) and mcp_cfg.get("enabled"))
-    if mcp_manager is not None and (mcp_enabled or getattr(mcp_manager, "servers", None)):
+    tools: Optional[KrowTools] = None
+    mail_loop: Optional[KrowMailLoop] = None
+    if mcp_manager is not None and (mcp_enabled or getattr(mcp_manager, "servers", None) or getattr(mcp_manager, "_bridge_configs", None)):
+        tools = _mcp_tools(mcp_manager, cfg)
+        # 守候循环接管收件箱(长轮询 + 分诊 + 点名闭环); 开着时 MCP 大厅源不再每拍 team_inbox(wait=0), 免得同一封信两头抢
+        use_loop = bool(cfg.mail_loop)
         sources.append(
             McpHallSource(
-                _mcp_call_factory(mcp_manager, cfg.mcp_server),
+                tools.call,  # 逻辑名 = v1 的叫法, 由 KrowTools 映射到服务器上的注册名(krow_* 优先)
                 self_names=cfg.self_names,
                 mode=cfg.mode,
-                inbox=cfg.inbox,
+                inbox=(cfg.inbox and not use_loop),
                 ack=cfg.ack,
                 cursor_get=st.cursor,
                 cursor_set=st.set_cursor,
             )
         )
+        if use_loop and cfg.inbox:
+            mail_loop = KrowMailLoop(
+                tools,
+                st,
+                wait_s=cfg.mail_wait_s,
+                backoff_max_s=cfg.mail_backoff_max_s,
+                context_limit=cfg.mention_context,
+                reply_max_chars=cfg.reply_max_chars,
+                post_retries=cfg.post_retries,
+                owner_reply=cfg.owner_reply,
+                self_names=cfg.self_names,
+            )
 
-    if not sources:
+    if not sources and mail_loop is None:
         logger.warning("krow.enabled=true but no source available (no KW_* env, no krow MCP server); bridge disabled")
         return None
     bridge = KrowBridge(cfg, store=st, sources=sources)
     env_nonce = (env.get("KW_INJECT_NONCE") or "").strip() if hasattr(env, "get") else ""
     if env_nonce:
         bridge.nonce = env_nonce
-    logger.info("krow bridge ready: sources=%s", [getattr(s, "name", "?") for s in sources])
+    bridge.tools = tools
+    if mail_loop is not None:
+        bridge.attach_mail_loop(mail_loop)
+    logger.info("krow bridge ready: sources=%s mail_loop=%s", [getattr(s, "name", "?") for s in sources], mail_loop is not None)
     return bridge
