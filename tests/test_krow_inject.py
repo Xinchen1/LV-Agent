@@ -239,7 +239,7 @@ def test_resolve_rest_env_rules():
 
 def test_rest_source_parses_unified_payload():
     http = FakeHttp({"/agent/v1/inject": (200, json.dumps(UNIFIED_PAYLOAD))})
-    src = RestInjectSource("http://api", "secret-token", binding="job-1", http_get=http)
+    src = RestInjectSource("http://api", "secret-token", binding="job-1", http_get=http, channels="off")
     items = src.fetch()
     kinds = [i.kind for i in items]
     assert kinds == ["owner", "leader", "hall", "hall"]
@@ -261,17 +261,107 @@ def test_rest_source_falls_back_to_legacy_hall_inject_on_404():
     legacy = {"items": [{"id": 7, "display": "主人", "body": "在吗", "mentions_me": True, "reply_to": {"id": 3}}],
               "remaining": 0, "last_read_id": 7}
     http = FakeHttp({"/agent/v1/inject": _http_error(404), "/agent/v1/hall/inject": (200, json.dumps(legacy))})
-    src = RestInjectSource("http://api", "t", http_get=http)
+    src = RestInjectSource("http://api", "t", http_get=http, channels="off")
     items = src.fetch()
     assert len(items) == 1 and items[0].key == "hall:7" and items[0].mentions_me
     assert items[0].text == "#7 主人：@你 在吗（回复 #3）"
     assert http.calls[1][0].endswith("/agent/v1/hall/inject?max=5")
 
 
+class _QueryHttp:
+    """按「路径 + 是否带 channel_id」分流的 http_get 替身(D11 场景要区分缺省调用与频道调用)."""
+
+    def __init__(self, *, channels_json, general_payload, channel_payloads, inject_status=200, channels_status=200):
+        self.channels_json = channels_json
+        self.general_payload = general_payload
+        self.channel_payloads = dict(channel_payloads)  # channel_id -> payload(读一次即清)
+        self.inject_status = inject_status
+        self.channels_status = channels_status
+        self.calls = []
+
+    def __call__(self, url, headers, timeout):
+        self.calls.append(url)
+        path, _, query = url.partition("?")
+        qs = dict(p.split("=", 1) for p in query.split("&") if p)
+        if path.endswith("/agent/v1/hall/channels"):
+            if self.channels_status != 200:
+                raise _http_error(self.channels_status)
+            return 200, json.dumps(self.channels_json)
+        if path.endswith("/agent/v1/inject"):
+            if self.inject_status != 200:
+                raise _http_error(self.inject_status)
+            cid = qs.get("channel_id")
+            if cid:
+                return 200, json.dumps(self.channel_payloads.pop(cid, {"hall": {"text": ""}}))
+            return 200, json.dumps(self.general_payload)
+        raise _http_error(404)
+
+
+def test_rest_source_polls_mentioned_project_channels_with_channel_id():
+    """D11: 外部工作台的点名是 suppressed 行, 缺省调用捎不到; 有 mention_count 的项目频道要各自带 channel_id 再拉一次."""
+    http = _QueryHttp(
+        channels_json={"channels": [
+            {"id": "general", "kind": "general", "mention_count": 0, "unread_count": 3},
+            {"id": CHANNEL, "kind": "project", "mention_count": 1, "unread_count": 4},
+            {"id": "11111111-2222-3333-4444-555555555555", "kind": "project", "mention_count": 0, "unread_count": 9},
+        ]},
+        general_payload={"owner": {"text": ""}, "hall": {"text": ""}},
+        channel_payloads={CHANNEL: {"hall": {"text": "#7510 道哥：@你 lv-agent 在吗，报下版本"}}},
+    )
+    now = [100.0]
+    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0], channel_scan_interval=10)
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:7510"]
+    assert items[0].channel_id == CHANNEL and f"channel_id={CHANNEL}" in items[0].text, "回帖要带 channel_id, 文本里得有"
+    assert any(u.endswith("/agent/v1/hall/channels") for u in http.calls)
+    channel_calls = [u for u in http.calls if "/agent/v1/inject?" in u and "channel_id=" in u]
+    assert len(channel_calls) == 1 and f"channel_id={CHANNEL}" in channel_calls[0], "mentions 模式只拉有 @ 的项目频道, 不拉 general"
+    # 扫描节流: 间隔内再 fetch 只打缺省口子
+    n = len(http.calls)
+    src.fetch()
+    assert http.calls[n:] == ["http://api/agent/v1/inject?max_owner=3&max_hall=5&max_leader=1"]
+    # 过了间隔再扫; all 模式连只有未读的频道也拉
+    now[0] += 11
+    src.mode = "all"
+    src.fetch()
+    assert sum(1 for u in http.calls[n + 1:] if "channel_id=" in u) == 2
+    assert src.last_error == ""
+
+
+def test_rest_source_fixed_channel_list_and_legacy_channel_param():
+    http = FakeHttp({"/agent/v1/inject": _http_error(404),
+                     "/agent/v1/hall/inject": (200, json.dumps({"items": [{"id": 9, "display": "主人", "body": "在", "mentions_me": True}]}))})
+    src = RestInjectSource("http://api", "t", http_get=http, channels=[CHANNEL])
+    items = src.fetch()
+    # 缺省一次 + 频道一次(两次都回落老口子), 频道那次带 channel_id; 同一条 #9 两路都给了也只是两项同键(去重在 store)
+    legacy_urls = [u for u, _h in http.calls if "/agent/v1/hall/inject?" in u]
+    assert len(legacy_urls) == 2 and legacy_urls[1].endswith(f"max=5&channel_id={CHANNEL}")
+    assert not any("/agent/v1/hall/channels" in u for u, _h in http.calls), "固定列表不打 hall/channels"
+    assert items[-1].channel_id == CHANNEL and f"channel_id={CHANNEL}" in items[-1].text
+
+
+def test_rest_source_channels_404_disables_auto_scan_quietly():
+    http = FakeHttp({"/agent/v1/inject": (200, json.dumps({"owner": {"text": "x"}}))})  # 没有 hall/channels 路由 → 404
+    src = RestInjectSource("http://api", "t", http_get=http)
+    items = src.fetch()
+    assert [i.kind for i in items] == ["owner"] and src.channels == "off" and not src.cooling_down()
+    n = len(http.calls)
+    src.fetch()
+    assert len(http.calls) == n + 1, "之后不再尝试 hall/channels"
+
+
+def test_rest_source_409_marks_binding_required_and_cools_down():
+    http = FakeHttp({"/agent/v1/inject": _http_error(409)})
+    src = RestInjectSource("http://api", "t", http_get=http)
+    assert src.fetch() == [] and src.binding_required and src.cooling_down()
+    assert "409" in src.last_error and "mcp_pull" in src.last_error
+    assert src.fetch() == [] and len(http.calls) == 1, "409 也冷却, 不每轮都撞门禁"
+
+
 def test_rest_source_cooldown_on_5xx_and_recovery():
     now = [1000.0]
     http = FakeHttp({"/agent/v1/inject": _http_error(503)})
-    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0])
+    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0], channels="off")
     assert src.fetch() == [] and src.cooling_down() and len(http.calls) == 1
     assert src.fetch() == [] and len(http.calls) == 1, "冷却窗口内不出网"
     now[0] += 31
@@ -464,6 +554,13 @@ def test_build_bridge_from_config_env_and_mcp(tmp_path, monkeypatch):
     assert build_bridge(AgentConfig(krow={"enabled": True, "state_path": str(tmp_path / "t.json"), "rest": "off"}), environ=env) is None
     only_rest = build_bridge(AgentConfig(krow={"enabled": True, "state_path": str(tmp_path / "u.json")}), environ=env)
     assert only_rest is not None and only_rest.status()["sources"] == ["rest"]
+    # D11 频道轮询配置透传到 REST 源: 缺省 auto; 固定列表; off
+    assert only_rest.sources[0].channels == "auto" and only_rest.status()["rest_channels"] == "auto"
+    fixed = build_bridge(AgentConfig(krow={"enabled": True, "state_path": str(tmp_path / "v.json"), "channels": [CHANNEL], "mode": "all",
+                                           "channel_scan_interval_s": 3}), environ=env)
+    assert fixed.sources[0].channels == [CHANNEL] and fixed.sources[0].mode == "all" and fixed.sources[0].channel_scan_interval == 3
+    assert KrowConfig({"channels": "off"}).channels == "off" and KrowConfig({"channels": CHANNEL}).channels == [CHANNEL]
+    assert only_rest.status()["rest_binding_required"] is False
 
 
 def test_agent_config_accepts_krow_section_in_both_layouts(tmp_path):

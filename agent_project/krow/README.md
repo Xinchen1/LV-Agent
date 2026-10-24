@@ -25,6 +25,8 @@ krow:
   poll_interval_s: 20         # 空闲轮询间隔（最小 5）
   idle_wake: true             # REPL 空闲时自动唤醒
   state_path: ~/.lv_agent/krow_state.json
+  channels: auto              # REST 路径的项目/小组频道逐个轮询：auto（按 hall/channels 的 @ 计数挑）| off | [channel_id, ...]
+  channel_scan_interval_s: 10 # 频道扫描节流（工具边界每次都拉缺省口子，频道扫描最多这么频繁）
 ```
 
 取数源按环境自动装配，两条都在就两条都拉、重复由账本去掉：
@@ -33,6 +35,11 @@ krow:
    （`KROW_TASK_SLOT=conversation` 时用 `KW_WORKER_TOKEN_CONVERSATION`；可选 `KROW_JOB_BINDING` → `X-Krow-Job-Binding` 头、
    `KW_INJECT_NONCE` → 口令）。`GET /agent/v1/inject?max_owner=3&max_hall=5&max_leader=1`，老服务端 404 回落 `GET /agent/v1/hall/inject?max=5`。
    连不上 / 超时 / 5xx 进 30 秒冷却。`KW_INJECT_HOOK=0` 整个关掉（与 kit 同名开关）。
+   **外部工作台必须逐频道拉**（D11，按 krowworker main 读码：外部工作台的点名在服务端是 `suppressed(not_wakeable)` 行，缺省 general
+   调用的跨频道捎带只取 `pending` 行，捎不到它们；按 `channel_id` 读时间线的主路径不看唤醒行状态，读到即翻 `injected`）：
+   缺省调用之后，再对每个有 `mention_count` 的项目 / 小组频道各打一次 `…/inject?…&channel_id=<id>`（老口子同样带 `channel_id`）。
+   首次调用 **409** `requires an active job binding` = 这枚席位的 `placement_kind` 不是 `mcp_pull`（门禁只对 mcp_pull 豁免）——
+   `/krow` 状态里 `rest_binding_required: true`，顺手回答了平台侧的 H1。
 2. **MCP**（回退 / 补充）：LV-Agent `mcp.servers` 里已配置的 krow 桥（stdio，服务器名通常是 `krow-platform`）。
    轮询 `hall_channels` → 有 `mention_count` 的频道 `hall_read(unread_only=true)` → 按 `@你` / `@<self_names>` 判点名 → `hall_ack`；
    `team_inbox(unread_only=true, wait=0)` 补站内信（不标已读，读全文是模型自己的决定）。
@@ -76,9 +83,10 @@ python -m agent_project.krow.selfcheck               # 本地假服务端 + 假 
 
 以下无法从研发席位验证，需在**实际运行 lv-agent 的机器与席位**上做（不要把 token 发给任何人）：
 
-1. **`inject` 口子对外部工作台是否放行点名行**：外部工作台的点名在服务端是 `suppressed(not_wakeable)` 行，
-   `GET /agent/v1/inject` 是否会把它们吐出来未经证实。验证法：启用 `krow.rest`（或直接 `curl -H "Authorization: Bearer $KW_WORKER_TOKEN" "$KW_API_ENDPOINT/agent/v1/inject?max_owner=3&max_hall=5&max_leader=1"`），
-   让人 @ 一次，看 `hall.text` 有没有那条。**不放行也没关系**：MCP 轮询路径按 `mention_count` / `hall_read` 捞得到，`/krow poll` 能看见即通。
+1. **`inject` 口子对外部工作台的点名行**：按读码结论，**带 `channel_id` 才放行**，缺省调用捞不到（本包已按此实现）。验证法：启用 `krow.rest`，
+   让人在项目频道 @ 一次，`/krow poll` 看是否出现；或直接
+   `curl -H "Authorization: Bearer $KW_WORKER_TOKEN" "$KW_API_ENDPOINT/agent/v1/inject?max_hall=5&channel_id=<项目频道 id>"` 看 `hall.text`。
+   回 **409** 就是席位不是 `mcp_pull`（H1 的答案，请回报平台）。**REST 不通也没关系**：MCP 轮询路径按 `mention_count` / `hall_read` 捞得到。
 2. **进程里有没有 `KW_API_ENDPOINT` / `KW_WORKER_TOKEN`**：没有则只走 MCP 路径（功能完整，只是不经服务端读即消费）。
 3. **自己的显示名**：`self_names` 填成员表里的名字（当前含空格的 `lv-agent 2` 会被 `@lv-agent` 前缀命中——这是平台 PR #1240 要修的同一形态；
    PR #1240 上线前建议改名或在 `self_names` 里精确填 `lv-agent#默认小组`）。

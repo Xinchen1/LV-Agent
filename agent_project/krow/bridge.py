@@ -70,6 +70,15 @@ class KrowConfig:
         self.max_hall_per_step = max(1, min(10, int(d.get("max_hall_per_step", 5) or 5)))
         self.max_owner_per_step = max(1, min(3, int(d.get("max_owner_per_step", 3) or 3)))
         self.ack = bool(d.get("ack", True))
+        # REST 路径的项目 / 小组频道逐个轮询(D11): "auto"(按 hall/channels 计数挑) | "off" | [channel_id, ...]
+        ch = d.get("channels", "auto")
+        if isinstance(ch, (list, tuple)):
+            self.channels: Any = [str(c).strip() for c in ch if str(c).strip()] or "off"
+        else:
+            self.channels = str(ch or "auto").strip().lower() or "auto"
+            if self.channels not in ("auto", "off"):
+                self.channels = [str(ch).strip()]
+        self.channel_scan_interval_s = max(0.0, float(d.get("channel_scan_interval_s", 10) or 0))
 
 
 def find_krow_server(mcp_manager: Any, preferred: Optional[str] = None) -> Optional[str]:
@@ -142,6 +151,9 @@ class KrowBridge:
             "sources": [getattr(s, "name", type(s).__name__) for s in self.sources],
             "source_errors": {getattr(s, "name", type(s).__name__): getattr(s, "last_error", "") for s in self.sources},
             "source_calls": {getattr(s, "name", type(s).__name__): getattr(s, "calls", 0) for s in self.sources},
+            # REST 路径: 频道轮询策略与 409 门禁信号(H1: 席位 placement_kind 是否 mcp_pull)
+            "rest_channels": next((getattr(s, "channels", None) for s in self.sources if getattr(s, "name", "") == "rest"), None),
+            "rest_binding_required": any(getattr(s, "binding_required", False) for s in self.sources),
             "polls": self.polls,
             "delivered": self.delivered,
             "last_poll_at": self.last_poll_at,
@@ -296,6 +308,9 @@ def build_bridge(
                     binding=rest_env["binding"],
                     max_owner=cfg.max_owner_per_step,
                     max_hall=cfg.max_hall_per_step,
+                    channels=cfg.channels,
+                    mode=cfg.mode,
+                    channel_scan_interval=cfg.channel_scan_interval_s,
                 )
             )
         elif cfg.rest == "on":

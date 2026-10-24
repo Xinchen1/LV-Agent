@@ -10,6 +10,14 @@ Bearer = ``KW_WORKER_TOKEN``（``KROW_TASK_SLOT=conversation`` 时用 ``KW_WORKE
 连不上 / 超时 / 5xx 进 30 秒冷却，窗口内不出网（滚动发布时只付一刀 3 秒）。
 **只读环境变量名、不打印值**；token 不进日志、不进异常文本。
 
+外部工作台特有的一步（D11，李靖按 krowworker main 读码的结论，服务端行为以 captain 实测为准）：
+外部工作台的点名在服务端是 ``suppressed(not_wakeable)`` 行；缺省 general 的那次调用只会把**别的频道的 pending 行**捎带进来
+（``PENDING_SUMMONS_ELSEWHERE_SQL``），suppressed 行捎不到；但按 ``channel_id`` 读时间线的主路径（``INJECT_WHERE``）
+不看唤醒行状态，读到即把行翻成 injected。所以这里在缺省调用之后，再对每个有 ``mention_count``（``all`` 模式下有未读）的
+项目 / 小组频道各打一次 ``…/inject?…&channel_id=<id>``（老口子同样带 ``channel_id``）；频道列表来自
+``GET /agent/v1/hall/channels``，扫描按 :data:`CHANNEL_SCAN_SECS` 节流。首次调用 409（``requires an active job binding``）
+= 这枚席位的 ``placement_kind`` 不是 ``mcp_pull``（平台侧 H1 的答案），记入 ``last_error`` 并冷却。
+
 **McpHallSource** —— 只依赖一个 ``call_tool(tool_name, arguments) -> str`` 回调（由 bridge 绑到 LV-Agent 已配置的
 krow MCP 服务器上），轮询 ``hall_channels`` → 有 ``mention_count``（或 ``unread_count``）的频道 → ``hall_read(unread_only)``
 → 解析每行 ``#<id> [<显示名>] <MM-DD HH:MM> <正文>`` → 按 ``@你`` / ``@<我的名字>`` 判点名 → 落账后 ``hall_ack``；
@@ -51,11 +59,14 @@ __all__ = [
 
 INJECT_PATH = "/agent/v1/inject"
 HALL_INJECT_PATH = "/agent/v1/hall/inject"
+HALL_CHANNELS_PATH = "/agent/v1/hall/channels"
 MAX_OWNER_PER_STEP = 3
 MAX_HALL_PER_STEP = 5
 MAX_LEADER_PER_STEP = 1
 TIMEOUT_SECS = 3.0
 COOLDOWN_SECS = 30.0
+#: 项目 / 小组频道逐个轮询的最小间隔(秒): 工具边界每次都拉, 但频道扫描最多这么频繁.
+CHANNEL_SCAN_SECS = 10.0
 JOB_BINDING_HEADER = "X-Krow-Job-Binding"
 
 #: ``(url, headers, timeout) -> (status_code, body_text)``；非 2xx 直接抛 ``urllib.error.HTTPError``。
@@ -264,6 +275,9 @@ class RestInjectSource:
         max_leader: int = MAX_LEADER_PER_STEP,
         http_get: Optional[HttpGet] = None,
         clock: Callable[[], float] = time.time,
+        channels: Any = "auto",
+        mode: str = "mentions",
+        channel_scan_interval: float = CHANNEL_SCAN_SECS,
     ) -> None:
         self.api = api.rstrip("/")
         self._token = token
@@ -278,6 +292,21 @@ class RestInjectSource:
         self._down_until = 0.0
         self.last_error: str = ""
         self.calls = 0
+        # 项目 / 小组频道逐个轮询(D11): "auto" = GET /agent/v1/hall/channels 列出、按 mention_count / unread_count 挑;
+        # 列表 = 固定这些 channel_id; "off"/空 = 只打缺省 general(外部工作台的点名会漏, 不建议).
+        if isinstance(channels, str):
+            self.channels: Any = channels.strip().lower() or "off"
+            if self.channels not in ("auto", "off"):
+                self.channels = [channels.strip()]
+        elif channels:
+            self.channels = [str(c).strip() for c in channels if str(c).strip()] or "off"
+        else:
+            self.channels = "off"
+        self.mode = mode if mode in ("mentions", "all") else "mentions"
+        self.channel_scan_interval = max(0.0, float(channel_scan_interval))
+        self._next_channel_scan = 0.0
+        self.last_channels: List[Dict[str, Any]] = []
+        self.binding_required = False
 
     # 不要把 token 带进 repr / 日志。
     def __repr__(self) -> str:  # pragma: no cover - 可读性
@@ -287,13 +316,84 @@ class RestInjectSource:
         return self._clock() < self._down_until
 
     def _get(self, path: str, params: Dict[str, str]) -> Dict[str, Any]:
-        url = f"{self.api}{path}?{urllib.parse.urlencode(params)}"
+        url = f"{self.api}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if self.binding:
             headers[JOB_BINDING_HEADER] = self.binding
         self.calls += 1
         _status, body = self._http_get(url, headers, self.timeout)
         return _json_or_empty(body)
+
+    def _record_failure(self, e: BaseException) -> None:
+        code = getattr(e, "code", "") or ""
+        self.last_error = f"{type(e).__name__}: {code}".strip(": ")
+        if code == 409:
+            # 服务端门禁 require_job_binding: 只对 placement_kind=mcp_pull 豁免. 空闲轮询没有 job binding
+            # 却被 409, 说明这枚席位不是 mcp_pull(平台侧 H1 的答案); 冷却, 别每轮都撞.
+            self.binding_required = True
+            self.last_error += " (requires job binding → 席位 placement_kind 可能不是 mcp_pull; 请 captain 核 H1)"
+            self._down_until = self._clock() + self.cooldown
+        elif _is_server_down(e):
+            self._down_until = self._clock() + self.cooldown
+        logger.warning("krow rest inject failed (%s); %s", self.last_error, "cooling down" if self.cooling_down() else "no cooldown")
+
+    def _inject_once(self, params: Dict[str, str], *, hall: bool, channel_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """一次统一口子调用; 404 回落老口子(只有大厅段). 返回 None 表示老口子已直接给出 items(放在 ``{"_legacy": items}``)."""
+        if channel_id:
+            params = dict(params, channel_id=channel_id)
+        try:
+            return self._get(INJECT_PATH, params)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            if not hall:
+                return {}
+            legacy_params = {"max": str(self.max_hall)}
+            if channel_id:
+                legacy_params["channel_id"] = channel_id
+            legacy = self._get(HALL_INJECT_PATH, legacy_params)
+            return {"_legacy": _legacy_hall_items(legacy)}
+
+    def _channel_ids_to_poll(self) -> List[str]:
+        """要逐个轮询的频道(不含 general): 固定列表照给; auto 则按 ``hall/channels`` 的计数挑."""
+        if isinstance(self.channels, list):
+            return list(self.channels)
+        if self.channels != "auto":
+            return []
+        try:
+            data = self._get(HALL_CHANNELS_PATH, {})
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            # 老服务端没有 hall/channels: 自动扫描无从谈起, 关掉(要轮询项目频道就用 krow.channels 固定列表), 只提醒一次
+            self.channels = "off"
+            self.last_error = "hall/channels 404: 服务端不支持频道列表, 项目频道轮询需在 krow.channels 固定填 channel_id"
+            logger.warning("krow rest: %s", self.last_error)
+            return []
+        rows = data.get("channels") if isinstance(data, dict) else None
+        self.last_channels = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        out: List[str] = []
+        for ch in self.last_channels:
+            cid = str(ch.get("id") or "").strip()
+            kind = str(ch.get("kind") or "").strip().lower()
+            if not cid or kind == "general":
+                continue
+            mentions = int(ch.get("mention_count") or 0)
+            unread = int(ch.get("unread_count") or 0)
+            if mentions > 0 or (self.mode == "all" and unread > 0):
+                out.append(cid)
+        return out
+
+    @staticmethod
+    def _tag_channel(items: List[InjectItem], channel_id: str) -> List[InjectItem]:
+        for it in items:
+            if it.kind != "hall":
+                continue
+            if it.channel_id is None:
+                it.channel_id = channel_id
+            if f"channel_id={channel_id}" not in it.text:
+                it.text += f"（频道 channel_id={channel_id}）"
+        return items
 
     def fetch(self, *, hall: bool = True, leader: bool = True, owner: bool = True) -> List[InjectItem]:
         if self.cooling_down():
@@ -303,25 +403,30 @@ class RestInjectSource:
             params["max_leader"] = str(self.max_leader)
         if not hall:
             params["hall"] = "0"
+        out: List[InjectItem] = []
         try:
-            try:
-                data = self._get(INJECT_PATH, params)
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
-                if not hall:
-                    return []
-                legacy = self._get(HALL_INJECT_PATH, {"max": str(self.max_hall)})
-                self.last_error = ""
-                return _legacy_hall_items(legacy)
-        except Exception as e:  # noqa: BLE001 — 分类后冷却；调用方 fail-open
-            self.last_error = f"{type(e).__name__}: {getattr(e, 'code', '') or ''}".strip(": ")
-            if _is_server_down(e):
-                self._down_until = self._clock() + self.cooldown
-            logger.warning("krow rest inject failed (%s); %s", self.last_error, "cooling down" if self.cooling_down() else "no cooldown")
-            return []
+            data = self._inject_once(params, hall=hall, channel_id=None)
+            if isinstance(data, dict) and "_legacy" in data:
+                out.extend(data["_legacy"])
+            elif isinstance(data, dict):
+                out.extend(self._parse_unified(data, want_owner=owner, want_leader=leader, want_hall=hall))
+            # D11: 外部工作台的点名在服务端是 suppressed(not_wakeable) 行, 缺省 general 的跨频道捎带只取 pending 行,
+            # 项目 / 小组频道必须各自带 channel_id 轮询才取得到(李靖按 main 读 hall/store.rs INJECT_WHERE 的结论,
+            # 服务端行为仍以 captain 实测为准). 频道扫描有节流, 工具边界的高频拉取不会每次都多打 N 个请求.
+            if hall and self.channels != "off" and self._clock() >= self._next_channel_scan:
+                self._next_channel_scan = self._clock() + self.channel_scan_interval
+                for cid in self._channel_ids_to_poll():
+                    cdata = self._inject_once(params, hall=True, channel_id=cid)
+                    if isinstance(cdata, dict) and "_legacy" in cdata:
+                        out.extend(self._tag_channel(cdata["_legacy"], cid))
+                    elif isinstance(cdata, dict):
+                        got = self._parse_unified(cdata, want_owner=owner, want_leader=leader, want_hall=True)
+                        out.extend(self._tag_channel(got, cid))
+        except Exception as e:  # noqa: BLE001 — 分类后冷却；调用方 fail-open(已拿到的照样交出去)
+            self._record_failure(e)
+            return out
         self.last_error = ""
-        return self._parse_unified(data, want_owner=owner, want_leader=leader, want_hall=hall)
+        return out
 
     @staticmethod
     def _parse_unified(data: Mapping[str, Any], *, want_owner: bool, want_leader: bool, want_hall: bool) -> List[InjectItem]:
