@@ -25,8 +25,9 @@ krow:
   poll_interval_s: 20         # 空闲轮询间隔（最小 5）
   idle_wake: true             # REPL 空闲时自动唤醒
   state_path: ~/.lv_agent/krow_state.json
-  channels: auto              # REST 路径的项目/小组频道逐个轮询：auto（按 hall/channels 的 @ 计数挑）| off | [channel_id, ...]
+  channels: auto              # REST 路径的项目/小组频道逐个轮询：auto（按 hall/channels 的 @ 计数挑）| off | [channel_id, ...]（必须是 UUID，非法项忽略）
   channel_scan_interval_s: 10 # 频道扫描节流（工具边界每次都拉缺省口子，频道扫描最多这么频繁）
+  bad_channel_backoff_s: 300  # 显式 channel_id 回 400/404 后该频道隔离多久再试一次；其余频道不受影响（v2）
 ```
 
 取数源按环境自动装配，两条都在就两条都拉、重复由账本去掉：
@@ -38,8 +39,19 @@ krow:
    **外部工作台必须逐频道拉**（D11，按 krowworker main 读码：外部工作台的点名在服务端是 `suppressed(not_wakeable)` 行，缺省 general
    调用的跨频道捎带只取 `pending` 行，捎不到它们；按 `channel_id` 读时间线的主路径不看唤醒行状态，读到即翻 `injected`）：
    缺省调用之后，再对每个有 `mention_count` 的项目 / 小组频道各打一次 `…/inject?…&channel_id=<id>`（老口子同样带 `channel_id`）。
-   首次调用 **409** `requires an active job binding` = 这枚席位的 `placement_kind` 不是 `mcp_pull`（门禁只对 mcp_pull 豁免）——
-   `/krow` 状态里 `rest_binding_required: true`，顺手回答了平台侧的 H1。
+   服务端两口子都按 serde `Uuid` 解析 `channel_id`、同一道 `resolve_channel_access` 闸：id 不是 UUID → 400；频道不存在或对本读者不可见 → 404
+   「频道不存在或不可见」，**不回落 general**（李靖按 krowworker main 读到 handler 层；仅运行时令牌形态未实测）。
+   **坏频道隔离（v2）**：显式 `channel_id` 调用的 400 / 403 / 404 / 410 只隔离**该频道**——记进 `/krow` 的 `rest_bad_channels`、
+   `bad_channel_backoff_s` 内不再打、到期重试一次、首次隔离记一条日志；循环**继续**轮询后面的频道，`last_error` 不受影响。
+   401 / 409 / 429 / 5xx / 连不上才是**源级**错误：记错 / 冷却、本轮停扫，已拿到的项照样交出去（fail-open）。
+   老口子回落**只由缺省调用判定**（每轮一次，本轮频道调用沿用、不逐频道再探）：显式频道的 404 **不是**旧服务端信号，永远不触发回落。
+   `channels` 固定列表入口按 UUID 校验：非法项（频道名、`general`…）进 `rest_invalid_channels`、不发请求，其余有效频道照常轮询。
+   风险口径：`auto` 模式下 `hall/channels` 列出的频道**通常可达、显式 404 的触发概率低**（不是绝对不受影响：合作方可见性 / floor 对不上时会 404）；
+   固定列表填错**必触发**。v1 里一个坏频道会让排在它后面的频道整轮饿着，v2 已隔离。
+   **409** `requires an active job binding`：只记「**已见 409**」并冷却 30s（`hall/channels` 同一道闸，冷却一并罩住）。按 `worker_token.rs` 的门禁条件
+   （执行态 && `placement_kind != mcp_pull` && 无 job binding），**有 409 ⇒ 这枚令牌不是 `mcp_pull`** 成立；但 **未见 409 ⇏ `mcp_pull`**
+   （conversation 作用域令牌同样放行）。`/krow` 状态里 `rest_409_seen` 只表示已见 / 未见，`rest_409_note` 写明这是单向推断——
+   **不据此断言平台侧 H1 已回答**，`placement_kind` 的枚举值仍要 captain 另给。
 2. **MCP**（回退 / 补充）：LV-Agent `mcp.servers` 里已配置的 krow 桥（stdio，服务器名通常是 `krow-platform`）。
    轮询 `hall_channels` → 有 `mention_count` 的频道 `hall_read(unread_only=true)` → 按 `@你` / `@<self_names>` 判点名 → `hall_ack`；
    `team_inbox(unread_only=true, wait=0)` 补站内信（不标已读，读全文是模型自己的决定）。
@@ -49,7 +61,8 @@ krow:
 ## 运行方式
 
 - **交互式**：照常 `lv`。启用后提示符下会打印 `krow: idle poll every 20s · /krow for status`。用户没在打字时轮询到点名 → 自动跑一回合
-  （模型用 `hall_post(channel_id, reply_to_id, body)` 回帖）→ 回到提示符。命令：`/krow`（状态 JSON）、`/krow poll`（看待送项，不记已送达）、`/krow wake`（立刻处理）。
+  （模型用 `hall_post(channel_id, reply_to_id, body)` 回帖）→ 回到提示符。命令：`/krow`（状态 JSON：含 `rest_409_seen` / `rest_409_note`、
+  `rest_bad_channels`、`rest_invalid_channels`、`rest_legacy_mode`，JSON 后另起一行用人话复述 409 语义与被隔离的频道）、`/krow poll`（看待送项，不记已送达）、`/krow wake`（立刻处理）。
 - **常驻**：`python super_agent.py --krow-daemon`（或 `lv --krow-daemon`）。不进 REPL：轮询 → 被点名就跑一回合 → 继续轮询；Ctrl+C 退出。
   这是「外部工作台把『上线』做成常态」的推荐形态。
 - **执行中**：无需操作。任何 `ExecutionEngine` 回合里，每次工具调用结束都会拉一次；模型看到的是带抬头与口令的段落：
@@ -75,9 +88,12 @@ krow:
 ## 自检
 
 ```bash
-python -m pytest tests/test_krow_inject.py -q        # 31 个离线回归
-python -m agent_project.krow.selfcheck               # 本地假服务端 + 假 MCP 桥，20 项端到端检查，exit 0 = 全过
+python -m pytest tests/test_krow_inject.py -q        # 45 个离线回归（v2 新增 10 个：坏频道隔离 / 旧接口判定 / UUID 校验 / 409 语义 / MCP 兜底）
+python -m agent_project.krow.selfcheck               # 本地假服务端 + 假 MCP 桥，35 项端到端检查（v2 新增 9 项），exit 0 = 全过
 ```
+
+v2 自检里最要紧的一项是 `rest.v2.bad_channel_first_still_polls_next`：固定列表 `[非 UUID 名字, 不存在的频道, 有效频道]`，坏的排在前面，
+有效频道仍被轮询并取到点名；请求序列是「缺省 → 坏频道（404）→ 有效频道」，没有多打老口子。
 
 ## 接入方（captain）需要自己验证的事
 
@@ -86,7 +102,9 @@ python -m agent_project.krow.selfcheck               # 本地假服务端 + 假 
 1. **`inject` 口子对外部工作台的点名行**：按读码结论，**带 `channel_id` 才放行**，缺省调用捞不到（本包已按此实现）。验证法：启用 `krow.rest`，
    让人在项目频道 @ 一次，`/krow poll` 看是否出现；或直接
    `curl -H "Authorization: Bearer $KW_WORKER_TOKEN" "$KW_API_ENDPOINT/agent/v1/inject?max_hall=5&channel_id=<项目频道 id>"` 看 `hall.text`。
-   回 **409** 就是席位不是 `mcp_pull`（H1 的答案，请回报平台）。**REST 不通也没关系**：MCP 轮询路径按 `mention_count` / `hall_read` 捞得到。
+   回 **409** ⇒ 这枚令牌不是 `mcp_pull`（单向：**不回 409 不能反推**是 `mcp_pull`）；H1 要的 `placement_kind` 枚举值请直接从席位信息回报平台，
+   不要用「没见 409」代替。回 **404** 是该频道对这枚令牌不可见（不是旧服务端）：核对 `channel_id` 与成员 / 合作方关系。
+   **REST 不通也没关系**：MCP 轮询路径按 `mention_count` / `hall_read` 捞得到。
 2. **进程里有没有 `KW_API_ENDPOINT` / `KW_WORKER_TOKEN`**：没有则只走 MCP 路径（功能完整，只是不经服务端读即消费）。
 3. **自己的显示名**：`self_names` 填成员表里的名字（当前含空格的 `lv-agent 2` 会被 `@lv-agent` 前缀命中——这是平台 PR #1240 要修的同一形态；
    PR #1240 上线前建议改名或在 `self_names` 里精确填 `lv-agent#默认小组`）。
@@ -99,10 +117,19 @@ python -m agent_project.krow.selfcheck               # 本地假服务端 + 假 
 | --- | --- |
 | `items.py` | `InjectItem`、去重键、抬头 / 口令 / 契约文案、`render_items` |
 | `state.py` | `DedupStore`：seen / pending / cursors，原子落盘 |
-| `sources.py` | `RestInjectSource`（统一口子 + 404 回落 + 冷却）、`McpHallSource`（hall_channels / hall_read / hall_ack / team_inbox）、解析器 |
+| `sources.py` | `RestInjectSource`（统一口子 + 缺省调用判定的老口子回落 + 冷却 + 逐频道轮询 + 坏频道隔离 + 固定列表 UUID 校验 + 409「已见 / 未见」）、`McpHallSource`（hall_channels / hall_read / hall_ack / team_inbox）、解析器 |
 | `bridge.py` | `KrowBridge`：poll / mark_delivered / interjection_text / owner_only_text / start_idle_poller；`build_bridge` 装配 |
 | `wake.py` | `build_wake_task`、`KrowDaemon` |
 | `selfcheck.py` | 离线端到端自检 |
 
 接线改动（仓库其它文件）：`execution_engine.py`（`interjection_provider`、工具边界拉取、轮尾续跑、契约块）、`agent.py`（装配 bridge、传给两处引擎）、
 `reasoning.py`（透传参数）、`config.py`（`krow` 段）、`super_agent.py`（`--krow-daemon`、`/krow`、空闲唤醒哨兵、忙标志）。
+
+## 版本说明
+
+- **v1**（`d8b2b55` 主体 + `d67a0bd` D11 逐频道拉取）：原生注入 / 空闲轮询 / 防重复消费 / 按 `channel_id` 逐频道拉取。
+- **v2**（本次）：只修 REST 逐频道轮询的三处缺陷，不重做 v1——① 显式 `channel_id` 的 404 / 400 等频道级错误只隔离该频道、循环继续
+  （v1 会把 404 当旧服务端再打一次老口子，第二次 404 穿出循环，排在后面的频道整轮饿着、`/krow` 每轮显示 404）；② 老口子回落只由缺省调用判定，
+  显式频道 404 不触发回落；③ `channels` 固定列表入口校验 UUID，非法项不中断其余频道。另：`/krow` 状态 `rest_binding_required` 改为
+  `rest_409_seen` + `rest_409_note`（409 只表示已见 / 未见，不据此断言 H1 已回答）；新增 `rest_bad_channels` / `rest_invalid_channels` / `rest_legacy_mode`；
+  配置新增 `bad_channel_backoff_s`。fail-open 与 MCP 兜底不变。

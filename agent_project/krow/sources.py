@@ -15,8 +15,25 @@ Bearer = ``KW_WORKER_TOKEN``（``KROW_TASK_SLOT=conversation`` 时用 ``KW_WORKE
 （``PENDING_SUMMONS_ELSEWHERE_SQL``），suppressed 行捎不到；但按 ``channel_id`` 读时间线的主路径（``INJECT_WHERE``）
 不看唤醒行状态，读到即把行翻成 injected。所以这里在缺省调用之后，再对每个有 ``mention_count``（``all`` 模式下有未读）的
 项目 / 小组频道各打一次 ``…/inject?…&channel_id=<id>``（老口子同样带 ``channel_id``）；频道列表来自
-``GET /agent/v1/hall/channels``，扫描按 :data:`CHANNEL_SCAN_SECS` 节流。首次调用 409（``requires an active job binding``）
-= 这枚席位的 ``placement_kind`` 不是 ``mcp_pull``（平台侧 H1 的答案），记入 ``last_error`` 并冷却。
+``GET /agent/v1/hall/channels``，扫描按 :data:`CHANNEL_SCAN_SECS` 节流。
+
+坏频道隔离（v2；李靖按 main ``hall/inject.rs:460-473`` / ``hall/agent_api.rs:109-135`` 读码：显式 ``channel_id`` 走窄口径，
+频道不存在 / 读者不是成员 → **404**「频道不存在或不可见」、不回落 general；``channel_id`` 按 serde ``Uuid`` 反序列化，
+非 UUID → **400**）：
+
+* 显式 ``channel_id`` 调用的 400 / 403 / 404 / 410 等**频道级**错误只隔离该频道（记进 :attr:`RestInjectSource.bad_channels`、
+  :data:`BAD_CHANNEL_BACKOFF_SECS` 内不再打、到期重试一次、首次隔离记一条日志），循环**继续**轮询后面的频道；
+  ``last_error`` 不被坏频道污染。401 / 409 / 429 / 5xx / 连不上 是**源级**错误：按原规则记错 / 冷却，本轮停止扫描，
+  已拿到的项照样交出去（fail-open）。
+* 旧接口（``/agent/v1/hall/inject``）兼容回落**只由缺省调用判定、每轮一次**：缺省调用统一口子 404 → ``legacy_mode=True``，本轮后续
+  频道调用直接走老口子（不逐频道再探）；显式频道调用的 404 **不是**旧服务端信号，永远不触发回落。判定不跨轮粘住：下一轮缺省调用
+  重新探统一口子（一次瞬时 404 不会让只在统一口子上才有的主人插话 / 任务单段丢 N 分钟）。
+* ``krow.channels`` 固定列表入口按 UUID 校验：非法项记进 :attr:`RestInjectSource.invalid_channels`、不发请求，其余有效频道照常轮询。
+
+409（``requires an active job binding``）：只记「**已见 409**」（:attr:`RestInjectSource.saw_409`）并冷却。按 ``worker_token.rs:486-496``
+门禁只在「执行态 && placement_kind != mcp_pull && 无 job binding」时 409，所以 **有 409 ⇒ 不是 mcp_pull** 成立（单向）；
+**未见 409 ⇏ mcp_pull**（conversation 作用域令牌同样放行）。这里不据此断言平台侧 H1 已回答，``placement_kind`` 的枚举值仍要
+captain 另给（:data:`NOTE_409_SEEN` / :data:`NOTE_409_NOT_SEEN` 是 ``/krow`` 状态里的原话）。
 
 **McpHallSource** —— 只依赖一个 ``call_tool(tool_name, arguments) -> str`` 回调（由 bridge 绑到 LV-Agent 已配置的
 krow MCP 服务器上），轮询 ``hall_channels`` → 有 ``mention_count``（或 ``unread_count``）的频道 → ``hall_read(unread_only)``
@@ -35,6 +52,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .items import (
@@ -51,7 +69,10 @@ logger = logging.getLogger("krow.sources")
 __all__ = [
     "HttpGet",
     "McpHallSource",
+    "NOTE_409_NOT_SEEN",
+    "NOTE_409_SEEN",
     "RestInjectSource",
+    "canonical_channel_id",
     "parse_hall_read",
     "parse_inject_hall_text",
     "resolve_rest_env",
@@ -67,7 +88,22 @@ TIMEOUT_SECS = 3.0
 COOLDOWN_SECS = 30.0
 #: 项目 / 小组频道逐个轮询的最小间隔(秒): 工具边界每次都拉, 但频道扫描最多这么频繁.
 CHANNEL_SCAN_SECS = 10.0
+#: 显式 channel_id 回 400/404 等频道级错误后, 该频道隔离多久再试一次(秒). 其余频道不受影响.
+BAD_CHANNEL_BACKOFF_SECS = 300.0
 JOB_BINDING_HEADER = "X-Krow-Job-Binding"
+
+#: 显式 channel_id 调用上, 这些状态码是"这个频道有问题"(不存在 / 不可见 / id 不是 UUID / 已删), 只隔离该频道.
+#: 401(令牌) / 409(门禁) / 429(限流) / 5xx(服务端) 不在其中: 它们是整条 REST 源的问题, 按源级规则记错 / 冷却.
+CHANNEL_SCOPED_HTTP_CODES = frozenset({400, 403, 404, 410, 422})
+
+#: ``/krow`` 状态里 409 语义的原话: 409 只说明"已见 / 未见", 推断是单向的, 不替平台侧 H1 作答.
+NOTE_409_SEEN = (
+    "已见 409（requires an active job binding）：无 job binding 的执行态请求被门禁拦下 ⇒ 这枚令牌不是 mcp_pull（单向推断成立）；"
+    "H1 的 placement_kind 枚举值仍需 captain 另给，本状态不替它作答"
+)
+NOTE_409_NOT_SEEN = (
+    "未见 409：不等于 mcp_pull 已确认（conversation 作用域令牌同样放行，也可能尚未发过请求）；H1 未由此回答"
+)
 
 #: ``(url, headers, timeout) -> (status_code, body_text)``；非 2xx 直接抛 ``urllib.error.HTTPError``。
 HttpGet = Callable[[str, Mapping[str, str], float], Tuple[int, str]]
@@ -115,6 +151,26 @@ def _is_server_down(exc: BaseException) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code >= 500
     return isinstance(exc, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError))
+
+
+def canonical_channel_id(raw: Any) -> Optional[str]:
+    """``krow.channels`` 固定列表里的一项 → 规范的带连字符小写 UUID；不是 UUID（频道名、空串、``general``…）返回 None。
+
+    服务端两口子的 ``channel_id`` 都按 serde ``Uuid`` 反序列化（李靖核 ``handlers/inject.rs:132-149`` / ``hall/inject.rs:106-112``）：
+    传名字会 400。这里在入口就挡掉，非法项不发请求、不中断其余有效频道。
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        return str(uuid.UUID(s))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _is_channel_scoped_error(exc: BaseException) -> bool:
+    """显式 ``channel_id`` 调用抛出的错误是不是"只这个频道有问题"(见 :data:`CHANNEL_SCOPED_HTTP_CODES`)。"""
+    return isinstance(exc, urllib.error.HTTPError) and int(getattr(exc, "code", 0) or 0) in CHANNEL_SCOPED_HTTP_CODES
 
 
 # ── 解析 ──────────────────────────────────────────────────────────────────
@@ -278,6 +334,7 @@ class RestInjectSource:
         channels: Any = "auto",
         mode: str = "mentions",
         channel_scan_interval: float = CHANNEL_SCAN_SECS,
+        bad_channel_backoff: float = BAD_CHANNEL_BACKOFF_SECS,
     ) -> None:
         self.api = api.rstrip("/")
         self._token = token
@@ -293,27 +350,80 @@ class RestInjectSource:
         self.last_error: str = ""
         self.calls = 0
         # 项目 / 小组频道逐个轮询(D11): "auto" = GET /agent/v1/hall/channels 列出、按 mention_count / unread_count 挑;
-        # 列表 = 固定这些 channel_id; "off"/空 = 只打缺省 general(外部工作台的点名会漏, 不建议).
+        # 列表 = 固定这些 channel_id(入口按 UUID 校验, 非法项进 invalid_channels、不发请求, 其余有效频道照常);
+        # "off"/空 = 只打缺省 general(外部工作台的点名会漏, 不建议).
+        self.invalid_channels: List[str] = []
         if isinstance(channels, str):
-            self.channels: Any = channels.strip().lower() or "off"
-            if self.channels not in ("auto", "off"):
-                self.channels = [channels.strip()]
+            mode_word = channels.strip().lower()
+            if mode_word in ("auto", "off", ""):
+                self.channels: Any = mode_word or "off"
+            else:
+                self.channels = self._validate_channel_list([channels])
         elif channels:
-            self.channels = [str(c).strip() for c in channels if str(c).strip()] or "off"
+            self.channels = self._validate_channel_list(list(channels))
         else:
             self.channels = "off"
         self.mode = mode if mode in ("mentions", "all") else "mentions"
         self.channel_scan_interval = max(0.0, float(channel_scan_interval))
         self._next_channel_scan = 0.0
         self.last_channels: List[Dict[str, Any]] = []
-        self.binding_required = False
+        # 坏频道隔离(v2): channel_id -> {"code", "count", "first_at", "last_at", "retry_at"}; 到 retry_at 之前不再打这个频道.
+        self.bad_channel_backoff = max(0.0, float(bad_channel_backoff))
+        self.bad_channels: Dict[str, Dict[str, Any]] = {}
+        # 旧接口回落只由缺省调用判定(每轮一次, 频道调用沿用): None = 还没判定过; True = 最近一轮统一口子 404; False = 统一口子在.
+        self.legacy_mode: Optional[bool] = None
+        # 409 门禁: 只记"已见"; 推断单向(有 409 ⇒ 非 mcp_pull; 无 409 ⇏ mcp_pull), 不替 H1 作答.
+        self.saw_409 = False
+        self.last_409_at: float = 0.0
 
     # 不要把 token 带进 repr / 日志。
     def __repr__(self) -> str:  # pragma: no cover - 可读性
         return f"RestInjectSource(api={self.api!r})"
 
+    @property
+    def binding_required(self) -> bool:
+        """v1 字段名的别名：语义收窄为「已见 409」。不要据此说「席位是 / 不是 mcp_pull 已确认」。"""
+        return self.saw_409
+
+    @property
+    def note_409(self) -> str:
+        return NOTE_409_SEEN if self.saw_409 else NOTE_409_NOT_SEEN
+
+    def _validate_channel_list(self, raw: List[Any]) -> Any:
+        good: List[str] = []
+        for item in raw:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            cid = canonical_channel_id(text)
+            if cid is None:
+                if text not in self.invalid_channels:
+                    self.invalid_channels.append(text)
+            elif cid not in good:
+                good.append(cid)
+        if self.invalid_channels:
+            logger.warning(
+                "krow rest: krow.channels 里 %d 项不是 UUID、已忽略(服务端按 Uuid 解析, 传名字会 400): %s; 有效频道 %d 个照常轮询",
+                len(self.invalid_channels), self.invalid_channels, len(good),
+            )
+        return good or "off"
+
     def cooling_down(self) -> bool:
         return self._clock() < self._down_until
+
+    def status(self) -> Dict[str, Any]:
+        """给 ``/krow`` 状态用的只读快照（不含 token）。"""
+        return {
+            "channels": self.channels,
+            "invalid_channels": list(self.invalid_channels),
+            "bad_channels": {k: dict(v) for k, v in self.bad_channels.items()},
+            "legacy_mode": self.legacy_mode,
+            "saw_409": self.saw_409,
+            "note_409": self.note_409,
+            "cooling_down": self.cooling_down(),
+            "last_error": self.last_error,
+            "calls": self.calls,
+        }
 
     def _get(self, path: str, params: Dict[str, str]) -> Dict[str, Any]:
         url = f"{self.api}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
@@ -324,35 +434,92 @@ class RestInjectSource:
         _status, body = self._http_get(url, headers, self.timeout)
         return _json_or_empty(body)
 
-    def _record_failure(self, e: BaseException) -> None:
+    def _record_failure(self, e: BaseException, *, where: str = "inject") -> None:
+        """源级失败: 记 ``last_error``; 409 与 5xx / 连不上 进冷却. 频道级错误不走这里(见 :meth:`_quarantine`)."""
         code = getattr(e, "code", "") or ""
         self.last_error = f"{type(e).__name__}: {code}".strip(": ")
         if code == 409:
-            # 服务端门禁 require_job_binding: 只对 placement_kind=mcp_pull 豁免. 空闲轮询没有 job binding
-            # 却被 409, 说明这枚席位不是 mcp_pull(平台侧 H1 的答案); 冷却, 别每轮都撞.
-            self.binding_required = True
-            self.last_error += " (requires job binding → 席位 placement_kind 可能不是 mcp_pull; 请 captain 核 H1)"
+            # 服务端门禁 require_job_binding(worker_token.rs:486-496): 执行态 && placement_kind != mcp_pull && 无 job binding → 409.
+            # 这里只记"已见 409"并冷却(别每轮都撞). 推断是单向的: 有 409 ⇒ 非 mcp_pull; 没见过 409 推不出 mcp_pull.
+            self.saw_409 = True
+            self.last_409_at = self._clock()
+            self.last_error += " (requires job binding → 已见 409 ⇒ 令牌非 mcp_pull, 单向推断; 未见 409 不能反推; H1 仍需 captain 另给)"
             self._down_until = self._clock() + self.cooldown
         elif _is_server_down(e):
             self._down_until = self._clock() + self.cooldown
-        logger.warning("krow rest inject failed (%s); %s", self.last_error, "cooling down" if self.cooling_down() else "no cooldown")
+        logger.warning("krow rest %s failed (%s); %s", where, self.last_error, "cooling down" if self.cooling_down() else "no cooldown")
 
-    def _inject_once(self, params: Dict[str, str], *, hall: bool, channel_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        """一次统一口子调用; 404 回落老口子(只有大厅段). 返回 None 表示老口子已直接给出 items(放在 ``{"_legacy": items}``)."""
+    # ── 旧接口回落: 只由缺省调用判定 ──────────────────────────────────────
+
+    def _set_legacy(self, flag: bool) -> None:
+        if self.legacy_mode is not flag:
+            logger.info("krow rest: %s", "统一口子 /agent/v1/inject 404 → 本轮走老口子 /agent/v1/hall/inject(缺省调用判定)" if flag
+                        else "统一口子 /agent/v1/inject 可用(缺省调用判定)")
+        self.legacy_mode = flag
+
+    def _legacy_params(self, channel_id: Optional[str]) -> Dict[str, str]:
+        p = {"max": str(self.max_hall)}
         if channel_id:
-            params = dict(params, channel_id=channel_id)
+            p["channel_id"] = channel_id
+        return p
+
+    def _inject_default(self, params: Dict[str, str], *, hall: bool) -> Dict[str, Any]:
+        """缺省(general)调用. **只有这里**判定旧接口回落, 每轮一次: 统一口子 404 → ``legacy_mode=True`` 并改打老口子(只有大厅段),
+        本轮频道调用沿用; 判定不跨轮粘住(下一轮重新探统一口子). 老口子内容放在 ``{"_legacy": items}``."""
         try:
-            return self._get(INJECT_PATH, params)
+            data = self._get(INJECT_PATH, params)
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 raise
+            self._set_legacy(True)
             if not hall:
                 return {}
-            legacy_params = {"max": str(self.max_hall)}
-            if channel_id:
-                legacy_params["channel_id"] = channel_id
-            legacy = self._get(HALL_INJECT_PATH, legacy_params)
-            return {"_legacy": _legacy_hall_items(legacy)}
+            return {"_legacy": _legacy_hall_items(self._get(HALL_INJECT_PATH, self._legacy_params(None)))}
+        self._set_legacy(False)
+        return data
+
+    def _inject_channel(self, params: Dict[str, str], channel_id: str) -> Dict[str, Any]:
+        """显式 ``channel_id`` 调用. 沿用本轮缺省调用判定好的口子, **自己不判定**: 这里的 404 是"频道不存在或不可见"
+        (``hall/inject.rs:460-473``), 400 是 id 不是 UUID, 都交给调用方按频道隔离, 绝不触发老口子回落."""
+        if self.legacy_mode:
+            return {"_legacy": _legacy_hall_items(self._get(HALL_INJECT_PATH, self._legacy_params(channel_id)))}
+        return self._get(INJECT_PATH, dict(params, channel_id=channel_id))
+
+    @staticmethod
+    def _items(data: Any, *, want_owner: bool, want_leader: bool, want_hall: bool) -> List[InjectItem]:
+        if not isinstance(data, dict):
+            return []
+        if "_legacy" in data:
+            return list(data["_legacy"]) if want_hall else []
+        return RestInjectSource._parse_unified(data, want_owner=want_owner, want_leader=want_leader, want_hall=want_hall)
+
+    # ── 坏频道隔离 ──────────────────────────────────────────────────────────
+
+    def _quarantined(self, channel_id: str) -> bool:
+        bad = self.bad_channels.get(channel_id)
+        return bool(bad) and self._clock() < float(bad.get("retry_at") or 0.0)
+
+    def _quarantine(self, channel_id: str, e: urllib.error.HTTPError) -> None:
+        """显式频道调用回了频道级错误: 只隔离这个频道(到期重试一次), 其余频道与 ``last_error`` 不受影响. 首次隔离记一条日志."""
+        now = self._clock()
+        bad = self.bad_channels.get(channel_id)
+        if bad is None:
+            bad = {"code": int(e.code), "count": 0, "first_at": now}
+            self.bad_channels[channel_id] = bad
+        bad["code"] = int(e.code)
+        bad["count"] = int(bad.get("count") or 0) + 1
+        bad["last_at"] = now
+        bad["retry_at"] = now + self.bad_channel_backoff
+        msg = ("krow rest: 频道 %s 显式拉取回 %s(频道不存在 / 不可见 / id 非法), 隔离 %.0fs 后再试; 其余频道照常轮询"
+               % (channel_id, e.code, self.bad_channel_backoff))
+        if bad["count"] == 1:
+            logger.warning(msg)
+        else:
+            logger.debug(msg + " (第 %d 次)", bad["count"])
+
+    def _recover(self, channel_id: str) -> None:
+        if self.bad_channels.pop(channel_id, None) is not None:
+            logger.info("krow rest: 频道 %s 恢复可达, 解除隔离", channel_id)
 
     def _channel_ids_to_poll(self) -> List[str]:
         """要逐个轮询的频道(不含 general): 固定列表照给; auto 则按 ``hall/channels`` 的计数挑."""
@@ -404,28 +571,42 @@ class RestInjectSource:
         if not hall:
             params["hall"] = "0"
         out: List[InjectItem] = []
+        # 1. 缺省(general)调用: 唯一判定旧接口回落的地方. 失败 = 源级失败(记错 / 冷却), 本轮到此为止.
         try:
-            data = self._inject_once(params, hall=hall, channel_id=None)
-            if isinstance(data, dict) and "_legacy" in data:
-                out.extend(data["_legacy"])
-            elif isinstance(data, dict):
-                out.extend(self._parse_unified(data, want_owner=owner, want_leader=leader, want_hall=hall))
-            # D11: 外部工作台的点名在服务端是 suppressed(not_wakeable) 行, 缺省 general 的跨频道捎带只取 pending 行,
-            # 项目 / 小组频道必须各自带 channel_id 轮询才取得到(李靖按 main 读 hall/store.rs INJECT_WHERE 的结论,
-            # 服务端行为仍以 captain 实测为准). 频道扫描有节流, 工具边界的高频拉取不会每次都多打 N 个请求.
-            if hall and self.channels != "off" and self._clock() >= self._next_channel_scan:
-                self._next_channel_scan = self._clock() + self.channel_scan_interval
-                for cid in self._channel_ids_to_poll():
-                    cdata = self._inject_once(params, hall=True, channel_id=cid)
-                    if isinstance(cdata, dict) and "_legacy" in cdata:
-                        out.extend(self._tag_channel(cdata["_legacy"], cid))
-                    elif isinstance(cdata, dict):
-                        got = self._parse_unified(cdata, want_owner=owner, want_leader=leader, want_hall=True)
-                        out.extend(self._tag_channel(got, cid))
+            out.extend(self._items(self._inject_default(params, hall=hall), want_owner=owner, want_leader=leader, want_hall=hall))
         except Exception as e:  # noqa: BLE001 — 分类后冷却；调用方 fail-open(已拿到的照样交出去)
-            self._record_failure(e)
+            self._record_failure(e, where="inject(default)")
             return out
         self.last_error = ""
+        if not (hall and self.channels != "off" and self._clock() >= self._next_channel_scan):
+            return out
+        # 2. D11: 外部工作台的点名在服务端是 suppressed(not_wakeable) 行, 缺省 general 的跨频道捎带只取 pending 行,
+        # 项目 / 小组频道必须各自带 channel_id 轮询才取得到(李靖按 main 读 hall/store.rs INJECT_WHERE 的结论,
+        # 服务端行为仍以 captain 实测为准). 频道扫描有节流, 工具边界的高频拉取不会每次都多打 N 个请求.
+        self._next_channel_scan = self._clock() + self.channel_scan_interval
+        try:
+            channel_ids = self._channel_ids_to_poll()
+        except Exception as e:  # noqa: BLE001 — hall/channels 的 401 / 409 / 5xx 与注入口子同一道闸: 源级, 冷却
+            self._record_failure(e, where="hall/channels")
+            return out
+        # 3. 逐频道: 坏频道只隔离自己(400/403/404/410/422 → 跳过、记账、到期重试), 循环继续; 源级错误(401/409/429/5xx/连不上)
+        # 才停止本轮扫描并按原规则冷却. 两种情况下已拿到的项都照样交出去(fail-open); MCP 路径另有兜底.
+        for cid in channel_ids:
+            if self._quarantined(cid):
+                continue
+            try:
+                cdata = self._inject_channel(params, cid)
+            except urllib.error.HTTPError as e:
+                if _is_channel_scoped_error(e):
+                    self._quarantine(cid, e)
+                    continue
+                self._record_failure(e, where=f"inject(channel {cid})")
+                break
+            except Exception as e:  # noqa: BLE001 — 连不上 / 超时: 源级, 冷却
+                self._record_failure(e, where=f"inject(channel {cid})")
+                break
+            self._recover(cid)
+            out.extend(self._tag_channel(self._items(cdata, want_owner=owner, want_leader=leader, want_hall=True), cid))
         return out
 
     @staticmethod

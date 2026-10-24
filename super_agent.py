@@ -1318,7 +1318,17 @@ class SuperAgentCLI:
       self._run_krow_wake()
       return
     import json as _json
-    print(_json.dumps(bridge.status(), ensure_ascii=False, indent=2, default=str))
+    st = bridge.status()
+    print(_json.dumps(st, ensure_ascii=False, indent=2, default=str))
+    # 409 只表示"已见 / 未见", 推断单向, 不据此断言平台侧 H1 已回答; 坏频道 / 非法项要让人一眼看到
+    if "rest" in (st.get("sources") or []):
+      print(terminal.style(f" krow: 409 → {st.get('rest_409_note')}", "2"))
+      bad = st.get("rest_bad_channels") or {}
+      if bad:
+        print(terminal.style(" krow: 被隔离的频道(显式拉取回频道级错误, 到 retry_at 再试; 其余频道照常轮询): "
+                             + ", ".join(f"{cid}→{info.get('code')}×{info.get('count')}" for cid, info in bad.items()), "33"))
+      if st.get("rest_invalid_channels"):
+        print(terminal.style(f" krow: krow.channels 里不是 UUID、已忽略的项: {st['rest_invalid_channels']}", "33"))
 
   def run_krow_daemon(self) -> int:
     """常驻模式: 不进 REPL, 轮询平台 → 被点名就跑一回合 → 继续轮询(Ctrl+C 退出)."""
