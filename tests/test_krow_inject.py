@@ -26,6 +26,7 @@ from agent_project.krow.items import HALL_PREFIX, LEADER_PREFIX_HEAD, MAIL_PREFI
 from agent_project.krow.sources import (
     McpHallSource,
     RestInjectSource,
+    canonical_channel_id,
     parse_hall_read,
     parse_inject_hall_text,
     resolve_rest_env,
@@ -36,6 +37,9 @@ from agent_project.tools import TOOLS_REGISTRY
 from agent_project.tools.core import ToolResult
 
 CHANNEL = "f76423cc-49a5-4263-b0b7-fe0fcc87a92c"
+#: 形态合法但服务端会回 404(不存在 / 不可见)的频道 id —— 固定列表填错、或合作方 floor 算不出来时就是它
+BAD = "00000000-0000-4000-8000-00000000bad0"
+CHANNEL2 = "11111111-2222-3333-4444-555555555555"
 
 # ---------------------------------------------------------------------------
 # 假数据
@@ -353,8 +357,11 @@ def test_rest_source_channels_404_disables_auto_scan_quietly():
 def test_rest_source_409_marks_binding_required_and_cools_down():
     http = FakeHttp({"/agent/v1/inject": _http_error(409)})
     src = RestInjectSource("http://api", "t", http_get=http)
-    assert src.fetch() == [] and src.binding_required and src.cooling_down()
-    assert "409" in src.last_error and "mcp_pull" in src.last_error
+    assert not src.saw_409 and "未见 409" in src.note_409 and "不等于 mcp_pull 已确认" in src.note_409
+    assert src.fetch() == [] and src.binding_required and src.saw_409 and src.cooling_down()
+    assert "409" in src.last_error and "mcp_pull" in src.last_error and "单向" in src.last_error
+    # 409 语义只是"已见": 单向推断, 不替 H1 作答
+    assert "已见 409" in src.note_409 and "单向" in src.note_409 and "H1" in src.note_409
     assert src.fetch() == [] and len(http.calls) == 1, "409 也冷却, 不每轮都撞门禁"
 
 
@@ -375,6 +382,212 @@ def test_rest_source_4xx_does_not_cooldown():
     src = RestInjectSource("http://api", "t", http_get=http)
     assert src.fetch() == [] and not src.cooling_down()
     assert "401" in src.last_error and "t" != src.last_error
+
+
+# ---------------------------------------------------------------------------
+# sources: REST 坏频道隔离(v2) —— 显式 channel_id 的 404/400 只隔离该频道; 旧接口回落只由缺省调用判定; 固定列表校验 UUID
+# ---------------------------------------------------------------------------
+
+class _ChannelHttp:
+    """v2 场景用的 http_get 替身: 缺省调用 / hall/channels / 各频道可分别指定状态码或载荷; 记录 (路由, channel_id) 序列.
+
+    服务端建模按李靖读 main 的结论: 显式 channel_id 不存在 / 不可见 → 404(不回落 general); id 非 UUID → 400; 两口子同一道闸.
+    """
+
+    def __init__(self, *, general=None, channels_json=None, per_channel=None, unified_status=200, legacy=None, legacy_per_channel=None):
+        self.general = general if general is not None else {"owner": {"text": ""}, "hall": {"text": ""}}
+        self.channels_json = channels_json
+        self.per_channel = dict(per_channel or {})  # channel_id -> int(状态码) | dict(统一口子载荷)
+        self.unified_status = unified_status  # 200 | 404(旧服务端)
+        self.legacy = legacy  # 老口子缺省载荷
+        self.legacy_per_channel = dict(legacy_per_channel or {})  # channel_id -> int | dict(老口子载荷)
+        self.calls = []  # [(route, channel_id)]
+
+    def __call__(self, url, headers, timeout):
+        path, _, query = url.partition("?")
+        qs = dict(p.split("=", 1) for p in query.split("&") if p)
+        cid = qs.get("channel_id")
+        route = path.rsplit("/agent/v1/", 1)[-1]
+        self.calls.append((route, cid))
+        if route == "hall/channels":
+            if self.channels_json is None:
+                raise _http_error(404)
+            return 200, json.dumps(self.channels_json)
+        if route == "inject":
+            if self.unified_status != 200:
+                raise _http_error(self.unified_status)
+            if cid is None:
+                return 200, json.dumps(self.general)
+            return self._answer(self.per_channel.get(cid, {"hall": {"text": ""}}))
+        if route == "hall/inject":
+            if cid is None:
+                return 200, json.dumps(self.legacy or {"items": []})
+            return self._answer(self.legacy_per_channel.get(cid, {"items": []}))
+        raise _http_error(404)
+
+    @staticmethod
+    def _answer(spec):
+        if isinstance(spec, int):
+            raise _http_error(spec)
+        if isinstance(spec, Exception):
+            raise spec
+        return 200, json.dumps(spec)
+
+
+def test_rest_source_bad_channel_first_does_not_starve_following_channels():
+    """核心场景: 固定列表里坏频道排在前面(404), 后面的有效频道这一轮仍被轮询并取到点名; 坏频道隔离、到期重试、恢复即解除."""
+    http = _ChannelHttp(per_channel={BAD: 404, CHANNEL: {"hall": {"text": "#7510 道哥：@你 lv-agent 在吗，报下版本"}}})
+    now = [100.0]
+    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0], channels=[BAD, CHANNEL],
+                           channel_scan_interval=10, bad_channel_backoff=300)
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:7510"] and items[0].channel_id == CHANNEL and f"channel_id={CHANNEL}" in items[0].text
+    assert http.calls == [("inject", None), ("inject", BAD), ("inject", CHANNEL)], "坏频道 404 后循环继续到下一个频道, 且没有打老口子"
+    assert src.last_error == "" and not src.cooling_down(), "坏频道不污染源级错误、不冷却"
+    assert src.legacy_mode is False, "显式频道的 404 不是旧服务端信号"
+    assert set(src.bad_channels) == {BAD} and src.bad_channels[BAD]["code"] == 404 and src.bad_channels[BAD]["count"] == 1
+    assert src.bad_channels[BAD]["retry_at"] == 400.0
+    # 隔离期内(已过扫描间隔): 不再打坏频道, 好频道照常
+    now[0] += 11
+    n = len(http.calls)
+    src.fetch()
+    assert http.calls[n:] == [("inject", None), ("inject", CHANNEL)]
+    # 隔离到期: 再试一次, 仍 404 → 计数 2, 其余频道照旧
+    now[0] += 300
+    n = len(http.calls)
+    src.fetch()
+    assert http.calls[n:] == [("inject", None), ("inject", BAD), ("inject", CHANNEL)] and src.bad_channels[BAD]["count"] == 2
+    # 频道恢复可达(比如被拉进项目) → 解除隔离并取到消息
+    http.per_channel[BAD] = {"hall": {"text": "#7600 主人：@你 现在能看到了吗"}}
+    now[0] += 300
+    items = src.fetch()
+    # (替身不做"读即消费", 好频道的 #7510 会再次出现; 真服务端读即消费, 本地账本也会去重)
+    assert [i.key for i in items] == ["hall:7600", "hall:7510"] and items[0].channel_id == BAD and BAD not in src.bad_channels
+
+
+def test_rest_source_explicit_channel_404_never_triggers_legacy_fallback():
+    """v1 缺陷: 显式 channel_id 的 404 被当老服务端再打一次 /agent/v1/hall/inject, 第二次 404 穿出循环. v2: 不回落、不穿出."""
+    http = _ChannelHttp(per_channel={BAD: 404}, legacy_per_channel={BAD: {"items": [{"id": 1, "display": "x", "body": "不该拿到"}]}})
+    src = RestInjectSource("http://api", "t", http_get=http, channels=[BAD])
+    assert src.fetch() == []
+    assert http.calls == [("inject", None), ("inject", BAD)], "显式频道 404 ≠ 旧服务端: 不回落老口子"
+    assert src.legacy_mode is False and src.last_error == ""
+
+
+def test_rest_source_channel_scoped_codes_isolate_only_that_channel():
+    http = _ChannelHttp(per_channel={BAD: 400, CHANNEL2: 403, CHANNEL: {"hall": {"text": "#1 甲：@你 好"}}})
+    src = RestInjectSource("http://api", "t", http_get=http, channels=[BAD, CHANNEL2, CHANNEL])
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:1"]
+    assert {c: v["code"] for c, v in src.bad_channels.items()} == {BAD: 400, CHANNEL2: 403}
+    assert src.last_error == "" and not src.cooling_down()
+
+
+def test_rest_source_source_level_error_in_channel_loop_stops_scan_but_fails_open():
+    # 缺省调用拿到主人插话; 第一个频道 503 → 源级: 冷却、停止本轮扫描(第二个频道不打), 但主人插话照样交出去
+    http = _ChannelHttp(general={"owner": {"text": "先别动"}}, per_channel={BAD: 503, CHANNEL: {"hall": {"text": "#1 甲：@你"}}})
+    now = [0.0]
+    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0], channels=[BAD, CHANNEL])
+    items = src.fetch()
+    assert [i.kind for i in items] == ["owner"]
+    assert http.calls == [("inject", None), ("inject", BAD)] and src.cooling_down() and "503" in src.last_error
+    assert BAD not in src.bad_channels, "5xx 不是频道级问题, 不把频道标坏"
+    # 409 在频道循环里同样是源级: 已见 409 + 冷却
+    http2 = _ChannelHttp(per_channel={BAD: 409})
+    src2 = RestInjectSource("http://api", "t", http_get=http2, channels=[BAD, CHANNEL])
+    assert src2.fetch() == [] and src2.saw_409 and src2.cooling_down() and http2.calls[-1] == ("inject", BAD)
+    # 401 源级(令牌问题): 记错、不冷却、不标坏频道、本轮停止
+    http3 = _ChannelHttp(per_channel={BAD: 401})
+    src3 = RestInjectSource("http://api", "t", http_get=http3, channels=[BAD, CHANNEL])
+    assert src3.fetch() == [] and not src3.cooling_down() and "401" in src3.last_error and not src3.bad_channels
+    assert http3.calls[-1] == ("inject", BAD)
+    # 连不上: 源级, 冷却
+    http4 = _ChannelHttp(per_channel={BAD: urllib.error.URLError("refused")})
+    src4 = RestInjectSource("http://api", "t", http_get=http4, channels=[BAD, CHANNEL])
+    assert src4.fetch() == [] and src4.cooling_down() and not src4.bad_channels
+
+
+def test_rest_source_legacy_mode_decided_only_by_default_call():
+    """旧接口回落只由缺省调用判定(每轮一次), 本轮频道调用沿用、不逐个再探统一口子; 老口子上坏频道 404 同样只隔离; 判定不跨轮粘住."""
+    legacy_default = {"items": [{"id": 9, "display": "主人", "body": "在", "mentions_me": True}]}
+    http = _ChannelHttp(unified_status=404, legacy=legacy_default,
+                        legacy_per_channel={BAD: 404, CHANNEL: {"items": [{"id": 10, "display": "道哥", "body": "频道里", "mentions_me": True}]}})
+    now = [0.0]
+    src = RestInjectSource("http://api", "t", http_get=http, clock=lambda: now[0], channels=[BAD, CHANNEL], channel_scan_interval=0)
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:9", "hall:10"] and items[1].channel_id == CHANNEL
+    assert http.calls == [("inject", None), ("hall/inject", None), ("hall/inject", BAD), ("hall/inject", CHANNEL)], \
+        "统一口子只在缺省调用上探一次; 频道调用直接走老口子; 坏频道 404 后继续下一个"
+    assert src.legacy_mode is True and BAD in src.bad_channels and src.last_error == ""
+    # 判定不跨轮粘住: 服务端升级(或刚才只是一次瞬时 404) → 下一轮缺省调用重新探统一口子, 立即回到统一口子, 频道调用跟着走
+    now[0] += 1
+    http.unified_status = 200
+    http.per_channel[CHANNEL] = {"hall": {"text": "#11 道哥：@你 统一口子回来了"}}
+    n = len(http.calls)
+    items = src.fetch()
+    assert http.calls[n:] == [("inject", None), ("inject", CHANNEL)] and src.legacy_mode is False
+    assert [i.key for i in items] == ["hall:11"]
+    # 老服务端 + 轮尾 owner-only(hall=0): 老口子没有主人段, 安静返回空, 不报错
+    legacy_only = RestInjectSource("http://api", "t", http_get=_ChannelHttp(unified_status=404), channels="off")
+    assert legacy_only.fetch(hall=False, leader=False) == [] and legacy_only.legacy_mode is True and legacy_only.last_error == ""
+    # 统一口子瞬时 404 不会让下一轮 owner-only 的主人插话丢掉(v1 行为保持: 每轮都先探统一口子)
+    flaky = _ChannelHttp(unified_status=404, general={"owner": {"text": "补一句"}})
+    src2 = RestInjectSource("http://api", "t", http_get=flaky, channels="off")
+    assert src2.fetch(hall=False, leader=False) == [] and src2.legacy_mode is True
+    flaky.unified_status = 200
+    assert [i.kind for i in src2.fetch(hall=False, leader=False)] == ["owner"] and src2.legacy_mode is False
+
+
+def test_rest_source_fixed_list_validates_uuid_and_keeps_valid_ones():
+    http = _ChannelHttp(per_channel={CHANNEL: {"hall": {"text": "#1 甲：@你 好"}}})
+    src = RestInjectSource("http://api", "t", http_get=http, channels=["星辰大海", "general", "{" + CHANNEL.upper() + "}", CHANNEL, ""])
+    assert src.channels == [CHANNEL], "非法项剔除; 合法项规范化(大写 / 花括号)并去重"
+    assert src.invalid_channels == ["星辰大海", "general"]
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:1"]
+    assert [c for _r, c in http.calls if c] == [CHANNEL], "非法项不发请求(服务端按 Uuid 解析会 400)"
+    assert src.last_error == "" and not src.bad_channels
+    # 全是非法项 → 等于 off, 但状态里能看到原因
+    all_bad = RestInjectSource("http://api", "t", http_get=http, channels=["星辰大海"])
+    assert all_bad.channels == "off" and all_bad.invalid_channels == ["星辰大海"] and all_bad.status()["invalid_channels"] == ["星辰大海"]
+    # 单个字符串也走校验
+    assert RestInjectSource("http://api", "t", http_get=http, channels=CHANNEL).channels == [CHANNEL]
+    assert RestInjectSource("http://api", "t", http_get=http, channels="星辰大海").channels == "off"
+    assert canonical_channel_id(" " + CHANNEL + " ") == CHANNEL
+    assert canonical_channel_id(CHANNEL.replace("-", "")) == CHANNEL
+    assert canonical_channel_id("not-a-uuid") is None and canonical_channel_id(None) is None and canonical_channel_id("") is None
+
+
+def test_rest_source_auto_mode_isolates_listed_but_unreachable_channel():
+    """auto 模式: hall/channels 列出两个有 @ 的频道, 第一个显式拉取 404(可见性 / floor 对不上) → 隔离, 第二个照常."""
+    http = _ChannelHttp(
+        channels_json={"channels": [
+            {"id": "general", "kind": "general", "mention_count": 0, "unread_count": 1},
+            {"id": BAD, "kind": "project", "mention_count": 1, "unread_count": 1},
+            {"id": CHANNEL, "kind": "project", "mention_count": 1, "unread_count": 2},
+        ]},
+        per_channel={BAD: 404, CHANNEL: {"hall": {"text": "#2 乙：@你 来"}}},
+    )
+    src = RestInjectSource("http://api", "t", http_get=http, channels="auto")
+    items = src.fetch()
+    assert [i.key for i in items] == ["hall:2"] and BAD in src.bad_channels and src.last_error == ""
+    assert http.calls == [("inject", None), ("hall/channels", None), ("inject", BAD), ("inject", CHANNEL)]
+
+
+def test_rest_source_bad_channel_logs_once_per_quarantine(caplog):
+    http = _ChannelHttp(per_channel={BAD: 404})
+    now = [0.0]
+    src = RestInjectSource("http://api", "sekrit-token-9f3a", http_get=http, clock=lambda: now[0], channels=[BAD],
+                           channel_scan_interval=0, bad_channel_backoff=10)
+    with caplog.at_level(logging.DEBUG, logger="krow.sources"):
+        src.fetch()
+        now[0] += 10
+        src.fetch()
+        now[0] += 10
+        src.fetch()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "隔离" in r.getMessage()]
+    assert len(warnings) == 1 and src.bad_channels[BAD]["count"] == 3, "一个频道只在首次隔离记一条 warning, 之后的重试失败只 debug"
+    assert all("sekrit-token-9f3a" not in r.getMessage() for r in caplog.records), "日志里没有 token"
 
 
 def test_parse_inject_hall_text_multiline_and_fallback():
@@ -502,6 +715,50 @@ def test_bridge_disabled_when_no_sources(tmp_path):
     assert not br.enabled and br.interjection_text(None) is None and br.start_idle_poller(lambda i: None) is None
 
 
+def test_bridge_status_exposes_409_semantics_bad_and_invalid_channels(tmp_path):
+    """/krow 状态: 409 只说"已见 / 未见"(不断言 H1 已回答); 坏频道与非法项可见; 旧接口判定可见."""
+    http = _ChannelHttp(per_channel={BAD: 404})
+    rest = RestInjectSource("http://api", "t", http_get=http, channels=[BAD, "星辰大海"])
+    br = _bridge(tmp_path, rest)
+    st = br.status()
+    assert st["rest_409_seen"] is False and "未见 409" in st["rest_409_note"] and "不等于 mcp_pull 已确认" in st["rest_409_note"]
+    assert "H1 未由此回答" in st["rest_409_note"]
+    assert st["rest_invalid_channels"] == ["星辰大海"] and st["rest_legacy_mode"] is None and st["rest_bad_channels"] == {}
+    assert st["rest_channels"] == [BAD]
+    br.poll()
+    st = br.status()
+    assert st["rest_legacy_mode"] is False and st["rest_bad_channels"][BAD]["code"] == 404 and "retry_at" in st["rest_bad_channels"][BAD]
+    assert st["source_errors"]["rest"] == "", "坏频道不出现在源级错误里"
+    # 见过 409 之后: 已见、单向、H1 仍待 captain
+    rest409 = RestInjectSource("http://api", "t", http_get=FakeHttp({"/agent/v1/inject": _http_error(409)}))
+    br409 = _bridge(tmp_path / "b", rest409)
+    br409.poll()
+    st = br409.status()
+    assert st["rest_409_seen"] is True and rest409.binding_required is True
+    assert "已见 409" in st["rest_409_note"] and "单向" in st["rest_409_note"] and "captain" in st["rest_409_note"]
+    assert "不替它作答" in st["rest_409_note"]
+    # 没有 REST 源时也说清楚
+    st = _bridge(tmp_path / "c", McpHallSource(FakeMcp(), self_names=["lv-agent"])).status()
+    assert st["rest_409_seen"] is False and "无 REST 源" in st["rest_409_note"]
+
+
+def test_bridge_mcp_path_still_covers_channel_rest_cannot_reach(tmp_path):
+    """REST 固定列表里的频道 404(比如合作方可见性对不上), MCP 路径的 hall_read 仍把该频道的点名捞上来: 兜底保留、共用一本账."""
+    http = _ChannelHttp(per_channel={CHANNEL: 404})
+    rest = RestInjectSource("http://api", "t", http_get=http, channels=[CHANNEL])
+    mcp = McpHallSource(FakeMcp(), self_names=["lv-agent"], inbox=False)
+    br = _bridge(tmp_path, rest, mcp)
+    items = br.poll()
+    assert [i.key for i in items] == ["hall:7341", "hall:7342"] and all(i.source == "mcp" for i in items)
+    assert CHANNEL in rest.bad_channels and br.status()["source_errors"]["rest"] == ""
+    br.mark_delivered(items)
+    # 频道恢复后 REST 再给同一条 #7341 也不会重复送
+    http.per_channel[CHANNEL] = {"hall": {"text": "#7341 姜尚#凌烟阁：@你 请确认运行版本"}}
+    rest.bad_channels.clear()
+    rest._next_channel_scan = 0.0
+    assert br.poll() == [] and br.last_new == 0
+
+
 def test_bridge_idle_poller_respects_busy_and_idle(tmp_path):
     mcp = FakeMcp()
     br = _bridge(tmp_path, McpHallSource(mcp, self_names=["lv-agent"], inbox=False), poll_interval_s=5)
@@ -560,7 +817,14 @@ def test_build_bridge_from_config_env_and_mcp(tmp_path, monkeypatch):
                                            "channel_scan_interval_s": 3}), environ=env)
     assert fixed.sources[0].channels == [CHANNEL] and fixed.sources[0].mode == "all" and fixed.sources[0].channel_scan_interval == 3
     assert KrowConfig({"channels": "off"}).channels == "off" and KrowConfig({"channels": CHANNEL}).channels == [CHANNEL]
-    assert only_rest.status()["rest_binding_required"] is False
+    # 409 字段语义: 只说"已见 / 未见", 不说 mcp_pull 已确认
+    st = only_rest.status()
+    assert st["rest_409_seen"] is False and "未见 409" in st["rest_409_note"] and "rest_binding_required" not in st
+    assert st["rest_invalid_channels"] == [] and st["rest_bad_channels"] == {} and st["rest_legacy_mode"] is None
+    # v2 坏频道隔离退避时长可配, 缺省 300s
+    assert fixed.sources[0].bad_channel_backoff == 300
+    tuned = build_bridge(AgentConfig(krow={"enabled": True, "state_path": str(tmp_path / "w.json"), "bad_channel_backoff_s": 42}), environ=env)
+    assert tuned.sources[0].bad_channel_backoff == 42
 
 
 def test_agent_config_accepts_krow_section_in_both_layouts(tmp_path):

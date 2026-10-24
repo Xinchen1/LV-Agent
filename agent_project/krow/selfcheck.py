@@ -13,7 +13,12 @@
 5. 两源合流：同一条 #id 只送一次；
 6. 取到 ≠ 送到：未 ``mark_delivered`` 的待送项跨「进程重启」（新建 store）仍在；送达后不再出现；
 7. ExecutionEngine 集成：工具边界注入 + 轮尾续跑（用假模型后端）；
-8. 守护模式：``KrowDaemon.run_once`` 先记账再跑、回合失败不重跑。
+8. 守护模式：``KrowDaemon.run_once`` 先记账再跑、回合失败不重跑；
+9. （v2）REST 坏频道隔离：假服务端按 main 的 ``resolve_channel_access`` 建模——显式 ``channel_id`` 非 UUID → 400、不存在 / 不可见 → 404
+   （不回落 general）。固定列表 ``[非 UUID 名字, 不存在的频道, 有效频道]`` **坏的排在前面**，有效频道仍被轮询并取到点名；
+   显式 404 不触发老口子回落、不污染 ``last_error``；隔离到期重试、恢复即解除；``auto`` 模式下 ``hall/channels`` 列出却 404 的
+   幽灵频道同样只隔离自己；旧接口回落只由缺省调用判定一次（老服务端上统一口子只被探一次）；频道口子 5xx 仍 fail-open；
+   ``/krow`` 状态 409 只说「已见 / 未见」；REST 看不见的频道由 MCP 路径兜底且共用一本账。
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -35,23 +41,31 @@ from .state import DedupStore
 from .wake import KrowDaemon, build_wake_task
 
 CHANNEL = "f76423cc-49a5-4263-b0b7-fe0fcc87a92c"
+#: 形态合法、但服务端上不存在 / 对本读者不可见的频道 id(固定列表填错、或合作方 floor 算不出来时就是它) → 显式拉取 404
+BAD_CHANNEL = "00000000-0000-4000-8000-00000000bad0"
 
 
 # ── 假服务端 ─────────────────────────────────────────────────────────────
 
 
 class FakeKrowServer:
-    """``/agent/v1/inject``（读即消费）与 ``/agent/v1/hall/inject``；可切 404 / 503 模式。"""
+    """``/agent/v1/inject``（读即消费）与 ``/agent/v1/hall/inject``；可切 404 / 503 / 409 模式。
+
+    显式 ``channel_id`` 的门禁按 krowworker main ``hall/agent_api.rs::resolve_channel_access`` 建模（李靖读码）：
+    两口子同一道闸，id 不是 UUID → 400（serde ``Uuid``），频道不存在 / 读者不是成员 → 404「频道不存在或不可见」，不回落 general。
+    ``ghost_channels``：``hall/channels`` 列出来、显式拉取却 404 的频道（可见性 / floor 对不上）。``channel503``：只有带 ``channel_id`` 的调用 503。
+    """
 
     def __init__(self, token: str) -> None:
         self.token = token
-        self.mode = "unified"  # unified | legacy404 | down503 | binding409
+        self.mode = "unified"  # unified | legacy404 | down503 | binding409 | channel503
         self.owner_queue: List[str] = []
         self.leader_queue: List[Dict[str, Any]] = []
         self.hall_queue: List[Dict[str, Any]] = []
         # D11 建模: 项目频道里给外部工作台的点名 = suppressed(not_wakeable) 行, 缺省调用(跨频道只捎 pending 行)取不到,
         # 只有带 channel_id=<该频道> 的调用(按时间线读, 不看唤醒行状态)才给出并翻 injected.
         self.channel_queues: Dict[str, List[Dict[str, Any]]] = {}
+        self.ghost_channels: List[str] = []
         self.requests: List[Tuple[str, Dict[str, str]]] = []
         self._lock = threading.Lock()
         server_ref = self
@@ -95,17 +109,30 @@ class FakeKrowServer:
                 return self._send(h, 401, {"error": "unauthorized"})
             if self.mode == "down503":
                 return self._send(h, 503, {"error": "rolling"})
+            if self.mode == "binding409":
+                # require_job_binding 同一道闸罩着 inject / hall/inject / hall/channels(李靖核 hall/agent_api.rs:253-257)
+                return self._send(h, 409, {"error": "job_binding_required", "message": "request requires an active job binding"})
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
             if url.path == "/agent/v1/hall/channels":
                 chans = [{"id": "general", "name": "大厅", "kind": "general", "unread_count": len(self.hall_queue), "mention_count": len(self.hall_queue)}]
+                for gid in self.ghost_channels:  # 列得出、拉不到: 排在前面, 好证明后面的频道不受牵连
+                    chans.append({"id": gid, "name": "幽灵频道", "kind": "project", "unread_count": 1, "mention_count": 1})
                 for cid, q in self.channel_queues.items():
                     chans.append({"id": cid, "name": "星辰大海", "kind": "project", "unread_count": len(q), "mention_count": sum(1 for m in q if m.get("mentions_me"))})
                 return self._send(h, 200, {"channels": chans})
+            if url.path == "/agent/v1/inject" and self.mode == "legacy404":
+                return self._send(h, 404, {"error": "not found"})  # 老服务端没有统一口子: 路由层 404, 在频道闸之前
+            if url.path in ("/agent/v1/inject", "/agent/v1/hall/inject") and qs.get("channel_id"):
+                cid = qs["channel_id"]
+                try:
+                    uuid.UUID(cid)
+                except ValueError:
+                    return self._send(h, 400, {"error": "Failed to deserialize query string: channel_id: invalid UUID"})
+                if cid not in self.channel_queues:
+                    return self._send(h, 404, {"error": "频道不存在或不可见"})
+                if self.mode == "channel503":
+                    return self._send(h, 503, {"error": "rolling (channel path)"})
             if url.path == "/agent/v1/inject":
-                if self.mode == "legacy404":
-                    return self._send(h, 404, {"error": "not found"})
-                if self.mode == "binding409":
-                    return self._send(h, 409, {"error": "job_binding_required", "message": "request requires an active job binding"})
                 max_owner = int(qs.get("max_owner", 3))
                 max_hall = int(qs.get("max_hall", 5))
                 want_hall = qs.get("hall") != "0"
@@ -126,9 +153,9 @@ class FakeKrowServer:
             return self._send(h, 404, {"error": "no route"})
 
     def _take_hall(self, channel_id: Optional[str], n: int) -> List[Dict[str, Any]]:
-        """缺省(general) = 本频道 + 跨频道 pending 捎带(hall_queue); 带 channel_id = 只读该频道时间线(含 suppressed 行)."""
+        """缺省(general) = 本频道 + 跨频道 pending 捎带(hall_queue); 带 channel_id = 只读该频道时间线(含 suppressed 行; 频道闸已在前面过)."""
         if channel_id and channel_id != "general":
-            q = self.channel_queues.setdefault(channel_id, [])
+            q = self.channel_queues[channel_id]
             msgs, self.channel_queues[channel_id] = q[:n], q[n:]
             return msgs
         msgs, self.hall_queue = self.hall_queue[:n], self.hall_queue[n:]
@@ -283,6 +310,99 @@ def run(verbose: bool = True) -> Report:
         rep.check("rest.409.binding_flag", got_409 == [] and rest_409.binding_required and rest_409.cooling_down() and "mcp_pull" in rest_409.last_error,
                   rest_409.last_error)
         srv.mode = "unified"
+
+        # 3c. v2 坏频道隔离 —— 核心证明: 坏频道排在前面, 后面的有效频道这一轮仍被轮询并取到点名
+        default_path = "/agent/v1/inject?max_owner=3&max_hall=5&max_leader=1"
+        now = [1000.0]
+        srv.channel_queues[CHANNEL].append({"id": 7520, "display": "道哥", "body": "坏频道排前面, 这条也要到", "mentions_me": True})
+        rest_v2 = RestInjectSource(srv.api, token, channels=["星辰大海", BAD_CHANNEL, CHANNEL], clock=lambda: now[0],
+                                   channel_scan_interval=10, bad_channel_backoff=300)
+        n4 = len(srv.requests)
+        got_v2 = rest_v2.fetch()
+        p4 = _paths(n4)
+        rep.check("rest.v2.bad_channel_first_still_polls_next",
+                  [i.key for i in got_v2] == ["hall:7520"] and got_v2[0].channel_id == CHANNEL
+                  and rest_v2.invalid_channels == ["星辰大海"] and rest_v2.channels == [BAD_CHANNEL, CHANNEL]
+                  and set(rest_v2.bad_channels) == {BAD_CHANNEL} and rest_v2.bad_channels[BAD_CHANNEL]["code"] == 404
+                  and p4 == [default_path, f"{default_path}&channel_id={BAD_CHANNEL}", f"{default_path}&channel_id={CHANNEL}"],
+                  f"keys={[i.key for i in got_v2]} invalid={rest_v2.invalid_channels}(未发请求) bad={list(rest_v2.bad_channels)}(404→隔离) paths={p4}")
+        rep.check("rest.v2.explicit_404_not_legacy",
+                  rest_v2.legacy_mode is False and not any("/agent/v1/hall/inject" in p for p in p4) and rest_v2.last_error == "" and not rest_v2.cooling_down(),
+                  f"legacy_mode={rest_v2.legacy_mode} last_error={rest_v2.last_error!r} (显式频道 404 没触发老口子回落、没污染 last_error、不冷却)")
+        now[0] += 11  # 过了扫描间隔、没到退避: 坏频道不再打, 好频道照常
+        n5 = len(srv.requests)
+        rest_v2.fetch()
+        p5 = _paths(n5)
+        rep.check("rest.v2.bad_channel_quarantined", not any(BAD_CHANNEL in p for p in p5) and any(CHANNEL in p for p in p5), f"paths={p5}")
+        now[0] += 300  # 退避到期: 重试; 此时频道已建好(可见) → 解除隔离并取到消息
+        srv.channel_queues[BAD_CHANNEL] = [{"id": 7530, "display": "主人", "body": "频道建好了, 现在能看到吗", "mentions_me": True}]
+        n6 = len(srv.requests)
+        got_rec = rest_v2.fetch()
+        rep.check("rest.v2.bad_channel_recovers",
+                  [i.key for i in got_rec] == ["hall:7530"] and got_rec[0].channel_id == BAD_CHANNEL and BAD_CHANNEL not in rest_v2.bad_channels
+                  and any(BAD_CHANNEL in p for p in _paths(n6)),
+                  f"keys={[i.key for i in got_rec]} bad={list(rest_v2.bad_channels)}")
+        del srv.channel_queues[BAD_CHANNEL]
+        # auto 模式: hall/channels 列出的幽灵频道(排在前面)显式拉取 404 → 只隔离它, 后面的真频道照常
+        srv.ghost_channels.append(BAD_CHANNEL)
+        srv.channel_queues[CHANNEL].append({"id": 7540, "display": "道哥", "body": "auto 模式幽灵频道排前面", "mentions_me": True})
+        rest_auto = RestInjectSource(srv.api, token, channels="auto")
+        n7 = len(srv.requests)
+        got_auto = rest_auto.fetch()
+        p7 = _paths(n7)
+        rep.check("rest.v2.auto_ghost_channel_isolated",
+                  [i.key for i in got_auto] == ["hall:7540"] and BAD_CHANNEL in rest_auto.bad_channels and rest_auto.last_error == ""
+                  and p7.index(f"{default_path}&channel_id={BAD_CHANNEL}") < p7.index(f"{default_path}&channel_id={CHANNEL}"),
+                  f"keys={[i.key for i in got_auto]} bad={list(rest_auto.bad_channels)} paths={p7}")
+        srv.ghost_channels.clear()
+        # 老服务端: 回落只由缺省调用判定一次; 频道调用直接走老口子(不逐频道再探统一口子); 老口子上坏频道 404 同样只隔离
+        srv.mode = "legacy404"
+        srv.channel_queues[CHANNEL].append({"id": 7550, "display": "道哥", "body": "老服务端上坏频道也只隔离", "mentions_me": True})
+        rest_leg = RestInjectSource(srv.api, token, channels=[BAD_CHANNEL, CHANNEL])
+        n8 = len(srv.requests)
+        got_leg = rest_leg.fetch()
+        p8 = _paths(n8)
+        unified_calls = [p for p in p8 if p.startswith("/agent/v1/inject?")]
+        legacy_calls = [p for p in p8 if p.startswith("/agent/v1/hall/inject?")]
+        rep.check("rest.v2.legacy_decided_once_by_default_call",
+                  [i.key for i in got_leg] == ["hall:7550"] and rest_leg.legacy_mode is True
+                  and unified_calls == [default_path]
+                  and legacy_calls == ["/agent/v1/hall/inject?max=5", f"/agent/v1/hall/inject?max=5&channel_id={BAD_CHANNEL}",
+                                       f"/agent/v1/hall/inject?max=5&channel_id={CHANNEL}"]
+                  and BAD_CHANNEL in rest_leg.bad_channels and rest_leg.last_error == "",
+                  f"unified={unified_calls} legacy={legacy_calls}")
+        srv.mode = "unified"
+        # 频道口子 5xx: 源级 → 冷却、停止本轮扫描, 但缺省调用已拿到的主人插话照样交出去(fail-open 保留)
+        srv.mode = "channel503"
+        srv.owner_queue.append("频道口子滚动发布中也要把这句送到。")
+        rest_fo = RestInjectSource(srv.api, token, channels=[CHANNEL, BAD_CHANNEL])
+        n9 = len(srv.requests)
+        got_fo = rest_fo.fetch()
+        p9 = _paths(n9)
+        rep.check("rest.v2.channel_5xx_fail_open",
+                  [i.kind for i in got_fo] == ["owner"] and rest_fo.cooling_down() and "503" in rest_fo.last_error
+                  and not rest_fo.bad_channels and not any(BAD_CHANNEL in p for p in p9),
+                  f"kinds={[i.kind for i in got_fo]} last_error={rest_fo.last_error!r} (5xx 不标坏频道; 本轮停扫, 第二个频道没打)")
+        srv.mode = "unified"
+        # /krow 状态: 409 只说"已见 / 未见", 不据此断言 H1 已回答; 坏频道 / 非法项 / 旧接口判定可见
+        st_409 = KrowBridge(cfg, store=DedupStore(state_path), sources=[rest_409], nonce="n0nce").status()
+        st_ok = KrowBridge(cfg, store=DedupStore(state_path), sources=[rest_v2], nonce="n0nce").status()
+        rep.check("rest.v2.409_status_semantics",
+                  st_409["rest_409_seen"] is True and "已见 409" in st_409["rest_409_note"] and "单向" in st_409["rest_409_note"] and "H1" in st_409["rest_409_note"]
+                  and st_ok["rest_409_seen"] is False and "未见 409" in st_ok["rest_409_note"] and "不等于 mcp_pull 已确认" in st_ok["rest_409_note"]
+                  and "rest_binding_required" not in st_ok and st_ok["rest_invalid_channels"] == ["星辰大海"] and st_ok["rest_legacy_mode"] is False,
+                  f"seen: {st_409['rest_409_note'][:40]}… / not seen: {st_ok['rest_409_note'][:40]}…")
+        # REST 看不见的频道由 MCP 路径兜底(共用一本账)
+        mcp_fb = FakeMcpBridge()
+        mcp_fb.messages = [{"id": 7560, "channel_id": BAD_CHANNEL, "display": "道哥", "time": "10-24 08:30", "body": "@lv-agent REST 看不见这个频道, MCP 能"}]
+        rest_fb = RestInjectSource(srv.api, token, channels=[BAD_CHANNEL])
+        br_fb = KrowBridge(cfg, store=DedupStore(f"{tmpdir}/fb.json"),
+                           sources=[rest_fb, McpHallSource(mcp_fb, self_names=["lv-agent"], inbox=False)], nonce="n0nce")
+        got_fb = br_fb.poll()
+        rep.check("rest.v2.mcp_covers_rest_bad_channel",
+                  [i.key for i in got_fb] == ["hall:7560"] and got_fb[0].source == "mcp" and BAD_CHANNEL in rest_fb.bad_channels
+                  and br_fb.status()["source_errors"]["rest"] == "",
+                  f"keys={[i.key for i in got_fb]} via={got_fb[0].source if got_fb else None} rest_bad={list(rest_fb.bad_channels)}")
 
         # 4. MCP 轮询
         mcp = FakeMcpBridge()

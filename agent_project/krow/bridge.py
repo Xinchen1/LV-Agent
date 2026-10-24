@@ -27,6 +27,13 @@
       state_path: ~/.lv_agent/krow_state.json
       max_hall_per_step: 5
       max_owner_per_step: 3
+      channels: auto                # REST 逐频道轮询: auto | off | [channel_id(UUID), ...]; 非 UUID 项忽略、不中断其余频道
+      channel_scan_interval_s: 10   # 频道扫描节流
+      bad_channel_backoff_s: 300    # 显式 channel_id 回 400/404 后该频道隔离多久再试; 其余频道不受影响
+
+``status()`` 里 REST 相关字段：``rest_channels`` / ``rest_invalid_channels`` / ``rest_bad_channels`` / ``rest_legacy_mode`` /
+``rest_409_seen`` + ``rest_409_note``（409 只表示已见 / 未见：有 409 ⇒ 令牌非 mcp_pull 为单向推断，未见 409 不等于 mcp_pull 已确认，
+不据此断言平台侧 H1 已回答）。
 """
 from __future__ import annotations
 
@@ -79,6 +86,8 @@ class KrowConfig:
             if self.channels not in ("auto", "off"):
                 self.channels = [str(ch).strip()]
         self.channel_scan_interval_s = max(0.0, float(d.get("channel_scan_interval_s", 10) or 0))
+        # 显式 channel_id 回 400/404 等频道级错误后该频道隔离多久(秒); 其余频道不受影响(v2 坏频道隔离)
+        self.bad_channel_backoff_s = max(0.0, float(d.get("bad_channel_backoff_s", 300) or 0))
 
 
 def find_krow_server(mcp_manager: Any, preferred: Optional[str] = None) -> Optional[str]:
@@ -146,14 +155,21 @@ class KrowBridge:
         return contract_text(self.nonce)
 
     def status(self) -> Dict[str, Any]:
+        rest = next((s for s in self.sources if getattr(s, "name", "") == "rest"), None)
+        rest_status: Dict[str, Any] = rest.status() if rest is not None and hasattr(rest, "status") else {}
         return {
             "enabled": self.enabled,
             "sources": [getattr(s, "name", type(s).__name__) for s in self.sources],
             "source_errors": {getattr(s, "name", type(s).__name__): getattr(s, "last_error", "") for s in self.sources},
             "source_calls": {getattr(s, "name", type(s).__name__): getattr(s, "calls", 0) for s in self.sources},
-            # REST 路径: 频道轮询策略与 409 门禁信号(H1: 席位 placement_kind 是否 mcp_pull)
-            "rest_channels": next((getattr(s, "channels", None) for s in self.sources if getattr(s, "name", "") == "rest"), None),
-            "rest_binding_required": any(getattr(s, "binding_required", False) for s in self.sources),
+            # REST 路径: 频道轮询策略 / 坏频道隔离 / 旧接口判定 / 409 门禁
+            "rest_channels": rest_status.get("channels"),
+            "rest_invalid_channels": rest_status.get("invalid_channels", []),  # 固定列表里不是 UUID、被忽略的项
+            "rest_bad_channels": rest_status.get("bad_channels", {}),  # 显式拉取回 400/404 等被隔离的频道(含 retry_at)
+            "rest_legacy_mode": rest_status.get("legacy_mode"),  # None 未判定 / True 老口子 / False 统一口子(只由缺省调用判定)
+            # 409 只说明"已见 / 未见": 有 409 ⇒ 令牌非 mcp_pull(单向); 未见 409 不等于 mcp_pull 已确认. 不据此断言 H1 已回答.
+            "rest_409_seen": bool(rest_status.get("saw_409", False)),
+            "rest_409_note": rest_status.get("note_409") if rest is not None else "无 REST 源：没发过请求，谈不上已见 / 未见 409；H1 未由此回答",
             "polls": self.polls,
             "delivered": self.delivered,
             "last_poll_at": self.last_poll_at,
@@ -311,6 +327,7 @@ def build_bridge(
                     channels=cfg.channels,
                     mode=cfg.mode,
                     channel_scan_interval=cfg.channel_scan_interval_s,
+                    bad_channel_backoff=cfg.bad_channel_backoff_s,
                 )
             )
         elif cfg.rest == "on":
