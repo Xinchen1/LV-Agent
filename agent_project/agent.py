@@ -311,6 +311,7 @@ class OpenMythosAgent:
                     loop_controller=None,
                     harness_kernel=self._harness_kernel,
                     per_turn_cache=self._tool_result_cache.store,
+                    interjection_provider=getattr(self, "krow", None),
                 )
                 _ready("reasoning")
             except Exception as e:
@@ -815,6 +816,20 @@ class OpenMythosAgent:
                 threading.Thread(target=_lazy_mcp_tools, daemon=True).start()
             except Exception as e:
                 print(_style(f"  mcp: failed ({e})", "2"))
+
+        # krow 平台接入(外部工作台): 原生点名注入 + 空闲轮询 + 防重复消费. config.krow.enabled 为假时 self.krow=None, 零影响.
+        self.krow = None
+        if getattr(self.config, "krow", None) and dict(self.config.krow).get("enabled"):
+            try:
+                from .krow import build_bridge
+                self.krow = build_bridge(self.config, mcp_manager=self.mcp_manager)
+                if self.krow is not None:
+                    print(_style(f"  krow: {', '.join(self.krow.status().get('sources', []))} (inject + poll)", "2"))
+                else:
+                    print(_style("  krow: enabled but no source (need KW_API_ENDPOINT/KW_WORKER_TOKEN or a krow MCP server)", "2"))
+            except Exception as e:
+                self.krow = None
+                print(_style(f"  krow: failed ({e})", "2"))
 
         print(_style(f"  tools: {', '.join(enabled_tools)}", "2"))
         # 确保所有内置工具已注册（idempotent）
@@ -4144,6 +4159,7 @@ class OpenMythosAgent:
             config=self.config,
             harness_kernel=self._harness_kernel,
             per_turn_cache=self._tool_result_cache.store,
+            interjection_provider=getattr(self, "krow", None),
         )
         exec_trace = engine.run(DirectPolicy(), direct_ctx)
         return {

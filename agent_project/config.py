@@ -364,6 +364,8 @@ class AgentConfig(BaseModel):
     execution: ExecutionConfig = ExecutionConfig()
     research: ResearchConfig = ResearchConfig()
     mcp: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False, "servers": {}})
+    # krow 平台接入(外部工作台): 原生点名注入 + 空闲轮询 + 防重复消费. 缺省关闭, 键见 agent_project/krow/bridge.py.
+    krow: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
     display: Dict[str, Any] = Field(
         default_factory=dict,
         description="UI/CLI display and theme settings",
@@ -475,7 +477,7 @@ def load_config(config_path: str = "config.yaml") -> AgentConfig:
     # 避免仓库自带的平铺 config.yaml 被静默忽略(此前 bug: backend/deepseek 全丢)。
     agent_config = raw_config.get('agent')
     if agent_config is None:
-        _section_keys = {'experience', 'strategies', 'logging', 'tools', 'mcp', 'display'}
+        _section_keys = {'experience', 'strategies', 'logging', 'tools', 'mcp', 'krow', 'display'}
         agent_config = {k: v for k, v in raw_config.items() if k not in _section_keys}
     elif not isinstance(agent_config, dict):
         agent_config = {}
@@ -488,12 +490,13 @@ def load_config(config_path: str = "config.yaml") -> AgentConfig:
         'logging': raw_config.get('logging', {}),
         'tools': raw_config.get('tools', {}),
         'mcp': raw_config.get('mcp', {}),
+        'krow': raw_config.get('krow', {}),
         'display': raw_config.get('display', {}),
     }
 
     merged = {**agent_config, **top_level}
-    # 兼容两种布局: 顶层 tools/logging/mcp/display 若为空 dict, 不覆盖 agent 内部已配置的同名段
-    for key in ('tools', 'logging', 'mcp', 'experience', 'strategies', 'display'):
+    # 兼容两种布局: 顶层 tools/logging/mcp/krow/display 若为空 dict, 不覆盖 agent 内部已配置的同名段
+    for key in ('tools', 'logging', 'mcp', 'krow', 'experience', 'strategies', 'display'):
         if not raw_config.get(key) and key in agent_config and agent_config.get(key):
             merged[key] = agent_config[key]
 
