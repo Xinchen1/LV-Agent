@@ -51,13 +51,15 @@ class ToolCallParser:
     """Robust parser for [TOOL:name] / XML / JSON / function-call formats."""
 
     FILE_OPS_ACTIONS = {
-        "read", "multi_read", "fast_read", "write", "list", "exists",
-        "analyze", "grep", "diff", "backup", "find", "apply_diff", "verify", "open",
+        "read", "write", "list", "exists", "apply_diff", "mkdir", "delete", "move", "copy",
+        # 以下 action 已移除, 保留在解析集合中: 平铺 {"action":"grep",...} 仍解析为
+        # file_ops 调用, 由 FileOpsTool._REMOVED_ACTIONS 返回重定向提示而非静默丢弃
+        "multi_read", "fast_read", "analyze", "grep", "diff", "backup", "find",
+        "verify", "open", "stat", "tree", "du",
     }
-    # NOTE: analyze/grep/diff/backup/find are no longer file_ops actions (they were
-    # split into search_files / glob / bash_exec). They stay in this set so a flat
-    # {"action":"grep",...} model output still parses as a file_ops call and gets a
-    # redirect hint from FileOpsTool._REMOVED_ACTIONS instead of being dropped.
+    # NOTE: 移除的 action(multi_read/fast_read→read, grep/find→search_files/glob,
+    # open/stat/tree/du/verify/analyze/backup/diff→bash_exec)留在本集合是为了解析
+    # 兼容, 实际执行时由 FileOpsTool 返回重定向提示。
 
     # Precompiled regexes for _parse_json_with_bare_quotes (avoid re.compile in loops)
     _RE_JSON_KEY = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:')
@@ -1105,7 +1107,7 @@ Engineering workflow (Claude Code intelligence + Cursor speed):
   1. UNDERSTAND: Use project_context first. Then read target files with file_ops read and line_numbers=true so you can see exact line numbers and text. Never guess file contents.
   2. PLAN: Decide the minimal set of files to change. Prefer many small, correct edits over one giant rewrite. For multi-file changes, list the files and edit order before starting.
   3. IMPLEMENT: Use file_ops apply_diff with search/replace blocks for every code change. For new files use file_ops write. Do NOT use python_exec to create, modify, or overwrite files; use python_exec only for running scripts, tests, or computations. NEVER output a whole file in Final Answer unless asked.
-  4. VERIFY: After every apply_diff or write, the system automatically runs file_ops verify. If verification fails, read the error, fix with apply_diff, and re-verify. Then run bash_exec with the appropriate test/linter (python -m py_compile, pytest, npm test, cargo check, etc.). Repeat the test-fix loop until all checks pass.
+  4. VERIFY: After every apply_diff or write, the system automatically verifies syntax. If verification fails, read the error, fix with apply_diff, and re-verify. Then run bash_exec with the appropriate test/linter (python -m py_compile, pytest, npm test, cargo check, etc.). Repeat the test-fix loop until all checks pass.
   5. REVIEW: Before finalizing, re-read the changed file(s) briefly with line_numbers=true to confirm the diff applied exactly as intended.
 Do not explain code in Final Answer unless asked; just report what changed and the verification/test result.'''
 if code_mode else 'Follow the ReAct pattern exactly. Each step must be ONE of:'}
@@ -1137,7 +1139,7 @@ Rules:
 - LOCAL FILES: If the task asks about files/articles/documents in the current directory, FIRST use file_ops to list (backed by bash `ls -aF`), then read. Do NOT search the web before checking local files.
 - LOCATE FIRST: For finding projects/folders/files by name, use glob/bash_exec `find` or search_files directly.
 - BASH STYLE: Viewing/searches behave like the terminal — prefer bash-style patterns (ls/find/rg) for exploring folders; use glob for "files of a type anywhere", search_files for "does any file contain X".
-- OPEN FILES: When the user says 'open' / '打开' a file, folder, or report, immediately use file_ops with action='open' and the exact path. This launches it with the default system application (Preview, Finder, browser, etc.). Do NOT just say it is saved; open it.
+- OPEN FILES: When the user says 'open' / '打开' a file, folder, or report, immediately use bash_exec with `open "<exact path>"` (macOS) or `xdg-open "<exact path>"` (Linux). This launches it with the default system application (Preview, Finder, browser, etc.). Do NOT just say it is saved; open it.
 - PARTIAL READS: Use file_ops with offset and limit when only a range is needed.
 - PROJECT ANALYSIS: For analyzing a project, FIRST use project_context, then read key files.
 - PRECISE CODE EDITS: Use file_ops apply_diff with search/replace blocks. Read target files with line_numbers=true first.
@@ -1440,7 +1442,7 @@ When you need external tools, use format: [TOOL:name] arguments [/TOOL]
 After your thinking, provide the final answer in plain text (no more <think> tags).
 
 LOCAL FILES: If the task asks about files, articles, documents, or contents in the current directory, FIRST use file_ops to list and read. Do NOT ask the user for content. Do NOT search the web before checking local files.
-OPEN FILES: When the user says 'open' / '打开' a file, folder, or report, use file_ops with action='open' and the exact path.
+OPEN FILES: When the user says 'open' / '打开' a file, folder, or report, use bash_exec with `open "<exact path>"` (macOS) or `xdg-open "<exact path>"` (Linux).
 """
         if ctx.available_tools:
             base += "\nAvailable tools:\n"
@@ -1518,7 +1520,7 @@ Today is {_today_str()}. Working directory: {_cwd()}
 
 Think briefly inside <think>...</think> tags, then respond directly and concisely.
 If the task requires a tool, use [TOOL:name] {{"arg": "value"}} [/TOOL].
-When the user asks to open a file/report/folder (e.g. '打开', 'open'), use [TOOL:file_ops] {{"action": "open", "path": "<exact path>"}} [/TOOL].
+When the user asks to open a file/report/folder (e.g. '打开', 'open'), use [TOOL:bash_exec] {{"command": "open \\"<exact path>\\""}} [/TOOL] on macOS.
 
 {ctx.extra_context}
 

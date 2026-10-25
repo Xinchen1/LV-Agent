@@ -4,8 +4,7 @@ All actual file I/O is delegated to the Rust binary for speed and safety.
 
 Enhancements:
 - Persistent Rust process pool (--loop mode) eliminates per-call spawn overhead.
-- Global file stat cache with mtime_ns invalidation.
-- Parallel batch execution for multi-read / multi-exists / multi-list.
+- Core actions only: read/write/list/apply_diff/delete/move/copy/mkdir/exists.
 - Default line numbers for read action.
 - Plain text status labels (DELETED/NEW/MODIFIED).
 """
@@ -13,14 +12,11 @@ Enhancements:
 import os
 import re
 import json
-import shlex
-import hashlib
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import BaseTool, ToolResult, TOOLS_REGISTRY
 from ..checkpoint import CheckpointManager
@@ -195,166 +191,13 @@ class _RustProcessPool:
         self._available = False
 
 
-class _FileStatCache:
-    """Thread-safe file stat cache keyed by resolved path. Invalidated by mtime_ns + size."""
-
-    def __init__(self):
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.RLock()
-
-    def get(self, path: str) -> Optional[Dict[str, Any]]:
-        p = Path(path)
-        try:
-            stat = p.stat()
-            key = str(p.resolve())
-            with self._lock:
-                cached = self._cache.get(key)
-                if cached and cached.get("mtime_ns") == stat.st_mtime_ns and cached.get("size") == stat.st_size:
-                    return cached.get("data")
-                return None
-        except Exception:
-            return None
-
-    def set(self, path: str, data: Dict[str, Any]):
-        p = Path(path)
-        try:
-            stat = p.stat()
-            key = str(p.resolve())
-            with self._lock:
-                self._cache[key] = {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size, "data": data}
-        except Exception:
-            pass
-
-    def invalidate(self, path: str):
-        try:
-            key = str(Path(path).resolve())
-            with self._lock:
-                self._cache.pop(key, None)
-        except Exception:
-            pass
-
-
-class FastReadCache:
-    """Fast reading for long articles: chunk and cache locally, retrieve on demand."""
-
-    def __init__(self, cache_dir: Optional[str] = None):
-        if cache_dir is None:
-            cache_dir = Path(__file__).resolve().parents[2] / "data" / "fast_read_cache"
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    
-
-    def _file_key(self, path: str) -> str:
-        p = Path(path)
-        try:
-            stat = p.stat()
-            raw = f"{p.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
-        except Exception:
-            raw = str(Path(path).resolve())
-        return hashlib.sha256(raw.encode()).hexdigest()[:32]
-
-    def _chunk_text(self, text: str, chunk_size: int = 700, overlap: int = 100) -> List[str]:
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
-        chunks = []
-        current = []
-        current_len = 0
-        for para in paragraphs:
-            if current_len + len(para) > chunk_size and current:
-                chunks.append("\n\n".join(current))
-                overlap_text = []
-                overlap_len = 0
-                for prev in reversed(current):
-                    if overlap_len + len(prev) > overlap:
-                        break
-                    overlap_text.insert(0, prev)
-                    overlap_len += len(prev)
-                current = overlap_text
-                current_len = overlap_len
-            current.append(para)
-            current_len += len(para)
-        if current:
-            chunks.append("\n\n".join(current))
-        return chunks
-
-    def _keyword_score(self, query: str, chunk: str) -> float:
-        q_words = re.findall(r"\w+", query.lower())
-        c_words = re.findall(r"\w+", chunk.lower())
-        if not q_words or not c_words:
-            return 0.0
-        c_set = set(c_words)
-        exact_matches = sum(1 for w in q_words if w in c_set)
-        freq_matches = sum(c_words.count(w) for w in q_words)
-        score = (exact_matches * 2.0 + freq_matches * 0.3) / (len(c_words) + len(q_words))
-        return min(score, 1.0)
-
-    def _read_text(self, path: str) -> str:
-        proc = subprocess.run(
-            [RUST_BINARY],
-            input=json.dumps({"action": "read", "path": path}, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr or "rust_file_ops failed")
-        data = json.loads(proc.stdout)
-        if not data.get("success"):
-            raise RuntimeError(data.get("error") or "read failed")
-        return data.get("output", "")
-
-    def cache_file(self, path: str) -> Dict[str, Any]:
-        text = self._read_text(path)
-        if not text.strip():
-            raise ValueError("file is empty or unreadable")
-        key = self._file_key(path)
-        chunks = self._chunk_text(text)
-        data = {
-            "path": str(Path(path).resolve()),
-            "chunks": chunks,
-            "chunk_count": len(chunks),
-        }
-        cache_path = self.cache_dir / f"{key}.json"
-        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        return data
-
-    def load_cache(self, path: str) -> Optional[Dict[str, Any]]:
-        key = self._file_key(path)
-        cache_path = self.cache_dir / f"{key}.json"
-        if not cache_path.exists():
-            return None
-        try:
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            return data
-        except Exception:
-            return None
-
-    def query(self, path: str, query: str, top_k: int = 5) -> str:
-        cache = self.load_cache(path)
-        if cache is None:
-            return ""
-        chunks = cache.get("chunks", [])
-        scored = [(self._keyword_score(query, c), c) for c in chunks]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        parts = []
-        for score, chunk in scored[:top_k]:
-            if score <= 0 and len(parts) >= 1:
-                break
-            parts.append(f"[relevance {score:.2f}]\n{chunk}")
-        return "\n\n---\n\n".join(parts)
-
-
 class FileOpsTool(BaseTool):
     name = "file_ops"
 
     description = (
-        "File operations on files and directories: read, multi_read, fast_read, write, list, exists, "
-        "stat, mkdir, delete, move, copy, tree (depth-limited directory tree), du (directory size), apply_diff (search/replace edits), verify (syntax check), open (launch with the default "
-        "system application), grep (content search), find (file names), analyze (directory listing), "
-        "backup (copy to .bak), diff (file diff). All I/O is performed by a native Rust backend with persistent process "
-        "pooling for low latency.\n"
-        "Use fast_read for long articles: it chunks the file, builds a local vector cache, and retrieves "
-        "only the relevant chunks for a given query."
+        "Core file operations: read, write, list, exists, apply_diff, mkdir, delete, move, copy. "
+        "Use search_files for content search, glob for filename search, and bash_exec for system "
+        "commands (open/stat/tree/du/diff/backup). Native Rust backend with a persistent process pool."
     )
 
     parameters = {
@@ -362,17 +205,12 @@ class FileOpsTool(BaseTool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "multi_read", "fast_read", "write", "list", "exists", "apply_diff", "verify", "open", "mkdir", "delete", "move", "copy", "stat", "tree", "du", "grep", "find", "analyze", "backup", "diff"],
+                "enum": ["read", "write", "list", "exists", "apply_diff", "mkdir", "delete", "move", "copy"],
                 "description": "File operation to perform"
             },
             "path": {
                 "type": "string",
-                "description": "File or directory path (supports glob patterns and Chinese aliases like 桌面/文档/下载)"
-            },
-            "paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of file paths for multi_read action"
+                "description": "File or directory path (supports Chinese aliases like 桌面/文档/下载)"
             },
             "content": {
                 "type": "string",
@@ -400,18 +238,9 @@ class FileOpsTool(BaseTool):
                 "default": True,
                 "description": "Whether to prepend line numbers to each line when reading a file"
             },
-            "query": {
-                "type": "string",
-                "description": "For fast_read: the question/keyword to retrieve relevant chunks from the cached document"
-            },
             "destination": {
                 "type": "string",
                 "description": "Target path (required for move / copy actions)"
-            },
-            "top_k": {
-                "type": "integer",
-                "default": 5,
-                "description": "For fast_read: number of top relevant chunks to return"
             },
         },
         "required": ["action", "path"]
@@ -421,11 +250,8 @@ class FileOpsTool(BaseTool):
         self.allowed_dirs = [Path(d).resolve() for d in (allowed_dirs or ["."])]
         self.max_file_size = max_file_size
         self.unrestricted = unrestricted
-        self._fast_read_cache = FastReadCache()
         self._checkpoint = CheckpointManager()
-        self._stat_cache = _FileStatCache()
         self._pool = _RustProcessPool(size=4)
-        self._batch_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="file_ops_batch_")
         self._prewarm_pool()
 
     _PATH_ALIASES = {
@@ -463,7 +289,6 @@ class FileOpsTool(BaseTool):
     def __del__(self):
         try:
             self._pool.close()
-            self._batch_executor.shutdown(wait=False)
         except Exception:
             pass
 
@@ -598,41 +423,6 @@ class FileOpsTool(BaseTool):
                 return None
         return None
 
-    def _open_path(self, path: str) -> ToolResult:
-        """Open a file or directory with the system's default application.
-
-        Uses `open` on macOS, `xdg-open` on Linux, and `start` on Windows.
-        The call is non-blocking and detached so the agent isn't held up.
-        """
-        import platform
-        p = Path(path)
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"Path not found: {path}")
-
-        system = platform.system()
-        try:
-            if system == "Darwin":
-                cmd = ["open", str(p)]
-            elif system == "Windows":
-                cmd = ["cmd", "/c", "start", "", str(p)]
-            else:
-                cmd = ["xdg-open", str(p)]
-
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return ToolResult(
-                success=True,
-                output=f"Opened {p}",
-                metadata={"action": "open", "path": str(p.resolve()), "os": system},
-            )
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"Failed to open {path}: {e}")
-
     def _call_rust(self, payload: Dict[str, Any], timeout: float = 120.0) -> ToolResult:
         """One-shot fallback when the persistent pool is unavailable."""
         try:
@@ -693,35 +483,6 @@ class FileOpsTool(BaseTool):
                 return fb
         return result
 
-    def _delegate_legacy_action(self, action: str, *, path: str = "", pattern: Optional[str] = None, query: Optional[str] = None, diff: Optional[str] = None, paths: Optional[List[str]] = None) -> ToolResult:
-        """统一本地操作入口: file_ops 对外暴露 grep/find/analyze/backup/diff, 内部委托到专用工具/系统命令."""
-        try:
-            if action == "grep":
-                from .grep_tool import GrepTool
-                q = query or pattern or ""
-                return GrepTool().execute(query=q, path=path or ".")
-            if action == "find":
-                from .grep_tool import GlobTool
-                pat = pattern or query or "**"
-                return GlobTool().execute(pattern=pat, path=path or ".")
-            if action == "analyze":
-                from .bash_exec import BashExecTool
-                cmd = f"ls -la {shlex.quote(path)}" if path else "ls -la ."
-                return BashExecTool().execute(command=cmd)
-            if action == "backup":
-                from .bash_exec import BashExecTool
-                if not path:
-                    return ToolResult(success=False, output="", error="path required for backup")
-                return BashExecTool().execute(command=f"cp -a {shlex.quote(path)} {shlex.quote(path)}.bak")
-            if action == "diff":
-                from .bash_exec import BashExecTool
-                if diff:
-                    return BashExecTool().execute(command=f"diff {diff}")
-                return ToolResult(success=False, output="", error="diff argument required (usage: diff <fileA> <fileB>)")
-            return ToolResult(success=False, output="", error=f"Unsupported action: {action}")
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"local op delegation failed: {e}")
-
     def _list_summary(self, path: str) -> ToolResult:
         """返回真正对用户友好的目录摘要，而不是裸 ls -la。"""
         p = Path(path)
@@ -749,58 +510,10 @@ class FileOpsTool(BaseTool):
             lines.append(f"  ... (+{len(files)-20} more)")
         return ToolResult(success=True, output="\n".join(lines), metadata={"count": len(entries), "dirs": len(dirs), "files": len(files)})
 
-    def _bash_list(self, path: str) -> ToolResult:
-        """列目录走 bash ``ls -aF``(命令行风格), 输出保持 `d name  size` 可解析格式.
-
-        替代 Rust/Python 的 iterdir 实现: 注入 bash 语义, 目录带 / 标记,
-        大小取真实字节数, 与 _read_folder_markdown 的 (\\S+\\.\\w+)\\s 正则兼容.
-        """
-        try:
-            proc = subprocess.run(
-                ["ls", "-aF", path],
-                capture_output=True, text=True, timeout=30,
-            )
-        except FileNotFoundError:
-            return ToolResult(success=False, output="", error="ls not found")
-        except subprocess.TimeoutExpired:
-            return ToolResult(success=False, output="", error="Directory listing timed out")
-        if proc.returncode != 0:
-            return ToolResult(
-                success=False, output="",
-                error=(proc.stderr or "ls failed").strip()[:300],
-            )
-
-        entries: List[tuple] = []
-        for line in proc.stdout.splitlines():
-            raw = line.rstrip()
-            base = raw.rstrip("/@")
-            if base in (".", ".."):
-                continue
-            is_dir = raw.endswith("/") or raw.endswith("/@")
-            entries.append((base, is_dir))
-        entries.sort(key=lambda e: (not e[1], e[0].lower()))
-
-        lines = []
-        for name, is_dir in entries:
-            prefix = "d " if is_dir else "  "
-            size = 0
-            if not is_dir:
-                try:
-                    size = os.stat(os.path.join(path, name)).st_size
-                except Exception:
-                    size = -1
-            size_str = f"{size:>10d}" if size >= 0 else f"{'?':>10s}"
-            lines.append(f"{prefix}{name:<40s} {size_str}")
-        return ToolResult(
-            success=True,
-            output="\n".join(lines) or "(empty)",
-            metadata={"count": len(entries), "engine": "bash_ls"},
-        )
-
     def _python_fallback(self, payload: Dict[str, Any]) -> ToolResult:
         """Pure-Python fallback for basic file ops when the Rust binary is
-        unavailable (wrong architecture / missing). Supports the most common
-        actions: read, write, list, exists, multi_read, apply_diff, verify."""
+        unavailable (wrong architecture / missing). Supports the core actions:
+        read, write, list, exists, apply_diff."""
         action = payload.get("action", "")
         path = payload.get("path", "")
         try:
@@ -852,49 +565,17 @@ class FileOpsTool(BaseTool):
                 return ToolResult(success=True, output="\n".join(lines) or "(empty)", metadata={"count": len(entries), "dirs": len(dirs), "files": len(files), "fallback": "python"})
             if action == "exists":
                 return ToolResult(success=True, output=str(p.exists()), metadata={"exists": p.exists(), "fallback": "python"})
-            if action == "open":
-                resolved_path = str(self._resolve_path_smart(path))
-                return self._open_path(resolved_path)
             if action == "apply_diff":
                 return self._python_apply_diff(p, payload)
-            if action == "verify":
-                return self._python_verify(p)
-            if action == "multi_read":
-                return self._python_multi_read(payload)
-            # 统一本地操作入口: grep/find/analyze/backup/diff 委托到对应实现
-            if action in ("grep", "find", "analyze", "backup", "diff"):
-                return self._delegate_legacy_action(action, path=path, pattern=payload.get("pattern"), query=payload.get("query"), diff=payload.get("diff"), paths=payload.get("paths"))
-            # Unsupported action in fallback
             return ToolResult(
                 success=False, output="",
                 error=f"Action '{action}' requires the Rust binary (incompatible/missing on this machine). "
                       f"Install Rust and run `cargo build --release` in the rust_file_ops/ directory, "
-                      f"or use a supported action: read, multi_read, fast_read, write, list, exists, "
-                      f"apply_diff, verify, open."
+                      f"or use a supported action: read, write, list, exists, apply_diff."
             )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Python fallback error: {e}")
 
-
-    def _python_multi_read(self, payload: Dict[str, Any]) -> ToolResult:
-        """纯 Python multi_read: 并行读取多个文件, 合并输出."""
-        paths = payload.get("paths") or []
-        if isinstance(paths, str):
-            paths = [paths]
-        if not paths:
-            return ToolResult(success=False, output="", error="paths 参数 required for multi_read")
-        results = []
-        for fp in paths:
-            fp_path = Path(str(fp))
-            if not fp_path.exists():
-                results.append(f"--- {fp} [ERROR: not found] ---")
-                continue
-            try:
-                text = fp_path.read_text(encoding="utf-8", errors="replace")
-                results.append(f"--- {fp} ---\n{text}")
-            except Exception as e:
-                results.append(f"--- {fp} [ERROR: {e}] ---")
-        return ToolResult(success=True, output="\n\n".join(results), metadata={"files": len(paths), "fallback": "python"})
 
     def _python_apply_diff(self, p: Path, payload: Dict[str, Any]) -> ToolResult:
         """纯 Python 的 apply_diff: 支持 SEARCH/REPLACE 块, 精确+行级匹配, 失败给最近行提示."""
@@ -961,65 +642,7 @@ class FileOpsTool(BaseTool):
         out = f"Applied {applied} diff block(s) to {p}"
         if backup:
             out += f"\nBackup saved to {backup}"
-        # 自动语法验证
-        verr = self._python_verify_syntax(p, current)
-        if verr:
-            out += f"\n⚠ SYNTAX VERIFICATION FAILED:\n{verr}\nPlease fix the syntax and re-apply."
         return ToolResult(success=True, output=out, metadata={"fallback": "python"})
-
-    def _python_verify(self, p: Path) -> ToolResult:
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"File not found: {p}")
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"Failed to read {p}: {e}")
-        verr = self._python_verify_syntax(p, content)
-        if verr:
-            return ToolResult(success=False, output="", error=verr)
-        ext = p.suffix.lower().lstrip(".")
-        names = {"py": "Python", "js": "JavaScript", "ts": "TypeScript", "json": "JSON",
-                 "yaml": "YAML", "yml": "YAML", "sh": "Shell"}
-        name = names.get(ext, "Unknown")
-        return ToolResult(success=True, output=f"{name} syntax OK", metadata={"fallback": "python"})
-
-    def _python_verify_syntax(self, p: Path, content: str) -> str:
-        """返回空串表示语法 OK, 否则返回错误描述."""
-        ext = p.suffix.lower().lstrip(".")
-        try:
-            if ext == "py":
-                import ast
-                ast.parse(content)
-                return ""
-            if ext in ("json",):
-                json.loads(content)
-                return ""
-            if ext in ("yaml", "yml"):
-                import yaml
-                yaml.safe_load(content)
-                return ""
-            if ext in ("js", "mjs", "cjs", "ts"):
-                # 无 node 时跳过 JS 检查
-                import subprocess as sp
-                if ext == "ts":
-                    return ""  # TS 需要 tsc, 跳过
-                r = sp.run(["node", "--check"], input=content.encode(),
-                           capture_output=True, timeout=15)
-                if r.returncode != 0:
-                    return f"JS syntax error: {r.stderr.decode()[:300]}"
-                return ""
-            if ext in ("sh", "command", "bash"):
-                import subprocess as sp
-                r = sp.run(["bash", "-n"], input=content.encode(),
-                           capture_output=True, timeout=15)
-                if r.returncode != 0:
-                    return f"Shell syntax error: {r.stderr.decode()[:300]}"
-                return ""
-            return ""
-        except SyntaxError as e:
-            return f"Syntax error: {e}"
-        except Exception as e:
-            return f"Verification error: {e}"
 
     def _json_to_result(self, data: Dict[str, Any]) -> ToolResult:
         return ToolResult(
@@ -1029,26 +652,34 @@ class FileOpsTool(BaseTool):
             metadata=data.get("metadata") or {},
         )
 
-    def _parallel_call(self, payloads: List[Dict[str, Any]], timeout: float = 120.0) -> List[ToolResult]:
-        """Execute multiple rust calls in parallel using the thread pool."""
-        futures = {self._batch_executor.submit(self._call_rust_fast, p, timeout): i for i, p in enumerate(payloads)}
-        results: List[ToolResult] = [None] * len(payloads)
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                results[idx] = ToolResult(success=False, output="", error=f"Parallel call failed: {e}")
-        return results
+    _REMOVED_ACTIONS = {
+        "multi_read": "read each file once (calls can run in parallel)",
+        "fast_read": "read + offset/limit",
+        "verify": "bash_exec: python -m py_compile <path>",
+        "open": "bash_exec: open <path> (macOS) or xdg-open <path>",
+        "stat": "bash_exec: stat <path> or ls -l <path>",
+        "tree": "bash_exec: find <path> -maxdepth N",
+        "du": "bash_exec: du -sh <path>",
+        "grep": "search_files",
+        "find": "glob",
+        "analyze": "bash_exec: ls -la <path>",
+        "backup": "bash_exec: cp -a <path> <path>.bak",
+        "diff": "bash_exec: diff <fileA> <fileB>",
+    }
 
     def execute(self, action: str, path: str = "", content: Optional[str] = None,
                 destination: Optional[str] = None,
                 offset: Optional[int] = None, limit: Optional[int] = None,
-                pattern: Optional[str] = None, diff: Optional[str] = None,
+                diff: Optional[str] = None,
                 encoding: str = "utf-8", line_numbers: bool = True,
-                paths: Optional[List[str]] = None, use_cache: bool = True,
-                query: Optional[str] = None, top_k: int = 5,
                 options: Optional[dict] = None, **kwargs) -> ToolResult:
+        action = str(action).strip().lower()
+        hint = self._REMOVED_ACTIONS.get(action)
+        if hint:
+            return ToolResult(
+                success=False, output="",
+                error=f"file_ops action '{action}' is removed. Use {hint}.",
+            )
         # LLM 常用嵌套 options={'offset':…,'limit':…} 形式, 展开到顶层参数
         if options and isinstance(options, dict):
             for k, v in options.items():
@@ -1056,28 +687,12 @@ class FileOpsTool(BaseTool):
                     offset = v
                 elif k == "limit" and limit is None:
                     limit = v
-                elif k == "pattern" and pattern is None:
-                    pattern = v
                 elif k == "diff" and diff is None:
                     diff = v
                 elif k == "encoding" and encoding == "utf-8":
                     encoding = v
                 elif k == "line_numbers":
                     line_numbers = bool(v)
-                elif k == "query" and query is None:
-                    query = v
-                elif k == "top_k":
-                    top_k = v
-        # multi_read 场景: 支持只有 paths 无 path(模型常这样), 补默认 path
-        if action == "multi_read" and not paths and path:
-            paths = [path]
-        if action == "multi_read" and not path:
-            path = "."
-        # 统一本地操作入口: grep/find/analyze/backup/diff 在 file_ops 内委托到对应实现
-        _a = str(action).strip().lower()
-        if _a in ("grep", "find", "analyze", "backup", "diff"):
-            resolved = str(self._resolve_path_smart(path)) if path else ""
-            return self._delegate_legacy_action(_a, path=resolved, pattern=pattern, query=query, diff=diff, paths=paths)
         try:
             resolved = str(self._resolve_path_smart(path))
 
@@ -1090,139 +705,10 @@ class FileOpsTool(BaseTool):
             if action == "list":
                 return self._list_summary(resolved)
 
-            if action == "fast_read":
-                try:
-                    cache = self._fast_read_cache.load_cache(resolved)
-                    if cache is None:
-                        cache = self._fast_read_cache.cache_file(resolved)
-                        header = f"[fast_read] cached {cache['chunk_count']} chunks from {resolved}\n\n"
-                    else:
-                        header = f"[fast_read] loaded cached {cache['chunk_count']} chunks from {resolved}\n\n"
-                    if query:
-                        retrieved = self._fast_read_cache.query(resolved, query, top_k=top_k)
-                        if not retrieved:
-                            return ToolResult(
-                                success=True,
-                                output=header + "No relevant chunks found for the query.",
-                                metadata={"chunks": cache["chunk_count"], "query": query}
-                            )
-                        return ToolResult(
-                            success=True,
-                            output=header + retrieved,
-                            metadata={"chunks": cache["chunk_count"], "query": query, "top_k": top_k}
-                        )
-                    preview = "\n\n---\n\n".join(cache["chunks"][:top_k])
-                    return ToolResult(
-                        success=True,
-                        output=header + preview,
-                        metadata={"chunks": cache["chunk_count"], "preview_chunks": min(top_k, cache["chunk_count"])}
-                    )
-                except Exception as e:
-                    return ToolResult(success=False, output="", error=f"fast_read failed: {e}")
-
-            if action == "multi_read":
-                resolved_paths = [str(self._resolve_path_smart(p)) for p in (paths or [])]
-                if not resolved_paths:
-                    return ToolResult(success=False, output="", error="paths parameter required for multi_read action")
-                payloads = [
-                    {
-                        "action": "read",
-                        "path": rp,
-                        "offset": offset,
-                        "limit": limit,
-                        "encoding": encoding,
-                        "line_numbers": line_numbers,
-                    }
-                    for rp in resolved_paths
-                ]
-                results = self._parallel_call(payloads)
-                merged = []
-                for rp, result in zip(resolved_paths, results):
-                    if result.success:
-                        merged.append(f"--- {rp} ---\n{result.output}")
-                    else:
-                        merged.append(f"--- {rp} [ERROR: {result.error}] ---")
-                return ToolResult(success=True, output="\n\n".join(merged), metadata={"files": len(resolved_paths)})
-
-            if action == "open":
-                return self._open_path(resolved)
-
-            # 本地强操作:  mkdir/delete/move/copy/stat 由 Python 原生实现( Rust 后端暂不支持),
-            # 带路径防护; 避免把简单本地操作甩给 bash_exec.
-            if action in ("mkdir", "delete", "move", "copy", "stat", "tree", "du"):
-                import shutil, os, time as _time, json as _json
+            # 仅 mkdir/delete/move/copy 由 Python 原生实现, 带路径防护
+            if action in ("mkdir", "delete", "move", "copy"):
+                import shutil
                 p = Path(resolved)
-                if action == "tree":
-                    depth = int((options or {}).get("depth") or kwargs.get("depth") or 2)
-                    max_entries = 200
-                    lines: List[str] = []
-                    def _walk(d: Path, prefix: str, level: int) -> None:
-                        if level > depth or len(lines) >= max_entries:
-                            return
-                        try:
-                            entries = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-                        except Exception:
-                            return
-                        hidden = 0
-                        for i, e in enumerate(entries):
-                            if len(lines) >= max_entries:
-                                hidden += 1
-                                continue
-                            conn = "└── " if i == len(entries) - 1 else "├── "
-                            mark = "/" if e.is_dir() else ""
-                            lines.append(f"{prefix}{conn}{e.name}{mark}")
-                            if e.is_dir():
-                                ext = "    " if i == len(entries) - 1 else "│   "
-                                _walk(e, prefix + ext, level + 1)
-                        if hidden:
-                            lines.append(f"{prefix}… ({hidden} more)")
-                    if not p.exists():
-                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
-                    lines.append(str(p) + ("/" if p.is_dir() else ""))
-                    if p.is_dir():
-                        _walk(p, "", 1)
-                    return ToolResult(success=True, output="\n".join(lines), metadata={"depth": depth, "entries": len(lines)})
-                if action == "du":
-                    max_files = 20000
-                    total = 0
-                    files = 0
-                    dirs = 0
-                    def _size(d: Path) -> None:
-                        nonlocal total, files, dirs
-                        try:
-                            for e in d.iterdir():
-                                if files >= max_files:
-                                    return
-                                if e.is_symlink():
-                                    continue
-                                if e.is_dir():
-                                    dirs += 1
-                                    _size(e)
-                                else:
-                                    try:
-                                        total += e.stat().st_size
-                                        files += 1
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            return
-                    if not p.exists():
-                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
-                    if p.is_file():
-                        total = p.stat().st_size
-                        files = 1
-                    else:
-                        _size(p)
-                    human = f"{total/1073741824:.2f}GB" if total >= 1073741824 else (f"{total/1048576:.1f}MB" if total >= 1048576 else f"{total/1024:.1f}KB")
-                    return ToolResult(success=True, output=f"{resolved}: {human} ({files} files, {dirs} dirs)", metadata={"bytes": total, "files": files, "dirs": dirs})
-                if action == "stat":
-                    if not p.exists():
-                        return ToolResult(success=False, output="", error=f"Path not found: {resolved}")
-                    st = p.stat()
-                    info = {"path": str(p), "is_dir": p.is_dir(), "size": st.st_size,
-                            "modified": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(st.st_mtime)),
-                            "mode": oct(st.st_mode)[-3:]}
-                    return ToolResult(success=True, output=_json.dumps(info, ensure_ascii=False, indent=2), metadata=info)
                 if action == "mkdir":
                     p.mkdir(parents=True, exist_ok=True)
                     return ToolResult(success=True, output=f"mkdir -p {resolved}")
@@ -1262,8 +748,6 @@ class FileOpsTool(BaseTool):
                 payload["offset"] = offset
             if limit is not None:
                 payload["limit"] = limit
-            if pattern is not None:
-                payload["pattern"] = pattern
             if diff is not None:
                 payload["diff"] = diff
             if encoding is not None:
@@ -1276,9 +760,6 @@ class FileOpsTool(BaseTool):
                 cp_meta = self._checkpoint.snapshot(resolved, tag=action)
 
             result = self._call_rust_fast(payload)
-
-            if action in ("write", "apply_diff") and result.success:
-                self._stat_cache.invalidate(resolved)
 
             if cp_meta is not None:
                 rust_backup = CheckpointManager.parse_rust_backup_path(result.output or "")

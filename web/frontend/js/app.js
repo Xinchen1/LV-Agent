@@ -80,18 +80,11 @@
   async function execFileOps(args) {
     const {action, path = '', content, offset, limit} = args;
     if (action === 'list') return await listDir(path);
-    if (action === 'read' || action === 'fast_read') return await readFile(path, offset, limit);
+    if (action === 'read') return await readFile(path, offset, limit);
     if (action === 'write') return await writeFile(path, content);
     if (action === 'exists') return await existsPath(path);
     if (action === 'delete') return await deletePath(path);
     if (action === 'mkdir') return await mkdirPath(path);
-    if (action === 'analyze') return await analyzePath(path);
-    if (action === 'multi_read') {
-      const paths = args.paths || [path];
-      const results = [];
-      for (const p of paths) { const r = await readFile(p); results.push(`--- ${p} ---\n${r.output || r.error}`); }
-      return {success: true, output: results.join('\n\n')};
-    }
     return {success: false, error: `action "${action}" 暂不支持本地执行`};
   }
   async function mkdirPath(path) {

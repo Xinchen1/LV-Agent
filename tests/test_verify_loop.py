@@ -75,30 +75,14 @@ def test_write_auto_verify():
     assert "SYNTAX VERIFICATION FAILED" in r.output.upper(), r.output
 
 
-def test_verify_action():
+def test_verify_action_redirects_to_bash_exec():
     td = tempfile.mkdtemp()
     good = os.path.join(td, "good.py")
-    bad = os.path.join(td, "bad.py")
     Path(good).write_text("print(1)\n", encoding="utf-8")
-    Path(bad).write_text("def broken(:\n", encoding="utf-8")
     tool = make_tool()
-    rg = tool.execute(action="verify", path=good)
-    assert rg.success, rg.error
-    rb = tool.execute(action="verify", path=bad)
-    assert not rb.success, "坏代码 verify 应失败"
-    assert rb.error and "error" in rb.error.lower() or "invalid" in (rb.error or "").lower()
-
-
-def test_python_fallback_verify_syntax():
-    """后缀比较 bug 回归: .py 文件必须被正确识别."""
-    tool = make_tool()
-    td = tempfile.mkdtemp()
-    bad = os.path.join(td, "bad.py")
-    r = tool._python_verify_syntax(Path(bad), "def broken(:\n    pass\n")
-    assert r, "坏 Python 应返回语法错误, 而不是空(后缀 lstrip bug)"
-    good = os.path.join(td, "good.py")
-    r2 = tool._python_verify_syntax(Path(good), "print(1)\n")
-    assert r2 == "", "好代码应返回空"
+    r = tool.execute(action="verify", path=good)
+    assert not r.success
+    assert "bash_exec" in (r.error or "")
 
 
 def test_main_loop_json_final_answer_extraction():

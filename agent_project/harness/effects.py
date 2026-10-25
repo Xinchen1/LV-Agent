@@ -109,10 +109,7 @@ def classify(tool_name: str, arguments: Dict[str, Any]) -> Tuple[EffectClass, Tu
         op = str(
             arguments.get("operation") or arguments.get("action") or arguments.get("op") or ""
         ).lower()
-        read_ops = {
-            "read", "multi_read", "fast_read", "list", "exists", "stat", "info",
-            "tail", "head", "grep", "find", "analyze", "diff", "verify",
-        }
+        read_ops = {"read", "list", "exists"}
         if op in read_ops:
             cls = EffectClass.READ
         else:

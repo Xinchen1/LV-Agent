@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import shlex
 import sys
 import time
 import threading
@@ -1915,7 +1916,7 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
             "",
             "Available tools (单一事实源, 文本协议下模型唯一的工具发现源):",
             "{TOOL_LIST}",
-            "- fast_read: 长文档(访谈/报告/文章/大文件)先向量化入库, 再按语义查询取相关片段, 不全文塞入",
+            "- 长文档: 用 file_ops read 的 offset/limit 分段读取, 或用 search_files 定位相关片段, 不全文塞入",
             "",
             f"当前工作目录: {os.getcwd()} (文件操作用相对该目录的路径, 不要凭空编造绝对路径)",
             "",
@@ -1941,7 +1942,7 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
             "- DOWNLOADING CODE / CLONING REPOS: 用户说'下载源码/克隆仓库/git下载'时, 直接用 git(command='clone', repository='https://github.com/OWNER/REPO.git') 或 bash_exec('git clone ... 目标目录'); 不要用 api_call 只查信息。先确认目标目录存在, 再真正执行 clone, 完成后汇报实际结果。",
             "- READING FOLDERS: 当用户说'阅读/读/查看 某个文件夹'时, 必须 list 后再 read 其中的文件内容, 然后基于内容回答。绝不能只 list 目录就回复。",
             "- READING A FILE: 用户说'看/读/打开/查看 X文件/我的XX'时, 先确定文件路径(用 glob 或 file_ops 定向查找, 不要全盘 find), 然后 read 文件内容并基于内容回答。绝不能只列出路径不读内容。",
-            "- LONG DOCUMENTS: 长文档(访谈/报告/长文章, 通常>5KB或>100行)用 fast_read 而非 read: 先 fast_read 向量化, 再用 query 提取用户关心的相关片段, 避免全文塞爆上下文。短文件(<5KB)用普通 read。",
+            "- LONG DOCUMENTS: 长文档(访谈/报告/长文章, 通常>5KB或>100行)用 file_ops read 的 offset/limit 分段读取, 或用 search_files 定位相关片段, 避免全文塞爆上下文。",
             "- FINDING FILES: 用 glob(pattern, path) 定向查找, 不要用 bash find 全盘扫描(会刷屏权限错误)。只在用户明确要求全盘搜索时才用 bash find, 并加 2>/dev/null 屏蔽权限报错。",
             "- CREATING FILES/ARTICLES: 用户说'新建/创建/写一篇/保存一篇文章/把XX放进去'时, 必须直接调用 file_ops(action='write', path='<当前目录/文件名.md>', content='<完整内容>') 真正创建文件。写完用 file_ops(action='read', path=...) 验证内容已写入。绝不能只 list 目录或只说'好的'而不实际 write。",
             "- MODIFYING FILES: 用户说'给XX加功能/改一下/修改/更新/优化XX'时, 必须先 read 目标文件, 然后直接调用 file_ops(action='apply_diff', path=..., diff='<<<<<<< SEARCH\n原文\n=======\n新文\n>>>>>>> REPLACE') 或 file_ops(action='write', path=..., content='完整新内容') 真正修改文件。修改后 read 验证。绝不能只描述'应该怎么改'而不实际执行修改。",
@@ -2495,9 +2496,9 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
 
         # For "open" / "打开" requests, bypass the model and open the file directly.
         open_path = self._resolve_open_path(task)
-        if open_path and (action is None or action.tool_name != 'file_ops' or action.arguments.get('action') != 'open'):
+        if open_path and (action is None or action.tool_name != 'bash_exec'):
             from .tools import ToolCall
-            action = ToolCall(tool_name='file_ops', arguments={'action': 'open', 'path': open_path})
+            action = ToolCall(tool_name='bash_exec', arguments={'command': f'open {shlex.quote(open_path)}'})
 
         # 阅读文件夹意图: "阅读/读/查看" + 上文提到过具体目录(如"看下桌面的xx文件夹")
         # -> 自动补全为读取该目录, 避免模型只 list 不 read。
@@ -4034,7 +4035,7 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
             return None
         # 只放行只读/明确无副作用的操作; 写/删/移动等必须走主循环
         SAFE = {
-            "file_ops": {"list", "read", "stat", "exists", "verify", "multi_read", "fast_read"},
+            "file_ops": {"list", "read", "exists"},
             "glob": None, "search_files": None, "weather": None,
         }
         if tool_name not in SAFE:
@@ -4538,17 +4539,6 @@ class OpenMythosAgent(AgentIntentMixin, AgentToolsMixin):
                 if "action" not in args:
                     args = dict(args)
                     args["action"] = "list" if os.path.isdir(args["path"]) else "read"
-
-                # 长文档自动向量化: 对大文件(>5KB)的 read 自动升级为 fast_read,
-                # 语义检索相关片段而不是全文塞爆上下文(机器理解优先)。
-                if args.get("action") in ("read", None) and isinstance(args.get("path"), str):
-                    try:
-                        from pathlib import Path as _P2
-                        _fp = _P2(args["path"]).expanduser()
-                        if _fp.is_file() and _fp.stat().st_size > 5120:
-                            args["action"] = "fast_read"
-                    except Exception:
-                        pass
 
             # 通用参数修复: 常见缺省/类型错误在执行前自动补齐, 减少无效调用
             args = self._repair_tool_arguments(tool_call.tool_name, args)

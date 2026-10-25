@@ -179,10 +179,10 @@ BUILTIN_SKILLS: List[Dict[str, Any]] = [
             "1. Resolve paths safely; verify existence before destructive operations.\n"
             "2. Prefer `file_ops` for read/write/list and `bash_exec` for bulk operations.\n"
             "3. Summarize what you found or changed.\n"
-            "4. If the user asks to open a file, use `file_ops(action='open', path=...)` directly."
+            "4. If the user asks to open a file, use `bash_exec(command='open <path>')` directly."
         ),
         "examples": [
-            {"input": "打开最近的报告", "output": "调用 file_ops action=open 打开 last_report_path"},
+            {"input": "打开最近的报告", "output": "调用 bash_exec open last_report_path"},
         ],
     },
     {

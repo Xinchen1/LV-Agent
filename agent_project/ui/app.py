@@ -86,6 +86,8 @@ class CLIApp:
             r,
             backend=self._backend_name(),
             model=self._model_name(),
+            tools=self._tool_count(),
+            loops=self._loop_count(),
         )
         r.print(status)
         r.blank()
