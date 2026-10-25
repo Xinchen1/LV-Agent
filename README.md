@@ -230,6 +230,10 @@ cp config.example.yaml config.yaml
 
 ## 更新日志
 
+### 2026-10-25
+
+- **工具链精简** — `file_ops` 移除 `fast_read`/`analyze`/`multi_read`，统一 `read` 接口支持 `offset`/`limit` 分页读取；`verify` 动作改为重定向到 `bash_exec` 执行外部校验工具，移除内置语法检查逻辑；同步更新对应测试用例与前端处理分支。
+
 ### 2026-10-05
 
 - **循环加固（11 项修复）** — 复读检测与折叠（原句/两句交替重复超阈值自动压缩，不再刷屏）；阶段 2 纯文本空转熔断（连续 3 轮无工具无答案强制收尾，此前绕过无进展检查可无限催促）；工具参数按 `execute()` 签名过滤 + TypeError 提取肇事 kwarg 自动重试（模型多生成 `description` 等字段不再废掉整次调用）；修复 ConvergenceChecker 去重 key 与 `call_counts` 写入格式不一致导致的死代码（阈值对齐为 ≥3 次）；超时放弃的同参调用不再重复起线程（inflight Event 防堆积）；限流文本识别（ResourceExhausted/rate limit）+ 指数退避；fast-path 错误透出真实 `str(e)[:200]` 而非笼统提示；glob 0 结果给出可操作提示；API Key 输入改 getpass 掩码（5 处）；摘要去重防上下文污染。
