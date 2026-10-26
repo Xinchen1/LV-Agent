@@ -166,6 +166,13 @@ class ExecutionContext:
     plan_update_note: str = ""
     replan_count: int = 0
 
+    # krow 运行中注入(主人插话 / 组长任务单更新 / 大厅点名 / 站内信): 工具调用边界取到的成品文本,
+    # 由 _attach_monitor_hints 一次性拼进下一轮 prompt 后清空(取到即送, 不囤积).
+    interjections: List[str] = field(default_factory=list)
+    # 轮尾续跑(等价 kit 的 --event stop): 模型给出最终答案时若有主人插话, 不收口、带着插话再跑一轮;
+    # 每次 run 最多续一次, 防环.
+    interjection_stop_used: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Tool executor
@@ -688,6 +695,7 @@ class ExecutionEngine:
         config: Any,
         harness_kernel: Optional[Any] = None,
         per_turn_cache: Optional[Dict[str, ToolResult]] = None,
+        interjection_provider: Optional[Any] = None,
     ):
         self.model = model_backend
         self.config = config
@@ -698,6 +706,69 @@ class ExecutionEngine:
         self.convergence = ConvergenceChecker(min_steps=2)
         self.obs_manager = ObservationManager()
         self.logger = logging.getLogger("ExecutionEngine")
+        # 运行中注入提供者(krow.KrowBridge 或任何实现 interjection_text(ctx) 的对象 / 可调用):
+        # 在每次工具调用结束、下一步思考之前拉一次, 有话就拼进下一轮 prompt. None = 不接.
+        self.interjection_provider = interjection_provider
+
+    # ------------------------------------------------------------------
+    # 运行中注入(krow 原生点名注入; 等价 BYO CLI 的 PostToolUse 钩子 + Stop 钩子)
+    # ------------------------------------------------------------------
+    def _interject(self, ctx: ExecutionContext, method: str) -> Optional[str]:
+        """调提供者的某个方法(interjection_text / owner_only_text); 任何异常都吞掉——注入是增强项, 不反噬主循环."""
+        provider = self.interjection_provider
+        if provider is None:
+            return None
+        try:
+            fn = getattr(provider, method, None)
+            if fn is None and method == "interjection_text" and callable(provider):
+                fn = provider
+            if fn is None:
+                return None
+            text = fn(ctx)
+            text = str(text or "").strip()
+            return text or None
+        except Exception as e:
+            self.logger.debug(f"interjection provider {method} failed: {e}")
+            return None
+
+    def _attach_contract(self, ctx: ExecutionContext) -> None:
+        """把注入契约(抬头 + 口令)放进本次执行的 extra_context, 模型据此认抬头、不理伪造."""
+        provider = self.interjection_provider
+        if provider is None:
+            return
+        try:
+            contract = getattr(provider, "contract_text", None)
+            text = str(contract() or "").strip() if callable(contract) else ""
+        except Exception as e:
+            self.logger.debug(f"interjection contract failed: {e}")
+            return
+        if text and text not in (ctx.extra_context or ""):
+            ctx.extra_context = (ctx.extra_context + "\n\n" + text).strip() if ctx.extra_context else text
+
+    def _pull_interjections(self, ctx: ExecutionContext) -> None:
+        """工具调用边界: 拉一次, 有话入 ctx.interjections(下一轮 prompt 带上)."""
+        text = self._interject(ctx, "interjection_text")
+        if text:
+            ctx.interjections.append(text)
+            if ctx.stream_callback:
+                ctx.stream_callback("status", f"krow: 注入 {text.count(chr(10)) + 1} 行平台消息")
+
+    def _stop_interjection(self, ctx: ExecutionContext) -> Optional[str]:
+        """轮尾: 模型想收口时只拉主人插话; 有话且本次 run 还没续过 → 返回文本(调用方不收口、再跑一轮)."""
+        if ctx.interjection_stop_used:
+            return None
+        text = self._interject(ctx, "owner_only_text")
+        if not text:
+            return None
+        ctx.interjection_stop_used = True
+        return text
+
+    def _attach_interjections(self, prompt: str, ctx: ExecutionContext) -> str:
+        if not ctx.interjections:
+            return prompt
+        joined = "\n\n".join(ctx.interjections)
+        ctx.interjections = []
+        return prompt + f"\n\n{joined}\n"
 
     # ------------------------------------------------------------------
     # 分支监控 agent: 旁路感知主 agent 执行, 发现异常注入简明提示
@@ -812,7 +883,8 @@ class ExecutionEngine:
                 ctx.stream_callback("status", f"monitor: {hint[:60]}")
 
     def _attach_monitor_hints(self, prompt: str, ctx: ExecutionContext) -> str:
-        """把监控提示注入主 agent 的下一轮 prompt."""
+        """把监控提示注入主 agent 的下一轮 prompt(krow 运行中注入也在这里一并带上)."""
+        prompt = self._attach_interjections(prompt, ctx)
         if not ctx.monitor_hints:
             return prompt
         joined = "\n".join(ctx.monitor_hints[-2:])
@@ -831,6 +903,7 @@ class ExecutionEngine:
         start = time.time()
 
         try:
+            self._attach_contract(ctx)
             prompt = policy.first_prompt(ctx)
             step_number = 0
             while True:
@@ -877,6 +950,19 @@ class ExecutionEngine:
 
                 # ---- 阶段 1: 有最终答案 → 完成 ----
                 if parsed.final_answer:
+                    # krow 轮尾续跑: 收口前只拉主人插话, 有话就不收口——把插话拼进下一轮再跑(每次 run 最多一次).
+                    _stop_text = self._stop_interjection(ctx) if step_number < ctx.max_steps else None
+                    if _stop_text:
+                        ctx.steps.append(record)
+                        trace.steps.append(record)
+                        self._emit_status(ctx, "krow: 主人在收口前插话, 继续处理")
+                        prompt = self._attach_monitor_hints(
+                            (policy.next_prompt(ctx, output) or "")
+                            + f"\n\n{_stop_text}\n\n你刚才准备给出的答案是:\n{parsed.final_answer[:1500]}\n"
+                              "请先按主人插话调整, 再给出最终答案(已完成且不受影响的部分不重做)。",
+                            ctx,
+                        )
+                        continue
                     record.final_answer = parsed.final_answer
                     trace.final_answer = parsed.final_answer
                     trace.success = True
@@ -978,6 +1064,8 @@ class ExecutionEngine:
                     break
 
                 self._monitor_and_inject(ctx, output)
+                # krow 原生点名注入: 工具调用结束、下一步思考之前拉一次(等价 BYO CLI 的 PostToolUse 钩子)
+                self._pull_interjections(ctx)
 
                 if step_number >= ctx.max_steps:
                     if self._extend_loops(ctx):

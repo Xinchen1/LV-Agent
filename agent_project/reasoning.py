@@ -173,6 +173,7 @@ class ReasoningEngine:
         loop_controller: Optional[LoopController] = None,
         harness_kernel: Optional[Any] = None,
         per_turn_cache: Optional[Any] = None,
+        interjection_provider: Optional[Any] = None,
     ):
         self.model = model_backend
         self.tokenizer = tokenizer
@@ -204,6 +205,7 @@ class ReasoningEngine:
             config=config,
             harness_kernel=harness_kernel,
             per_turn_cache=per_turn_cache,
+            interjection_provider=interjection_provider,
         )
 
     def reason(
