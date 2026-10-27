@@ -1,14 +1,25 @@
 // === Web bridge: mock electronAPI over WebSocket ===
 (function(){
-  const wsUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
+  const _qp = new URLSearchParams(location.search);
+  let _token = _qp.get('token') || localStorage.getItem('lv_web_token') || '';
+  function wsUrl(){
+    const base = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
+    return _token ? base + '?token=' + encodeURIComponent(_token) : base;
+  }
   let ws = null, fullText = '';
   let outputCb = () => {}, chunkCb = () => {}, exitCb = () => {}, stderrCb = () => {};
   const DEFAULT_CFG = { backend:'openai', model:'', base_url:'', api_key:'', temperature:0.7, max_tokens:4096 };
   let dirHandle = null;
   function connect(){
-    ws = new WebSocket(wsUrl);
+    ws = new WebSocket(wsUrl());
     ws.onopen = () => { if (dirHandle) { send({type: 'fs_ready', folder: dirHandle.name}); } };
-    ws.onclose = () => setTimeout(connect, 2000);
+    ws.onclose = (ev) => {
+      if (ev && ev.code === 1008 && !_token) {
+        const t = prompt('该服务启用了访问令牌，请输入 token：');
+        if (t && t.trim()) { _token = t.trim(); try { localStorage.setItem('lv_web_token', _token); } catch(e){} }
+      }
+      setTimeout(connect, 2000);
+    };
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === 'ready') { const b = document.getElementById('modelBadge'); if (b) b.textContent = m.config?.model || ''; }

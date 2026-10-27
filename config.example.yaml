@@ -85,6 +85,8 @@ mcp:
       env: {}
       init_timeout: 120
       timeout: 60
+      use_pty: true
+
 memory:
   auto_extract_entities: true
   compression_max_tokens: 512

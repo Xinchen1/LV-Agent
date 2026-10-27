@@ -1,13 +1,18 @@
-FROM docker.m.daocloud.io/library/python:3.12-slim
+FROM docker.1ms.run/library/golang:1.24
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 使用阿里云镜像源并禁用代理
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list && \
+    echo 'Acquire::http::Proxy "false";' > /etc/apt/apt.conf.d/99no-proxy && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
     curl wget git jq \
     fonts-noto-cjk fonts-noto-cjk-extra \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
     "openai>=1.0.0" \
     "anthropic>=0.40.0" \
     "pyyaml>=6.0" \
@@ -27,7 +32,7 @@ RUN pip install --no-cache-dir \
     "reportlab>=4.0.0" \
     "fonttools>=4.50.0"
 
-RUN playwright install chromium --with-deps
+RUN python3 -m playwright install chromium --with-deps
 
 COPY agent_project /app/agent_project
 COPY web/server.py /app/web/server.py
@@ -35,9 +40,13 @@ COPY web/frontend /app/web/frontend
 COPY config.yaml /app/config.yaml
 COPY config.example.yaml /app/config.example.yaml
 
-RUN mkdir -p /app/data/web_workspaces /app/logs
+RUN mkdir -p /app/data/web_workspaces /app/logs \
+    && useradd -u 1000 -m -s /bin/bash appuser \
+    && chown -R appuser:appuser /app
 
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["python", "web/server.py"]
+USER appuser
+
+CMD ["lv"]

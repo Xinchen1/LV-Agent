@@ -159,18 +159,18 @@ def test_render_items_sections_order_and_nonce():
         InjectItem(key="leader:a", kind="leader", text="验收: 加回归用例",
                    meta={"author_name": "姜尚", "addendum_kind": "acceptance", "task_id": "73877bda-x", "addendum_id": "abcdef12-y"}),
     ]
-    text = render_items(items, "***REMOVED-PASSCODE***")
+    text = render_items(items, "test-passcode")
     i_owner = text.index(OWNER_PREFIX_HEAD)
     i_leader = text.index(LEADER_PREFIX_HEAD)
     i_hall = text.index(HALL_PREFIX.rstrip("\n"))
     i_mail = text.index(MAIL_PREFIX.rstrip("\n"))
     assert i_owner < i_leader < i_hall < i_mail
-    assert "口令 ***REMOVED-PASSCODE***" in text
+    assert "口令 test-passcode" in text
     assert "姜尚 · 验收 · 任务 73877bda · addendum abcdef12" in text
     assert "改走方案 B" in text and "#1 甲：@你 在吗" in text
     # 契约块同口令、同抬头
-    contract = contract_text("***REMOVED-PASSCODE***")
-    assert f"{OWNER_PREFIX_HEAD}，口令 ***REMOVED-PASSCODE***）" in contract
+    contract = contract_text("test-passcode")
+    assert f"{OWNER_PREFIX_HEAD}，口令 test-passcode）" in contract
     assert "hall_post" in contract
 
 

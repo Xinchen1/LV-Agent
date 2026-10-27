@@ -23,9 +23,13 @@ COPY web /app/web
 COPY config.yaml /app/config.yaml
 COPY config.example.yaml /app/config.example.yaml
 
-RUN mkdir -p /app/data/web_workspaces /app/logs
+RUN mkdir -p /app/data/web_workspaces /app/logs \
+    && useradd -u 1000 -m -s /bin/bash appuser \
+    && chown -R appuser:appuser /app
 
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["python", "web/server.py"]
+USER appuser
+
+CMD ["lv"]
