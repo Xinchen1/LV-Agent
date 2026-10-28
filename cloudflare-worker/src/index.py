@@ -2,13 +2,10 @@
 
 Exposes a POST /run endpoint that accepts:
   {"task": "your task here"}
-with header:
-  Authorization: Bearer <WORKER_TOKEN>
 
 Returns the agent's response after one turn of processing.
-Auth: requires WORKER_TOKEN env/secret to be set; requests without a
-matching Bearer token get 401. Model credentials come from
-OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL only — never hardcoded.
+Model credentials come from OPENAI_API_KEY / OPENAI_BASE_URL /
+OPENAI_MODEL only — never hardcoded.
 """
 
 from __future__ import annotations
@@ -307,20 +304,6 @@ async def on_fetch(request, env, ctx):
 
     # Run agent endpoint
     if path == "/run" and method == "POST":
-        expected_token = os.getenv("WORKER_TOKEN", "")
-        if not expected_token:
-            return Response(
-                json({"error": "WORKER_TOKEN not configured on server"}),
-                status=503,
-                headers={"Content-Type": "application/json"},
-            )
-        auth_header = (getattr(request, "headers", None) or {}).get("Authorization", "")
-        if auth_header != f"Bearer {expected_token}":
-            return Response(
-                json({"error": "Unauthorized"}),
-                status=401,
-                headers={"Content-Type": "application/json"},
-            )
         if not os.getenv("OPENAI_API_KEY"):
             return Response(
                 json({"error": "OPENAI_API_KEY not configured on server"}),

@@ -1,11 +1,6 @@
 """LV Agent web server — FastAPI + WebSocket bridge to OpenMythosAgent.
 
 Run:  python web/server.py  (or: uvicorn web.server:app --host 0.0.0.0 --port 8787)
-
-Security: /ws requires ?token=<LV_WEB_TOKEN> when that env is set; without it
-only loopback clients are accepted. LV_WEB_ALLOW_INSECURE=1 restores the old
-open mode (local/intranet only). Server-side shell tools (bash_exec/code_exec)
-are off unless LV_WEB_SHELL=1.
 """
 from __future__ import annotations
 
@@ -36,13 +31,6 @@ WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="LV Agent Web")
 
-#: 公网暴露时强制要求 ?token=<LV_WEB_TOKEN>；未设置时仅放行本机回环访问。
-#: LV_WEB_ALLOW_INSECURE=1 可显式退回旧的开放模式（仅限本地/内网调试）。
-WEB_TOKEN = os.environ.get("LV_WEB_TOKEN", "")
-ALLOW_INSECURE = os.environ.get("LV_WEB_ALLOW_INSECURE", "") == "1"
-#: 服务器侧 shell 工具默认关闭，LV_WEB_SHELL=1 才放开（防匿名驱动命令执行）。
-SHELL_TOOLS = os.environ.get("LV_WEB_SHELL", "") == "1"
-
 DEFAULT_CONFIG: Dict[str, Any] = {
     "backend": os.environ.get("LV_BACKEND", "openai"),
     "base_url": os.environ.get("LV_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1"),
@@ -51,19 +39,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "temperature": 0.7,
     "max_tokens": 4096,
 }
-
-
-async def _authorize(ws: WebSocket) -> None:
-    if ALLOW_INSECURE:
-        return
-    if WEB_TOKEN:
-        if ws.query_params.get("token", "") == WEB_TOKEN:
-            return
-    else:
-        host = (ws.client.host if ws.client else "") or ""
-        if host in ("127.0.0.1", "::1", "localhost"):
-            return
-    await ws.close(code=1008)
 
 
 class RemoteFileOpsTool:
@@ -163,19 +138,8 @@ class Session:
             cfg.tools.file_ops.allowed_dirs = [str(ws_dir)]
         except Exception:
             pass
-        # 工具注册口径 = tools.enabled 白名单 ∪ section.enabled=True 的项(见
-        # config.ToolsConfig.enabled_tools), 因此必须两处都关才能真正摘除.
         try:
-            if not SHELL_TOOLS:
-                drop = ("bash_exec", "python_exec", "code_exec")
-                cfg.tools.enabled = [t for t in cfg.tools.enabled if t not in drop]
-                for name in drop:
-                    section = getattr(cfg.tools, name, None)
-                    if section is not None:
-                        section["enabled"] = False
-            else:
-                cfg.tools.code_exec.enabled = True
-                cfg.tools.bash_exec.enabled = True
+            cfg.tools.code_exec.enabled = True
             cfg.tools.code_exec.timeout = 30
         except Exception:
             pass
@@ -262,7 +226,7 @@ class Session:
             if os.path.isfile(p) and p not in self.artifacts:
                 self.artifacts.append(p)
 
-        scan_dirs = [self.workspace]
+        scan_dirs = [self.workspace, Path("/app"), Path.cwd()]
         for d in scan_dirs:
             if not d or not d.exists():
                 continue
@@ -300,12 +264,11 @@ class Session:
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"ok": True, "ver": "2026-10-05-v3", "auth_required": bool(WEB_TOKEN)})
+    return JSONResponse({"ok": True, "workspaces": str(WORKSPACE_ROOT), "ver": "2026-09-07-v2"})
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await _authorize(ws)
     await ws.accept()
     session = Session()
     loop = asyncio.get_running_loop()
